@@ -1,3 +1,4 @@
+// Command belay is the CLI entry point for the belay agentic engineering graph.
 package main
 
 import (
