@@ -1,0 +1,131 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  build-test:
+    name: Build and Test (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@e2f20987646fbe3b7d0e1476191a133a37105c14 # v4.1.7
+        with:
+          fetch-depth: 0
+
+      - name: Set up Go
+        uses: actions/setup-go@41dfa10bad66e883b2c33b2b446b4e3fe4c55381 # v4.0.1
+        with:
+          go-version: '1.26.3'
+          cache: true
+
+      - name: Build
+        run: make build
+
+      - name: Vet
+        run: go vet ./...
+
+      - name: Test with race detector and coverage
+        run: go test ./... -race -coverprofile=coverage.out -covermode=atomic
+
+      - name: Upload coverage artifact
+        uses: actions/upload-artifact@c7d193f32edcadf64c705ce4f91bc1cf9b8527ce # v4.0.1
+        if: always()
+        with:
+          name: coverage-${{ matrix.os }}
+          path: coverage.out
+          retention-days: 5
+
+  lint:
+    name: Lint
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@e2f20987646fbe3b7d0e1476191a133a37105c14 # v4.1.7
+
+      - name: Set up Go
+        uses: actions/setup-go@41dfa10bad66e883b2c33b2b446b4e3fe4c55381 # v4.0.1
+        with:
+          go-version: '1.26.3'
+          cache: true
+
+      - name: golangci-lint
+        uses: golangci/golangci-lint-action@08e9c4ff2ed1108e85f62f6fe0b3b15e1c37df3c # v3.7.0
+        with:
+          version: v2.12.2
+          args: --timeout=5m
+
+  tidy-check:
+    name: Go Mod Tidy Check
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@e2f20987646fbe3b7d0e1476191a133a37105c14 # v4.1.7
+
+      - name: Set up Go
+        uses: actions/setup-go@41dfa10bad66e883b2c33b2b446b4e3fe4c55381 # v4.0.1
+        with:
+          go-version: '1.26.3'
+          cache: false
+
+      - name: Verify go.mod is tidy
+        run: |
+          go mod tidy
+          git diff --exit-code go.mod go.sum
+
+  verify-boundary:
+    name: Verify Public API Boundary
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@e2f20987646fbe3b7d0e1476191a133a37105c14 # v4.1.7
+
+      - name: Set up Go
+        uses: actions/setup-go@41dfa10bad66e883b2c33b2b446b4e3fe4c55381 # v4.0.1
+        with:
+          go-version: '1.26.3'
+          cache: true
+
+      - name: Run boundary test
+        # Must name the test exactly: `-run Boundary` matches nothing, so the job
+        # would pass while running zero tests. No continue-on-error either — this
+        # guard is the only thing enforcing that pkg/belay stays free of internal/.
+        run: go test ./pkg/belay/... -run TestNoInternalImports -v
+
+  zero-token-guard:
+    name: Zero Token Guard
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@e2f20987646fbe3b7d0e1476191a133a37105c14 # v4.1.7
+
+      - name: Assert no workflow injects agent credentials
+        # Match only real credential *injection* — an `env:`/`with:` binding or a
+        # `secrets.` reference — not prose. A bare grep for the variable name
+        # matches this very step and can never pass.
+        run: |
+          if grep -rnE '(env|with):|secrets\.' .github/workflows/ \
+               | grep -E 'ANTHROPIC_API_KEY|CLAUDE_API_KEY|OPENAI_API_KEY'; then
+            echo "ERROR: a workflow injects agent credentials into the build."
+            echo "CI must never make live agent calls — every run costs real money."
+            exit 1
+          fi
+          echo "OK: no workflow injects agent credentials."
+
+      # T43 anchor: once the replay/cassette layer lands, add a runtime assertion
+      # that no test opens a network connection to an agent provider. Until then
+      # the static check above is the only guard.
