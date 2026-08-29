@@ -1,0 +1,6 @@
+# Scratch output directories created by manual `go run ./inject.go --out=...`
+# invocations during local development. inject_test.go uses t.TempDir(),
+# which the test framework cleans up on its own and never writes here.
+/tmp-inject-*/
+*.test
+*.out
