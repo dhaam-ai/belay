@@ -1,0 +1,6 @@
+# Output from run.sh
+out.json
+
+# Scratch files
+*.tmp
+*.log
