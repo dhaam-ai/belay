@@ -1,0 +1,9 @@
+{
+  "name": "yarn-fixture",
+  "scripts": {
+    "test": "vitest run --coverage"
+  },
+  "devDependencies": {
+    "vitest": "^1.6.0"
+  }
+}

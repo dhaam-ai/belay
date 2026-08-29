@@ -1,0 +1,4 @@
+{
+  "name": "malformed-fixture",
+  "scripts": { "test": "vitest run" },
+}

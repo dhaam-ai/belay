@@ -1,0 +1,5 @@
+[project]
+name = "fixture-polyglot"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

@@ -1,0 +1,6 @@
+{
+  "name": "pnpm-fixture",
+  "scripts": {
+    "test": "node --test test/"
+  }
+}

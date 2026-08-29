@@ -1,0 +1,7 @@
+{
+  "name": "corepack-fixture",
+  "packageManager": "pnpm@9.1.0+sha512.7c2ea0",
+  "scripts": {
+    "test": "cross-env NODE_ENV=test ./node_modules/.bin/vitest run"
+  }
+}

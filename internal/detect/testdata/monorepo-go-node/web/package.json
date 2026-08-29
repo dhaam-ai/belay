@@ -1,0 +1,5 @@
+{
+  "name": "fixture-monorepo-web",
+  "scripts": { "test": "jest" },
+  "devDependencies": { "jest": "^29.7.0" }
+}

@@ -1,0 +1,9 @@
+{
+  "name": "bun-fixture",
+  "scripts": {
+    "test": "mocha --reporter spec"
+  },
+  "devDependencies": {
+    "mocha": "^10.4.0"
+  }
+}
