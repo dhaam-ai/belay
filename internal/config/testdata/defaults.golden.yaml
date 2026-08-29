@@ -1,0 +1,36 @@
+version: 1
+agent:
+    backend: claude-code
+    model: sonnet
+    max_turns: 30
+    mode: live
+graph:
+    give_up: 3
+    max_steps: 60
+    node_timeout: 15m0s
+    approval: true
+test:
+    runner: auto
+    custom_cmd: ""
+review:
+    mode: lint
+    fail_on: major
+    sonar:
+        runner: docker
+        image: sonarsource/sonar-scanner-cli
+        quality_gate_wait: true
+        quality_gate_timeout: 300
+    ai:
+        mcp:
+            mode: cloud
+            url: ""
+            image: sonarsource/sonar-mcp-server
+budget:
+    max_usd: 5
+    max_tokens: 2000000
+    on_exceed: abort
+fanout:
+    enabled: false
+    candidates: 3
+    isolator: dircopy
+    select: fewest_issues
