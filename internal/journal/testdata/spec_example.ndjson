@@ -1,0 +1,2 @@
+{"seq":7,"attempt":1,"node":"test","event":"node_started","ts":"2026-08-29T10:31:04.221Z"}
+{"seq":7,"attempt":1,"node":"test","event":"node_finished","ts":"2026-08-29T10:31:12.642Z","duration_ms":8421,"status":"ok","next":"fix","usage":{"input_tokens":0,"output_tokens":0,"usd":0,"estimated":false},"note":""}
