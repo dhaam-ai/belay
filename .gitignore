@@ -1,0 +1,30 @@
+# Go binaries and build artifacts
+/bin/
+/dist/
+*.exe
+*.exe~
+*.dll
+*.so
+*.so.*
+*.dylib
+
+# Runtime state directory
+.belay/
+
+# Test artifacts
+*.test
+*.out
+
+# IDE and editor directories
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# Test cassettes/fixtures
+*.cassette.tmp
+
+# Go module cache
+vendor/

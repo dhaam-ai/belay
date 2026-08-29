@@ -1,0 +1,22 @@
+# <type>: <subject>
+#
+# <body>
+#
+# Allowed types:
+#  feat     (new feature)
+#  fix      (bug fix)
+#  refactor (code change without feature or fix)
+#  test     (adding/updating tests)
+#  docs     (documentation only)
+#  chore    (tooling, dependencies, config)
+#
+# Subject line rules:
+#  - Use imperative mood ("add", not "added" or "adds")
+#  - Do not capitalize first letter
+#  - Do not end with period
+#  - Limit to ~50 characters
+#
+# Body rules:
+#  - Explain *why* the change, not *what*
+#  - Limit lines to ~72 characters
+#  - Separate subject and body with blank line
