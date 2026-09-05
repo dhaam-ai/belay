@@ -1,0 +1,4 @@
+ERROR: Error during SonarScanner execution
+ERROR: Not authorized. Analyzing this project requires authentication. Please check the user token in the property 'sonar.token' or the credentials in the properties 'sonar.login' and 'sonar.password'.
+ERROR:
+ERROR: Re-run SonarScanner using the -X switch to enable full debug logging.

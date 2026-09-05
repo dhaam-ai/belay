@@ -1,0 +1,3 @@
+Unable to find image 'sonarsource/sonar-scanner-cli:no-such-tag' locally
+docker: Error response from daemon: manifest unknown: manifest tagged by "no-such-tag" is not found.
+See 'docker run --help'.

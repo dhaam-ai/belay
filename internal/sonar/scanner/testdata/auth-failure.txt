@@ -1,0 +1,7 @@
+INFO: Scanner configuration file: /opt/sonar-scanner/conf/sonar-scanner.properties
+INFO: SonarScanner CLI 7.0.2.4839
+INFO: Java 17.0.13 Alpine (64-bit)
+INFO: Analyzing on SonarQube server 2025.1.0.102418
+INFO: Load global settings
+INFO: EXECUTION FAILURE
+INFO: Total time: 1.402s

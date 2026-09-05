@@ -1,0 +1,28 @@
+{
+  "jsonrpc": "2.0",
+  "id": 0,
+  "result": {
+    "tools": [
+      {
+        "name": "list_quality_gates",
+        "description": "List all quality gates in my SonarQube.",
+        "inputSchema": { "type": "object", "properties": {} }
+      },
+      {
+        "name": "get_raw_source",
+        "description": "Get source code as raw text from SonarQube.",
+        "inputSchema": { "type": "object", "properties": { "key": { "type": "string" } }, "required": ["key"] }
+      },
+      {
+        "name": "get_project_quality_gate_status",
+        "description": "Get the quality gate status for a project.",
+        "inputSchema": { "type": "object", "properties": {} }
+      },
+      {
+        "name": "search_sonar_issues_in_projects",
+        "description": "Search for SonarQube issues in my organization's projects.",
+        "inputSchema": { "type": "object", "properties": {} }
+      }
+    ]
+  }
+}

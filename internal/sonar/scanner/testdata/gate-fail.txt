@@ -1,0 +1,34 @@
+INFO: Scanner configuration file: /opt/sonar-scanner/conf/sonar-scanner.properties
+INFO: Project root configuration file: NONE
+INFO: SonarScanner CLI 7.0.2.4839
+INFO: Java 17.0.13 Alpine (64-bit)
+INFO: Linux 6.10.14-linuxkit aarch64
+INFO: User cache: /opt/sonar-scanner/.sonar/cache
+INFO: Analyzing on SonarQube server 2025.1.0.102418
+INFO: Default locale: "en_US", source code encoding: "UTF-8"
+INFO: Process project properties
+INFO: Project key: belay-demo
+INFO: Base dir: /usr/src
+INFO: Working dir: /tmp/.scannerwork
+INFO: Load quality profiles
+INFO: Load active rules
+INFO: Indexing files...
+INFO: Project configuration:
+INFO: 42 files indexed
+INFO: ------------- Run sensors on module belay-demo
+INFO: Sensor Go Analyzer [go]
+INFO: Sensor Go Analyzer [go] (done) | time=1331ms
+INFO: Analysis report generated in 91ms, dir size=147.8 kB
+INFO: Analysis report compressed in 44ms, zip size=32.6 kB
+INFO: Analysis report uploaded in 128ms
+INFO: ANALYSIS SUCCESSFUL, you can find the results at: https://sonar.example.test/dashboard?id=belay-demo
+INFO: Note that you will be able to access the updated dashboard once the server has processed the submitted analysis report
+INFO: More about the report processing at https://sonar.example.test/api/ce/task?id=AZk3Q1belaydemo
+INFO: ------------- Check Quality Gate status
+INFO: Waiting for the analysis report to be processed (max 300s)
+INFO: EXECUTION FAILURE
+INFO: Total time: 21.107s
+ERROR: Error during SonarScanner execution
+QUALITY GATE STATUS: FAILED - View details on https://sonar.example.test/dashboard?id=belay-demo
+ERROR:
+ERROR: Re-run SonarScanner using the -X switch to enable full debug logging.

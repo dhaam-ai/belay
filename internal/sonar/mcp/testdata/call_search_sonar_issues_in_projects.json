@@ -1,0 +1,45 @@
+{
+  "jsonrpc": "2.0",
+  "id": 0,
+  "result": {
+    "content": [
+      {
+        "type": "text",
+        "text": "{\"total\":2,\"p\":1,\"ps\":100,\"issues\":[{\"key\":\"AZ1\",\"rule\":\"go:S1192\",\"severity\":\"MINOR\",\"impacts\":[{\"softwareQuality\":\"MAINTAINABILITY\",\"severity\":\"LOW\"}],\"component\":\"belay-dev_belay:internal/sonar/mcp/client.go\",\"line\":42,\"message\":\"Define a constant instead of duplicating this literal.\",\"effort\":\"10min\",\"status\":\"OPEN\"},{\"key\":\"AZ2\",\"rule\":\"go:S2259\",\"severity\":\"MAJOR\",\"impacts\":[{\"softwareQuality\":\"RELIABILITY\",\"severity\":\"HIGH\"},{\"softwareQuality\":\"MAINTAINABILITY\",\"severity\":\"MEDIUM\"}],\"component\":\"belay-dev_belay:internal/sonar/mcp/transport.go\",\"line\":118,\"message\":\"A null pointer could be dereferenced here.\",\"effort\":\"20min\",\"status\":\"OPEN\"}]}"
+      }
+    ],
+    "structuredContent": {
+      "total": 2,
+      "p": 1,
+      "ps": 100,
+      "issues": [
+        {
+          "key": "AZ1",
+          "rule": "go:S1192",
+          "severity": "MINOR",
+          "impacts": [{ "softwareQuality": "MAINTAINABILITY", "severity": "LOW" }],
+          "component": "belay-dev_belay:internal/sonar/mcp/client.go",
+          "line": 42,
+          "message": "Define a constant instead of duplicating this literal.",
+          "effort": "10min",
+          "status": "OPEN"
+        },
+        {
+          "key": "AZ2",
+          "rule": "go:S2259",
+          "severity": "MAJOR",
+          "impacts": [
+            { "softwareQuality": "RELIABILITY", "severity": "HIGH" },
+            { "softwareQuality": "MAINTAINABILITY", "severity": "MEDIUM" }
+          ],
+          "component": "belay-dev_belay:internal/sonar/mcp/transport.go",
+          "line": 118,
+          "message": "A null pointer could be dereferenced here.",
+          "effort": "20min",
+          "status": "OPEN"
+        }
+      ]
+    },
+    "isError": false
+  }
+}

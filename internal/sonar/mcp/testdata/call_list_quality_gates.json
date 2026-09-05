@@ -1,0 +1,19 @@
+{
+  "jsonrpc": "2.0",
+  "id": 0,
+  "result": {
+    "content": [
+      {
+        "type": "text",
+        "text": "{\"qualityGates\":[{\"id\":\"AYRrQ1\",\"name\":\"Sonar way\",\"isDefault\":true,\"isBuiltIn\":true},{\"id\":\"AYRrQ2\",\"name\":\"belay-strict\",\"isDefault\":false,\"isBuiltIn\":false}]}"
+      }
+    ],
+    "structuredContent": {
+      "qualityGates": [
+        { "id": "AYRrQ1", "name": "Sonar way", "isDefault": true, "isBuiltIn": true },
+        { "id": "AYRrQ2", "name": "belay-strict", "isDefault": false, "isBuiltIn": false }
+      ]
+    },
+    "isError": false
+  }
+}

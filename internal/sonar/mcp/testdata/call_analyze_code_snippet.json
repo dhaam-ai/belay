@@ -1,0 +1,29 @@
+{
+  "jsonrpc": "2.0",
+  "id": 0,
+  "result": {
+    "content": [
+      {
+        "type": "text",
+        "text": "{\"issues\":[{\"key\":\"snippet-1\",\"rule\":\"python:S1481\",\"severity\":\"MINOR\",\"impacts\":[{\"softwareQuality\":\"MAINTAINABILITY\",\"severity\":\"LOW\"}],\"component\":\"snippet\",\"line\":3,\"message\":\"Remove this unused local variable.\",\"effort\":\"5min\",\"status\":\"OPEN\"}],\"deprecationNotice\":\"analyze_code_snippet is deprecated; prefer scanning the project directly.\"}"
+      }
+    ],
+    "structuredContent": {
+      "issues": [
+        {
+          "key": "snippet-1",
+          "rule": "python:S1481",
+          "severity": "MINOR",
+          "impacts": [{ "softwareQuality": "MAINTAINABILITY", "severity": "LOW" }],
+          "component": "snippet",
+          "line": 3,
+          "message": "Remove this unused local variable.",
+          "effort": "5min",
+          "status": "OPEN"
+        }
+      ],
+      "deprecationNotice": "analyze_code_snippet is deprecated; prefer scanning the project directly."
+    },
+    "isError": false
+  }
+}

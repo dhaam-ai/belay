@@ -1,0 +1,46 @@
+{
+  "jsonrpc": "2.0",
+  "id": 0,
+  "result": {
+    "tools": [
+      {
+        "name": "list_quality_gates",
+        "description": "List all quality gates in my SonarQube.",
+        "inputSchema": { "type": "object", "properties": {} }
+      },
+      {
+        "name": "get_raw_source",
+        "description": "Get source code as raw text from SonarQube.",
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "key": { "type": "string" },
+            "branch": { "type": "string" },
+            "pullRequest": { "type": "string" }
+          },
+          "required": ["key"]
+        }
+      },
+      {
+        "name": "analyze_code_snippet",
+        "description": "Analyze a file or code snippet with SonarQube analyzers to identify code quality and security issues.",
+        "inputSchema": { "type": "object", "properties": {} }
+      },
+      {
+        "name": "get_project_quality_gate_status",
+        "description": "Get the quality gate status for a project.",
+        "inputSchema": { "type": "object", "properties": {} }
+      },
+      {
+        "name": "search_sonar_issues_in_projects",
+        "description": "Search for SonarQube issues in my organization's projects.",
+        "inputSchema": { "type": "object", "properties": {} }
+      },
+      {
+        "name": "list_branches",
+        "description": "List branches for a project. Not one of the five tools belay's MCP client wraps; present here to prove an extra, unused advertised tool does not confuse the advertised-tool gate.",
+        "inputSchema": { "type": "object", "properties": {} }
+      }
+    ]
+  }
+}
