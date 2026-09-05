@@ -1,0 +1,22 @@
+{
+  "jsonrpc": "2.0",
+  "id": 0,
+  "result": {
+    "content": [
+      {
+        "type": "text",
+        "text": "{\"projectStatus\":{\"status\":\"OK\",\"conditions\":[{\"status\":\"OK\",\"metricKey\":\"new_coverage\",\"comparator\":\"LT\",\"errorThreshold\":\"80\",\"actualValue\":\"93.4\"}],\"ignoredConditions\":false}}"
+      }
+    ],
+    "structuredContent": {
+      "projectStatus": {
+        "status": "OK",
+        "conditions": [
+          { "status": "OK", "metricKey": "new_coverage", "comparator": "LT", "errorThreshold": "80", "actualValue": "93.4" }
+        ],
+        "ignoredConditions": false
+      }
+    },
+    "isError": false
+  }
+}

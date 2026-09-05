@@ -1,0 +1,33 @@
+{
+  "jsonrpc": "2.0",
+  "id": 0,
+  "result": {
+    "tools": [
+      {
+        "name": "get_project_quality_gate_status",
+        "description": "Get the quality gate status for a project.",
+        "inputSchema": { "type": "object", "properties": { "projectKey": { "type": "string" } } }
+      },
+      {
+        "name": "search_sonar_issues_in_projects",
+        "description": "Search for SonarQube issues in my organization's projects.",
+        "inputSchema": { "type": "object", "properties": { "projectKeys": { "type": "array" } } }
+      },
+      {
+        "name": "list_quality_gates",
+        "description": "List all quality gates in my SonarQube. Advertised but never called by this package.",
+        "inputSchema": { "type": "object", "properties": {} }
+      },
+      {
+        "name": "get_raw_source",
+        "description": "Get source code as raw text. Advertised but never called by this package.",
+        "inputSchema": { "type": "object", "properties": {} }
+      },
+      {
+        "name": "analyze_code_snippet",
+        "description": "Analyze a snippet. Advertised but deliberately never called by this package; see the package doc.",
+        "inputSchema": { "type": "object", "properties": {} }
+      }
+    ]
+  }
+}

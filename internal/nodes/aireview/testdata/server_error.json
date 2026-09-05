@@ -1,0 +1,9 @@
+{
+  "jsonrpc": "2.0",
+  "id": 0,
+  "error": {
+    "code": -32603,
+    "message": "Internal error: SonarQube returned 503 Service Unavailable",
+    "data": { "upstreamStatus": 503 }
+  }
+}

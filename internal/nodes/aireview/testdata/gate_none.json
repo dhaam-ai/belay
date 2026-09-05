@@ -1,0 +1,16 @@
+{
+  "jsonrpc": "2.0",
+  "id": 0,
+  "result": {
+    "content": [
+      {
+        "type": "text",
+        "text": "{\"projectStatus\":{\"status\":\"NONE\",\"conditions\":[],\"ignoredConditions\":false}}"
+      }
+    ],
+    "structuredContent": {
+      "projectStatus": { "status": "NONE", "conditions": [], "ignoredConditions": false }
+    },
+    "isError": false
+  }
+}

@@ -1,7 +1,6 @@
 package nodes_test
 
 import (
-	"errors"
 	"testing"
 
 	"github.com/belay-dev/belay/internal/config"
@@ -16,7 +15,7 @@ import (
 func TestEveryRoutableNameIsRegistered(t *testing.T) {
 	t.Parallel()
 
-	r, err := nodes.Default(config.Default(), "/repos/app")
+	r, err := nodes.Default(config.Default())
 	if err != nil {
 		t.Fatalf("Default: %v", err)
 	}
@@ -38,7 +37,7 @@ func TestEveryRoutableNameIsRegistered(t *testing.T) {
 func TestEntryPointIsRegistered(t *testing.T) {
 	t.Parallel()
 
-	r, err := nodes.Default(config.Default(), "/repos/app")
+	r, err := nodes.Default(config.Default())
 	if err != nil {
 		t.Fatalf("Default: %v", err)
 	}
@@ -47,18 +46,27 @@ func TestEntryPointIsRegistered(t *testing.T) {
 	}
 }
 
-// Fanout is refused up front rather than part way through. Discovering the
-// missing join node after N candidate workspaces have been created means
-// paying N times the budget for a run that cannot finish.
-func TestFanoutIsRefusedBeforeSpending(t *testing.T) {
+// With fanout enabled the graph must carry both halves of best-of-N.
+// Registering fanout without join would create N candidate workspaces, spend N
+// times the budget, and then die routing to a node nobody registered.
+func TestFanoutRegistersBothHalves(t *testing.T) {
 	t.Parallel()
 
 	cfg := config.Default()
 	cfg.Fanout.Enabled = true
 	cfg.Fanout.Candidates = 3
 
-	if _, err := nodes.Default(cfg, "/repos/app"); !errors.Is(err, nodes.ErrFanoutUnavailable) {
-		t.Fatalf("Default with fanout enabled = %v, want ErrFanoutUnavailable", err)
+	r, err := nodes.Default(cfg)
+	if err != nil {
+		t.Fatalf("Default with fanout enabled: %v", err)
+	}
+	for _, name := range []string{graph.NodeFanout, graph.NodeJoin} {
+		if _, err := r.Get(name); err != nil {
+			t.Errorf("Get(%q): %v", name, err)
+		}
+	}
+	if got, want := r.Len(), 9; got != want {
+		t.Errorf("Len() = %d, want %d: %v", got, want, r.Names())
 	}
 }
 
@@ -68,7 +76,7 @@ func TestFanoutIsRefusedBeforeSpending(t *testing.T) {
 func TestNoUnreachableOrDuplicateNodes(t *testing.T) {
 	t.Parallel()
 
-	r, err := nodes.Default(config.Default(), "/repos/app")
+	r, err := nodes.Default(config.Default())
 	if err != nil {
 		t.Fatalf("Default: %v", err)
 	}
@@ -79,10 +87,11 @@ func TestNoUnreachableOrDuplicateNodes(t *testing.T) {
 		}
 		seen[n] = true
 	}
-	// fanout and join are deliberately absent until join exists.
+	// With fanout disabled -- the default -- neither half is registered, so
+	// a graph cannot route into a best-of-N the user did not ask to pay for.
 	for _, absent := range []string{graph.NodeFanout, graph.NodeJoin} {
 		if seen[absent] {
-			t.Errorf("%q is registered, but best-of-N is not runnable yet", absent)
+			t.Errorf("%q is registered with fanout disabled", absent)
 		}
 	}
 }

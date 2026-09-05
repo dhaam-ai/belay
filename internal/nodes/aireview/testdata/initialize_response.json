@@ -1,0 +1,9 @@
+{
+  "jsonrpc": "2.0",
+  "id": 0,
+  "result": {
+    "protocolVersion": "2025-06-18",
+    "serverInfo": { "name": "sonar-mcp-server", "version": "1.4.0" },
+    "capabilities": { "tools": { "listChanged": true } }
+  }
+}

@@ -1,0 +1,10 @@
+{
+  "jsonrpc": "2.0",
+  "id": 0,
+  "result": {
+    "content": [
+      { "type": "text", "text": "{\"total\":0,\"p\":1,\"ps\":500,\"issues\":[]}" }
+    ],
+    "isError": false
+  }
+}

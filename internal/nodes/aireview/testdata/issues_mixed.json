@@ -1,0 +1,13 @@
+{
+  "jsonrpc": "2.0",
+  "id": 0,
+  "result": {
+    "content": [
+      {
+        "type": "text",
+        "text": "{\"total\":5,\"p\":1,\"ps\":500,\"issues\":[{\"key\":\"AZ-1\",\"rule\":\"go:S2068\",\"severity\":\"BLOCKER\",\"impacts\":[{\"softwareQuality\":\"SECURITY\",\"severity\":\"BLOCKER\"}],\"component\":\"belay-demo:internal/auth/token.go\",\"line\":31,\"message\":\"Revoke and change this password, as it is compromised.\",\"effort\":\"30min\",\"status\":\"OPEN\"},{\"key\":\"AZ-2\",\"rule\":\"go:S2259\",\"severity\":\"MAJOR\",\"impacts\":[{\"softwareQuality\":\"RELIABILITY\",\"severity\":\"HIGH\"},{\"softwareQuality\":\"MAINTAINABILITY\",\"severity\":\"MEDIUM\"}],\"component\":\"belay-demo:internal/store/pg.go\",\"line\":118,\"message\":\"A null pointer could be dereferenced here.\",\"effort\":\"20min\",\"status\":\"CONFIRMED\"},{\"key\":\"AZ-3\",\"rule\":\"go:S1192\",\"severity\":\"MAJOR\",\"impacts\":[],\"component\":\"belay-demo:cmd/demo/main.go\",\"line\":7,\"message\":\"Define a constant instead of duplicating this literal.\",\"effort\":\"10min\",\"status\":\"OPEN\"},{\"key\":\"AZ-4\",\"rule\":\"go:S9999\",\"severity\":\"NOT_A_SEVERITY\",\"impacts\":[],\"component\":\"belay-demo:internal/store/pg.go\",\"line\":0,\"message\":\"A finding whose severity vocabulary this belay build does not recognize.\",\"effort\":\"\",\"status\":\"OPEN\"},{\"key\":\"AZ-5\",\"rule\":\"common-go:InsufficientCommentDensity\",\"severity\":\"INFO\",\"impacts\":[{\"softwareQuality\":\"MAINTAINABILITY\",\"severity\":\"INFO\"}],\"component\":\"another-project:internal/other.go\",\"line\":0,\"message\":\"Insufficient comment density.\",\"effort\":\"\",\"status\":\"OPEN\"}]}"
+      }
+    ],
+    "isError": false
+  }
+}

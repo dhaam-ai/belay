@@ -1,0 +1,23 @@
+{
+  "jsonrpc": "2.0",
+  "id": 0,
+  "result": {
+    "content": [
+      {
+        "type": "text",
+        "text": "{\"projectStatus\":{\"status\":\"ERROR\",\"conditions\":[{\"status\":\"ERROR\",\"metricKey\":\"new_reliability_rating\",\"comparator\":\"GT\",\"errorThreshold\":\"1\",\"actualValue\":\"4\"},{\"status\":\"ERROR\",\"metricKey\":\"new_duplicated_lines_density\",\"comparator\":\"GT\",\"errorThreshold\":\"3\",\"actualValue\":\"11.5\"}],\"ignoredConditions\":false}}"
+      }
+    ],
+    "structuredContent": {
+      "projectStatus": {
+        "status": "ERROR",
+        "conditions": [
+          { "status": "ERROR", "metricKey": "new_reliability_rating", "comparator": "GT", "errorThreshold": "1", "actualValue": "4" },
+          { "status": "ERROR", "metricKey": "new_duplicated_lines_density", "comparator": "GT", "errorThreshold": "3", "actualValue": "11.5" }
+        ],
+        "ignoredConditions": false
+      }
+    },
+    "isError": false
+  }
+}
