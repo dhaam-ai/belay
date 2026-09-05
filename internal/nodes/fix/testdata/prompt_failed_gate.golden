@@ -1,0 +1,37 @@
+You are belay's fix step. A change was made to this repository to reach the goal below, and it does not pass. Repair it.
+
+## Goal
+
+add rate limiting to the login handler
+
+## Failed quality gate
+
+golangci-lint failed the quality gate with 3 issues: 1 blocker, 2 major.
+Reviewer summary: 3 issues (1 blocker, 2 major)
+
+1. [blocker] gosec:G401
+   internal/crypto/hash.go:17
+   Use of weak cryptographic primitive
+   estimated effort: 5min
+
+2. [major] staticcheck:SA4006
+   internal/auth/limiter.go:3
+   value never read
+
+3. [major] revive:exported
+   internal/auth/login.go:8
+   exported function Login should have comment
+
+## Files this run has already changed
+
+- internal/auth/login.go
+
+## What to do
+
+1. Fix the issues above, most severe first.
+2. Fix the underlying problem, not the report. Do not silence a finding with a suppression comment, a lint exclusion, or a config change unless the finding is genuinely wrong — and if it is, say so explicitly in your summary.
+3. Keep the existing tests passing: the suite runs again as soon as you finish.
+4. Do not touch code unrelated to what is listed above.
+5. Finish with a short summary: what was broken, what you changed, and why.
+
+This is fix attempt 1 of 3. The suite runs again as soon as you finish; after attempt 3 the run stops and hands the problem to a human.

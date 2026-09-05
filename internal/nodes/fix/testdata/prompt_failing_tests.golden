@@ -1,0 +1,34 @@
+You are belay's fix step. A change was made to this repository to reach the goal below, and it does not pass. Repair it.
+
+## Goal
+
+add rate limiting to the login handler
+
+## Failing tests
+
+2 of 14 tests failed (12 passed).
+
+Full report: artifacts/test.json
+
+1. TestLogin/empty_password
+   internal/auth/login_test.go:42
+   login_test.go:42: status = 500, want 400
+
+2. TestLogin/locked_account
+   internal/auth/login_test.go:61
+   panic: runtime error: index out of range [3] with length 2
+
+## Files this run has already changed
+
+- internal/auth/login.go
+- internal/auth/limiter.go
+
+## What to do
+
+1. Diagnose the root cause of each failure above before changing anything.
+2. Change the least code that makes those tests pass.
+3. Do not delete, skip, rename, or weaken a test to make the suite green. If a test itself is wrong, fix the test and say so explicitly in your summary.
+4. Do not touch code unrelated to what is listed above.
+5. Finish with a short summary: what was broken, what you changed, and why.
+
+This is fix attempt 2 of 3. The suite runs again as soon as you finish; after attempt 3 the run stops and hands the problem to a human.
