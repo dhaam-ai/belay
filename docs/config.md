@@ -9,22 +9,22 @@ Belay looks for `belay.yaml` in the current directory. You can also specify an a
 ## Top-Level Fields
 
 ```yaml
-version: "0.1"
-agent: {...}
-graph: {...}
-test: {...}
-review: {...}
-budget: {...}
-fanout: {...}
+version: 1
+agent: {backend: claude-code, model: sonnet, max_turns: 30, mode: live}
+graph: {give_up: 3, max_steps: 60, node_timeout: 15m, approval: true}
+test: {runner: auto, custom_cmd: ""}
+review: {mode: lint, fail_on: major}
+budget: {max_usd: 5.00, max_tokens: 2000000, on_exceed: abort}
+fanout: {enabled: false, candidates: 3, isolator: dircopy, select: fewest_issues}
 ```
 
 ## `version`
 
-**Type**: String  
-**Default**: (required; no default)  
-**Example**: `"0.1"`
+**Type**: Integer  
+**Default**: `1`  
+**Example**: `1`
 
-The belay configuration version. Used to detect breaking changes in the YAML schema. Must match the running belay version (or be compatible).
+The schema version of this file, not the belay release version. The only accepted value is `1`; anything else is rejected by name so a future schema change fails loudly rather than being half-applied.
 
 ## `agent`
 
@@ -33,18 +33,18 @@ Configuration for the LLM backend that generates code, plans, and fixes.
 ### `agent.backend`
 
 **Type**: String  
-**Default**: `"claude"`  
-**Valid values**: `"claude"`, `"codex"`, `"gemini"`
+**Default**: `"claude-code"`  
+**Shipped values**: `"claude-code"`
 
-The agent backend to use. In v0.1, only `"claude"` is shipped and tested. Other backends are design-verified but not implemented (see [ADR-0005](adr/0005-claude-code-only-backend-v0.md)).
+The agent backend to use. In v0.1 only `"claude-code"` exists; the `belay.AgentBackend` interface is exported so other CLIs can be added, but none is shipped or tested (see [ADR-0005](adr/0005-claude-code-only-backend-v0.md)). The loader does not yet reject unknown names, so a typo surfaces at run time rather than at load time.
 
 ### `agent.model`
 
 **Type**: String  
-**Default**: `"claude-opus-4-1"`  
-**Example**: `"claude-3-5-sonnet"`
+**Default**: `"sonnet"`  
+**Example**: `"sonnet"`, `"opus"`, `"claude-sonnet-5"`
 
-The specific model identifier. Used when creating MCP sessions with the agent backend.
+The model identifier passed straight through to the backend CLI's `--model` flag, so any alias or full identifier that CLI accepts works here. It is also the key the cost estimator uses when the CLI does not report a price, so an unrecognised name makes the budget guard fall back to an error rather than a silent zero.
 
 ### `agent.max_turns`
 
@@ -173,7 +173,7 @@ How to access SonarQube:
 #### `review.sonar.image`
 
 **Type**: String  
-**Default**: `"sonarqube:10-lts"`
+**Default**: `"sonarsource/sonar-scanner-cli"`
 
 Docker image to use when `review.sonar.runner == "docker"`. Example: `"sonarqube:11.0"`.
 
@@ -268,31 +268,31 @@ Whether to enable fanout (parallel code generation with multiple candidates).
 
 **Type**: Integer  
 **Default**: `3`  
-**Range**: `2` to `10`
+**Minimum**: `2`
 
 Number of parallel candidates to generate. Each candidate runs in isolation. Cost multiplies by this factor (3 candidates = 3× budget usage).
 
 ### `fanout.isolator`
 
 **Type**: String  
-**Default**: `"dir"`  
-**Valid values**: `"dir"`, `"worktree"`, `"container"`
+**Default**: `"dircopy"`  
+**Valid values**: `"dircopy"`
 
 Isolation strategy for candidates:
-- `"dir"`: Plain directory copies (cp -r). Works on non-git targets. Uses O(N × repo_size) disk.
-- `"worktree"`: Git worktrees (not yet implemented; see [ADR-0004](adr/0004-directory-copies-for-fanout.md))
-- `"container"`: Run each candidate in a Docker container (not yet implemented)
+- `"dircopy"`: Plain directory copies. Works on non-git targets and uses O(N × repo_size) disk — the trade [ADR-0004](adr/0004-directory-copies-for-fanout.md) accepted deliberately. Note that `.git` is **not** copied, so a candidate cannot run git commands.
+
+Git worktrees and containers are anticipated by the `belay.Isolator` interface but are not implemented; `dircopy` is the only value the loader accepts today.
 
 ### `fanout.select`
 
 **Type**: String  
-**Default**: `"best"`  
-**Valid values**: `"best"`, `"first"`, `"all"`
+**Default**: `"fewest_issues"`  
+**Valid values**: `"fewest_issues"`, `"first_pass"`, `"fastest"`
 
 How to choose the winning candidate after fanout:
-- `"best"`: Select the candidate with the highest quality score (test pass rate + review gate pass)
-- `"first"`: Use the first candidate that passes the quality gate
-- `"all"`: Merge all candidates (experimental; not recommended)
+- `"fewest_issues"`: The passing candidate with the fewest review issues
+- `"first_pass"`: The first candidate that clears the quality gate
+- `"fastest"`: The candidate that finished soonest
 
 ## Environment Variables
 
@@ -320,31 +320,31 @@ belay run
 
 ### `DOCKER_HOST` (optional)
 
-Docker daemon socket URL. Used by SonarQube Docker runner and container isolator. Defaults to Unix socket (`unix:///var/run/docker.sock` on macOS/Linux).
+Read by the `docker` CLI itself, not by belay. It therefore affects the SonarQube Docker runner (`review.sonar.runner: docker`) and the Docker-mode MCP bridge, because both shell out to `docker`. belay has no Docker setting of its own and never parses this value.
 
 ## Example Configuration
 
 ```yaml
-version: "0.1"
+version: 1
 
 agent:
-  backend: "claude"
-  model: "claude-3-5-sonnet"
+  backend: "claude-code"
+  model: "sonnet"
   max_turns: 5
-  mode: "auto"
+  mode: "live"
 
 graph:
-  give_up: false
+  give_up: 3
   max_steps: 20
   node_timeout: "10m"
-  approval: "manual"
+  approval: true
 
 test:
   runner: "auto"
 
 review:
   mode: "lint"
-  fail_on: "error"
+  fail_on: "major"
 
 budget:
   max_usd: 5.0
@@ -354,27 +354,27 @@ budget:
 fanout:
   enabled: true
   candidates: 3
-  isolator: "dir"
-  select: "best"
+  isolator: "dircopy"
+  select: "fewest_issues"
 ```
 
 ## Example Configuration with SonarQube
 
 ```yaml
-version: "0.1"
+version: 1
 
 agent:
-  backend: "claude"
-  model: "claude-3-5-sonnet"
+  backend: "claude-code"
+  model: "sonnet"
 
 review:
   mode: "sonar"
   fail_on: "blocker"
   sonar:
     runner: "docker"
-    image: "sonarqube:10-lts"
-    quality_gate_wait: "30s"
-    quality_gate_timeout: "10m"
+    image: "sonarsource/sonar-scanner-cli"
+    quality_gate_wait: true
+    quality_gate_timeout: 600
 
 budget:
   max_usd: 10.0
