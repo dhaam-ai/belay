@@ -7,8 +7,6 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
-
-	"github.com/belay-dev/belay/internal/state"
 )
 
 // Sentinel errors this package returns. Match them with errors.Is; the two

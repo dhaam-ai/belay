@@ -286,7 +286,11 @@ func TestResolveRootRejectsUnusable(t *testing.T) {
 	}
 }
 
-func TestRootFromLayout(t *testing.T) {
+// The workspace now arrives on the RunContext rather than being reconstructed
+// from the run directory's shape, and Layout stores it rather than discarding
+// it -- so the two must still agree, and an unset value must refuse rather
+// than resolve to whatever directory belay is standing in.
+func TestWorkspaceComesFromTheContext(t *testing.T) {
 	ws := t.TempDir()
 	resolved, err := resolveRoot(ws)
 	if err != nil {
@@ -296,20 +300,23 @@ func TestRootFromLayout(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewLayout: %v", err)
 	}
-	got, err := rootFromLayout(layout)
+	if got := layout.WorkspaceDir(); got != ws {
+		t.Errorf("Layout.WorkspaceDir() = %q, want %q", got, ws)
+	}
+	got, err := resolveRoot(layout.WorkspaceDir())
 	if err != nil {
-		t.Fatalf("rootFromLayout: %v", err)
+		t.Fatalf("resolveRoot(WorkspaceDir): %v", err)
 	}
 	if got != resolved {
-		t.Errorf("rootFromLayout = %q, want %q", got, resolved)
+		t.Errorf("resolved workspace = %q, want %q", got, resolved)
 	}
 }
 
-func TestRootFromLayoutRejectsUnderivable(t *testing.T) {
-	if _, err := rootFromLayout(state.Layout{}); err == nil {
-		t.Fatal("rootFromLayout(zero Layout) = nil error, want ErrWorkspace")
+func TestUnsetWorkspaceIsRefused(t *testing.T) {
+	if _, err := resolveRoot(""); err == nil {
+		t.Fatal("resolveRoot(\"\") = nil error, want ErrWorkspace")
 	} else if !errors.Is(err, ErrWorkspace) {
-		t.Fatalf("rootFromLayout(zero Layout) error = %v; want one wrapping ErrWorkspace", err)
+		t.Fatalf("resolveRoot(\"\") error = %v; want one wrapping ErrWorkspace", err)
 	}
 }
 
