@@ -1,0 +1,112 @@
+# GoReleaser configuration for belay
+# This file handles multi-architecture binary builds, checksums, and changelog generation.
+#
+# IMPORTANT: The module path (github.com/belay-dev/belay) is a PLACEHOLDER.
+# If you rename the module using `make rename-module OWNER=<handle>`, you MUST
+# update the ldflags paths below in the build section to match the new module path.
+# Search for "github.com/belay-dev/belay/internal/cli" and update all three occurrences:
+# - Version path
+# - Commit path
+# - BuildDate path
+#
+# The placeholder is deliberate — the real GitHub owner is undecided. Do not hard-code
+# an owner here that would silently break after a rename.
+
+version: 2
+
+project_name: belay
+
+# Build configuration
+builds:
+  - id: belay
+    main: ./cmd/belay
+    binary: belay
+
+    # Target platforms: darwin and linux, amd64 and arm64
+    goos:
+      - linux
+      - darwin
+    goarch:
+      - amd64
+      - arm64
+
+    # Disable Windows — the project uses unix-only build tags.
+    # See internal/exec, internal/linter, internal/runner (//go:build unix).
+    # A Windows binary would fail at runtime on any command that shells out to
+    # go/node/pytest/golangci-lint/docker, making it nearly useless.
+
+    # Static builds: CGO_ENABLED=0 for portability
+    env:
+      - CGO_ENABLED=0
+
+    # Version, commit, and build date injected via ldflags.
+    # These paths MUST match internal/cli package.
+    # If you rename the module, update these three paths:
+    ldflags:
+      - -X github.com/belay-dev/belay/internal/cli.Version={{.Version}}
+      - -X github.com/belay-dev/belay/internal/cli.Commit={{.Commit}}
+      - -X github.com/belay-dev/belay/internal/cli.BuildDate={{.CommitDate}}
+
+    # Reproducible builds: use module timestamp for deterministic builds
+    mod_timestamp: "{{ .CommitTimestamp }}"
+
+# Checksums for all artifacts
+checksum:
+  name_template: "checksums.txt"
+
+# Changelog grouped by conventional commit type
+changelog:
+  sort: asc
+
+  # Map commit types to changelog sections
+  groups:
+    - title: Features
+      regexp: '^feat(\(.+\))?!?:'
+      order: 100
+
+    - title: Bug Fixes
+      regexp: '^fix(\(.+\))?!?:'
+      order: 200
+
+    - title: Refactoring
+      regexp: '^refactor(\(.+\))?!?:'
+      order: 300
+
+    - title: Documentation
+      regexp: '^docs(\(.+\))?!?:'
+      order: 400
+
+    - title: Testing
+      regexp: '^test(\(.+\))?!?:'
+      order: 500
+
+    - title: Chores & Dependencies
+      regexp: '^chore(\(.+\))?!?:'
+      order: 600
+
+    - title: Other Changes
+      order: 999
+
+  # Filter out conventional-commit footers and merge commits
+  filters:
+    exclude:
+      - '^Merge pull request'
+      - '^Merge branch'
+      - '^bump:'
+
+# Release configuration
+release:
+  github:
+    owner: belay-dev  # This is a PLACEHOLDER — change it when renaming the module
+    repo: belay
+  mode: replace
+
+# Archive configuration
+archives:
+  - format: tar.gz
+    name_template: "{{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
+
+    # Include license and other useful files
+    files:
+      - LICENSE
+      - README.md

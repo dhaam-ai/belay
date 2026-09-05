@@ -1,0 +1,133 @@
+name: Release
+
+# Trigger on semantic version tags (v1.0.0, v1.2.3, etc.)
+on:
+  push:
+    tags:
+      - "v[0-9]+.[0-9]+.[0-9]+"
+
+permissions:
+  contents: read
+
+jobs:
+  # Verify the tag is green before attempting release
+  test-and-verify:
+    name: Test Suite (Release Gate)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@e2f20987646fbe3b7d0e1476191a133a37105c14 # v4.1.7
+        with:
+          fetch-depth: 0
+
+      - name: Set up Go
+        uses: actions/setup-go@41dfa10bad66e883b2c33b2b446b4e3fe4c55381 # v4.0.1
+        with:
+          go-version: "1.26.3"
+          cache: true
+
+      - name: Run tests with race detector
+        run: go test ./... -race
+
+      - name: Run linting
+        uses: golangci/golangci-lint-action@08e9c4ff2ed1108e85f62f6fe0b3b15e1c37df3c # v3.7.0
+        with:
+          version: v2.12.2
+          args: --timeout=5m
+
+      - name: Verify build succeeds
+        run: make build VERSION=${{ github.ref_name }}
+
+  # Build and publish binaries using GoReleaser
+  release:
+    name: Build and Publish Release
+    needs: test-and-verify
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write # Required to publish GitHub Release and upload artifacts
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@e2f20987646fbe3b7d0e1476191a133a37105c14 # v4.1.7
+        with:
+          fetch-depth: 0
+
+      - name: Set up Go
+        uses: actions/setup-go@41dfa10bad66e883b2c33b2b446b4e3fe4c55381 # v4.0.1
+        with:
+          go-version: "1.26.3"
+
+      - name: Run GoReleaser
+        uses: goreleaser/goreleaser-action@286f3b13b6b7c5ae7ea430fd9a3ad79dabf2c206 # v6.0.0
+        with:
+          version: latest
+          args: release --clean
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  # Publish to Homebrew tap
+  homebrew:
+    name: Publish to Homebrew Tap
+    needs: release
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@e2f20987646fbe3b7d0e1476191a133a37105c14 # v4.1.7
+        with:
+          fetch-depth: 0
+
+      - name: Set up Go
+        uses: actions/setup-go@41dfa10bad66e883b2c33b2b446b4e3fe4c55381 # v4.0.1
+        with:
+          go-version: "1.26.3"
+
+      - name: Run GoReleaser (homebrew-tap step only)
+        uses: goreleaser/goreleaser-action@286f3b13b6b7c5ae7ea430fd9a3ad79dabf2c206 # v6.0.0
+        with:
+          version: latest
+          args: release --clean --skip=publish,docker,sign,sbom
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          HOMEBREW_TAP_GITHUB_TOKEN: ${{ secrets.HOMEBREW_TAP_GITHUB_TOKEN }}
+
+  # Build and publish Docker image
+  docker:
+    name: Build and Publish Docker Image
+    needs: test-and-verify
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write # Required to push to GitHub Container Registry
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@e2f20987646fbe3b7d0e1476191a133a37105c14 # v4.1.7
+        with:
+          fetch-depth: 0
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@6d141c48323b09375017580076169aa4360ae94c # v3.6.0
+
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@0d4c9c5ea7693da7b8abb0d2a1dd8ac1e6e1c0f7 # v3.0.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.repository_owner }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Extract metadata (tags, labels)
+        id: meta
+        uses: docker/metadata-action@8e5442c4ef9f78752691f7be0474be3173d4c7f6 # v5.0.0
+        with:
+          images: ghcr.io/${{ github.repository }}
+          tags: |
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=sha
+
+      - name: Build and push Docker image
+        uses: docker/build-push-action@ca052bb54ab0790a636c9b5f226502c73d547a25 # v5.0.0
+        with:
+          context: .
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          platforms: linux/amd64,linux/arm64
