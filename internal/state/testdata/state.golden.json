@@ -1,0 +1,61 @@
+{
+  "schema_version": 1,
+  "goal": "ship the widget",
+  "plan": {
+    "path": "artifacts/plan.md",
+    "approved": true,
+    "digest": "sha256:aaa"
+  },
+  "code": {
+    "session_id": "sess-1",
+    "last_diff": "artifacts/diff-0001.patch",
+    "changed_files": [
+      "a.go",
+      "b.go"
+    ]
+  },
+  "test": {
+    "passed": 5,
+    "total": 5,
+    "failed": 0,
+    "failures": [],
+    "report_path": "artifacts/test.json"
+  },
+  "review": {
+    "source": "golangci-lint",
+    "gate": "pass",
+    "issues": [],
+    "counts": {
+      "blocker": 0,
+      "critical": 0,
+      "major": 0,
+      "minor": 0,
+      "info": 0
+    },
+    "summary": "clean"
+  },
+  "fix": {
+    "attempts": 0,
+    "give_up": false
+  },
+  "candidates": [
+    {
+      "id": "c1",
+      "dir": "/work/candidates/c1",
+      "test_passed": true,
+      "issue_count": 0
+    }
+  ],
+  "winner": "c1",
+  "history": [
+    {
+      "seq": 1,
+      "node": "plan",
+      "attempt": 1,
+      "status": "ok",
+      "next": "approve",
+      "time": "0001-01-01T00:00:00Z",
+      "summary": ""
+    }
+  ]
+}
