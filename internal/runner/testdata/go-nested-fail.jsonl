@@ -1,0 +1,17 @@
+{"Time":"2026-01-02T15:04:01.000000Z","Action":"start","Package":"example.com/nested"}
+{"Time":"2026-01-02T15:04:02.000000Z","Action":"start","Package":"example.com/nested/internal/sub"}
+{"Time":"2026-01-02T15:04:03.000000Z","Action":"run","Package":"example.com/nested","Test":"TestName"}
+{"Time":"2026-01-02T15:04:04.000000Z","Action":"output","Package":"example.com/nested","Test":"TestName","Output":"=== RUN   TestName\n"}
+{"Time":"2026-01-02T15:04:05.000000Z","Action":"output","Package":"example.com/nested","Test":"TestName","Output":"--- PASS: TestName (0.00s)\n"}
+{"Time":"2026-01-02T15:04:06.000000Z","Action":"pass","Package":"example.com/nested","Test":"TestName","Elapsed":0}
+{"Time":"2026-01-02T15:04:07.000000Z","Action":"output","Package":"example.com/nested","Output":"PASS\n"}
+{"Time":"2026-01-02T15:04:08.000000Z","Action":"output","Package":"example.com/nested","Output":"ok  \texample.com/nested\t0.492s\n"}
+{"Time":"2026-01-02T15:04:09.000000Z","Action":"pass","Package":"example.com/nested","Elapsed":0.492}
+{"Time":"2026-01-02T15:04:10.000000Z","Action":"run","Package":"example.com/nested/internal/sub","Test":"TestHalve"}
+{"Time":"2026-01-02T15:04:11.000000Z","Action":"output","Package":"example.com/nested/internal/sub","Test":"TestHalve","Output":"=== RUN   TestHalve\n"}
+{"Time":"2026-01-02T15:04:12.000000Z","Action":"output","Package":"example.com/nested/internal/sub","Test":"TestHalve","Output":"    sub_test.go:7: Halve(8) = 16, want 4\n"}
+{"Time":"2026-01-02T15:04:13.000000Z","Action":"output","Package":"example.com/nested/internal/sub","Test":"TestHalve","Output":"--- FAIL: TestHalve (0.00s)\n"}
+{"Time":"2026-01-02T15:04:14.000000Z","Action":"fail","Package":"example.com/nested/internal/sub","Test":"TestHalve","Elapsed":0}
+{"Time":"2026-01-02T15:04:15.000000Z","Action":"output","Package":"example.com/nested/internal/sub","Output":"FAIL\n"}
+{"Time":"2026-01-02T15:04:16.000000Z","Action":"output","Package":"example.com/nested/internal/sub","Output":"FAIL\texample.com/nested/internal/sub\t0.978s\n"}
+{"Time":"2026-01-02T15:04:17.000000Z","Action":"fail","Package":"example.com/nested/internal/sub","Elapsed":0.978}

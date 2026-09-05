@@ -1,0 +1,6 @@
+{"ImportPath":"example.com/buildfail [example.com/buildfail.test]","Action":"build-output","Output":"# example.com/buildfail [example.com/buildfail.test]\n"}
+{"ImportPath":"example.com/buildfail [example.com/buildfail.test]","Action":"build-output","Output":"./lib.go:3:37: undefined: undefinedThing\n"}
+{"ImportPath":"example.com/buildfail [example.com/buildfail.test]","Action":"build-fail"}
+{"Time":"2026-01-02T15:04:01.000000Z","Action":"start","Package":"example.com/buildfail"}
+{"Time":"2026-01-02T15:04:02.000000Z","Action":"output","Package":"example.com/buildfail","Output":"FAIL\texample.com/buildfail [build failed]\n"}
+{"Time":"2026-01-02T15:04:03.000000Z","Action":"fail","Package":"example.com/buildfail","Elapsed":0,"FailedBuild":"example.com/buildfail [example.com/buildfail.test]"}

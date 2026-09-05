@@ -1,0 +1,138 @@
+{
+ "numFailedTestSuites": 1,
+ "numFailedTests": 2,
+ "numPassedTestSuites": 0,
+ "numPassedTests": 1,
+ "numPendingTestSuites": 0,
+ "numPendingTests": 1,
+ "numRuntimeErrorTestSuites": 0,
+ "numTodoTests": 0,
+ "numTotalTestSuites": 1,
+ "numTotalTests": 4,
+ "openHandles": [],
+ "snapshot": {
+  "added": 0,
+  "didUpdate": false,
+  "failure": false,
+  "filesAdded": 0,
+  "filesRemoved": 0,
+  "filesRemovedList": [],
+  "filesUnmatched": 0,
+  "filesUpdated": 0,
+  "matched": 0,
+  "total": 0,
+  "unchecked": 0,
+  "uncheckedKeysByFile": [],
+  "unmatched": 0,
+  "updated": 0
+ },
+ "startTime": 1788588964187,
+ "success": false,
+ "testResults": [
+  {
+   "assertionResults": [
+    {
+     "ancestorTitles": [
+      "add"
+     ],
+     "duration": 2,
+     "failureDetails": [
+      {
+       "matcherResult": {
+        "actual": -1,
+        "expected": 3,
+        "message": "expect(received).toBe(expected) // Object.is equality\n\nExpected: 3\nReceived: -1",
+        "name": "toBe",
+        "pass": false
+       }
+      }
+     ],
+     "failureMessages": [
+      "Error: expect(received).toBe(expected) // Object.is equality\n\nExpected: 3\nReceived: -1\n    at Object.toBe (/repo/__tests__/math.test.js:5:23)\n    at Promise.then.completed (/repo/node_modules/jest-circus/build/utils.js:298:28)\n    at new Promise (<anonymous>)\n    at callAsyncCircusFn (/repo/node_modules/jest-circus/build/utils.js:231:10)\n    at _callCircusTest (/repo/node_modules/jest-circus/build/run.js:316:40)\n    at _runTest (/repo/node_modules/jest-circus/build/run.js:252:3)\n    at _runTestsForDescribeBlock (/repo/node_modules/jest-circus/build/run.js:126:9)\n    at _runTestsForDescribeBlock (/repo/node_modules/jest-circus/build/run.js:121:9)\n    at run (/repo/node_modules/jest-circus/build/run.js:71:3)\n    at runAndTransformResultsToJestFormat (/repo/node_modules/jest-circus/build/legacy-code-todo-rewrite/jestAdapterInit.js:122:21)\n    at jestAdapter (/repo/node_modules/jest-circus/build/legacy-code-todo-rewrite/jestAdapter.js:79:19)\n    at runTestInternal (/repo/node_modules/jest-runner/build/runTest.js:367:16)\n    at runTest (/repo/node_modules/jest-runner/build/runTest.js:444:34)"
+     ],
+     "fullName": "add adds two numbers",
+     "invocations": 1,
+     "location": {
+      "column": 3,
+      "line": 4
+     },
+     "numPassingAsserts": 0,
+     "retryReasons": [],
+     "status": "failed",
+     "title": "adds two numbers"
+    },
+    {
+     "ancestorTitles": [
+      "add"
+     ],
+     "duration": 0,
+     "failureDetails": [],
+     "failureMessages": [],
+     "fullName": "add adds zero",
+     "invocations": 1,
+     "location": {
+      "column": 3,
+      "line": 7
+     },
+     "numPassingAsserts": 1,
+     "retryReasons": [],
+     "status": "passed",
+     "title": "adds zero"
+    },
+    {
+     "ancestorTitles": [
+      "add"
+     ],
+     "duration": null,
+     "failureDetails": [],
+     "failureMessages": [],
+     "fullName": "add pending case",
+     "invocations": 1,
+     "location": {
+      "column": 8,
+      "line": 10
+     },
+     "numPassingAsserts": 0,
+     "retryReasons": [],
+     "status": "pending",
+     "title": "pending case"
+    },
+    {
+     "ancestorTitles": [],
+     "duration": 0,
+     "failureDetails": [
+      {
+       "matcherResult": {
+        "actual": 4,
+        "expected": 6,
+        "message": "expect(received).toBe(expected) // Object.is equality\n\nExpected: 6\nReceived: 4",
+        "name": "toBe",
+        "pass": false
+       }
+      }
+     ],
+     "failureMessages": [
+      "Error: expect(received).toBe(expected) // Object.is equality\n\nExpected: 6\nReceived: 4\n    at Object.toBe (/repo/__tests__/math.test.js:14:21)\n    at Promise.then.completed (/repo/node_modules/jest-circus/build/utils.js:298:28)\n    at new Promise (<anonymous>)\n    at callAsyncCircusFn (/repo/node_modules/jest-circus/build/utils.js:231:10)\n    at _callCircusTest (/repo/node_modules/jest-circus/build/run.js:316:40)\n    at _runTest (/repo/node_modules/jest-circus/build/run.js:252:3)\n    at _runTestsForDescribeBlock (/repo/node_modules/jest-circus/build/run.js:126:9)\n    at run (/repo/node_modules/jest-circus/build/run.js:71:3)\n    at runAndTransformResultsToJestFormat (/repo/node_modules/jest-circus/build/legacy-code-todo-rewrite/jestAdapterInit.js:122:21)\n    at jestAdapter (/repo/node_modules/jest-circus/build/legacy-code-todo-rewrite/jestAdapter.js:79:19)\n    at runTestInternal (/repo/node_modules/jest-runner/build/runTest.js:367:16)\n    at runTest (/repo/node_modules/jest-runner/build/runTest.js:444:34)"
+     ],
+     "fullName": "top level failure",
+     "invocations": 1,
+     "location": {
+      "column": 1,
+      "line": 13
+     },
+     "numPassingAsserts": 0,
+     "retryReasons": [],
+     "status": "failed",
+     "title": "top level failure"
+    }
+   ],
+   "endTime": 1788588964358,
+   "message": "  \u25cf add \u203a adds two numbers\n\n    expect(received).toBe(expected) // Object.is equality\n\n    Expected: 3\n    Received: -1\n\n      3 | describe('add', () => {\n      4 |   test('adds two numbers', () => {\n    > 5 |     expect(add(1, 2)).toBe(3);\n        |                       ^\n      6 |   });\n      7 |   test('adds zero', () => {\n      8 |     expect(add(0, 0)).toBe(0);\n\n      at Object.toBe (__tests__/math.test.js:5:23)\n\n  \u25cf top level failure\n\n    expect(received).toBe(expected) // Object.is equality\n\n    Expected: 6\n    Received: 4\n\n      12 |\n      13 | test('top level failure', () => {\n    > 14 |   expect(add(5, 1)).toBe(6);\n         |                     ^\n      15 | });\n      16 |\n\n      at Object.toBe (__tests__/math.test.js:14:21)\n",
+   "name": "/repo/__tests__/math.test.js",
+   "startTime": 1788588964227,
+   "status": "failed",
+   "summary": ""
+  }
+ ],
+ "wasInterrupted": false
+}
