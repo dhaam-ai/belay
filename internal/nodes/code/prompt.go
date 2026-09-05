@@ -86,8 +86,9 @@ You are editing this repository in place.
 # Required output
 
 Reply with a short summary, in prose, of what you changed and why. Then exactly
-one fenced block tagged %q, holding the repository-relative path of every file
-you created, modified or deleted — one path per line, and nothing else:
+one fenced block tagged %q, holding the repository-relative
+path of every file you created, modified or deleted — one path per line, and
+nothing else:
 
 %s
 
@@ -129,9 +130,9 @@ recorded them. As of that record, the change touched:
 Do not redo that work and do not revert it. Read those files as they now stand
 and build on them.
 
-Your %q block must list the cumulative set: every file the whole change
-touches, including the ones above that you are not editing again this time —
-not only what you change in this pass.`
+Your %q block must list the cumulative set: every file the
+whole change touches, including the ones above that you are not editing again
+this time — not only what you change in this pass.`
 
 // editTools is the tool allow-list this node sends.
 //

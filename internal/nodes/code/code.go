@@ -259,7 +259,7 @@ func (*Node) Run(ctx context.Context, rc *graph.RunContext) (graph.Result, error
 	if err != nil {
 		return graph.Result{}, err
 	}
-	workDir, err := workspaceDir(rc.Layout)
+	workDir, err := workspaceDir(rc)
 	if err != nil {
 		return graph.Result{}, err
 	}
@@ -403,27 +403,18 @@ func artifactName(path string) (string, bool) {
 
 // workspaceDir recovers the workspace root from a run Layout.
 //
-// state.NewLayout builds a run directory as <workspace>/.belay/runs/<run
-// id> and Layout deliberately exposes only paths inside it, but the agent
-// must be pointed at the workspace itself. Inverting NewLayout is safer
-// than wiring the workspace path into the node separately, where the two
-// copies could drift apart; the shape is verified rather than assumed, so
-// a Layout built some other way fails loudly instead of pointing the agent
-// at an arbitrary parent directory.
-func workspaceDir(l state.Layout) (string, error) {
-	runDir := l.RunDir()
-	runsDir := filepath.Dir(runDir)
-	belayDir := filepath.Dir(runsDir)
-	ws := filepath.Dir(belayDir)
-	if filepath.Base(runsDir) != "runs" || filepath.Base(belayDir) != ".belay" {
-		return "", fmt.Errorf("%w: run directory %q is not <workspace>/.belay/runs/<run id>",
-			ErrWorkspace, runDir)
+// workspaceDir is the repository the agent edits.
+//
+// The dispatcher supplies it on the RunContext. It used to be reconstructed
+// by walking up from the run directory, which made this node one of six
+// places that had to know the ".belay/runs/<id>" shape -- and for an unset
+// Layout every one of them resolved to ".", belay's own tree, which is the
+// last directory an agent with edit tools should be pointed at.
+func workspaceDir(rc *graph.RunContext) (string, error) {
+	if rc.Workspace == "" {
+		return "", fmt.Errorf("%w: run context names no workspace", ErrWorkspace)
 	}
-	abs, err := filepath.Abs(ws)
-	if err != nil {
-		return "", fmt.Errorf("%w: %q: %w", ErrWorkspace, ws, err)
-	}
-	return abs, nil
+	return rc.Workspace, nil
 }
 
 // summaryArtifactName returns the artifact name for the summary the agent
