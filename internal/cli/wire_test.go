@@ -179,7 +179,11 @@ func TestResolvePicksAdapters(t *testing.T) {
 	}
 }
 
-func TestResolveBlocksOnFanout(t *testing.T) {
+// Fanout used to be refused because the join node did not exist. Now that it
+// does, an enabled fanout must produce a graph carrying BOTH halves -- a
+// registry with fanout and no join would create N candidate workspaces, spend
+// N times the budget, and then die routing to an unregistered node.
+func TestResolveBuildsTheFanoutGraph(t *testing.T) {
 	ws := goWorkspace(t)
 	writeConfig(t, ws, "version: 1\nfanout:\n  enabled: true\n  candidates: 3\n")
 
@@ -187,20 +191,16 @@ func TestResolveBlocksOnFanout(t *testing.T) {
 	if err != nil {
 		t.Fatalf("resolve: %v", err)
 	}
-	if plan.registry != nil {
-		t.Error("a graph belay cannot finish must not be handed to the dispatcher")
+	if plan.registry == nil {
+		t.Fatalf("no registry built; blockers: %s", blockerText(plan))
 	}
-
-	got := blockerText(plan)
-	// The sentence has to explain the cost of the thing belay is refusing,
-	// not restate a Go error the reader cannot act on.
-	for _, want := range []string{"fanout.enabled", "copy your repository 3 times", "set fanout.enabled to false"} {
-		if !strings.Contains(got, want) {
-			t.Errorf("refusal does not say %q; got:\n%s", want, got)
+	for _, name := range []string{graph.NodeFanout, graph.NodeJoin} {
+		if _, err := plan.registry.Get(name); err != nil {
+			t.Errorf("Get(%q): %v", name, err)
 		}
 	}
-	if strings.Contains(got, "ErrFanoutUnavailable") || strings.Contains(got, "nodes:") {
-		t.Errorf("refusal leaks the Go error to the reader:\n%s", got)
+	if got := blockerText(plan); strings.Contains(got, "fanout") {
+		t.Errorf("fanout is supported now; nothing should block on it:\n%s", got)
 	}
 }
 
@@ -278,7 +278,7 @@ func blockerText(p *runPlan) string {
 // TestDefaultRouteMatchesRegistry keeps the route belay shows a person and
 // the graph belay actually walks from drifting apart.
 func TestDefaultRouteMatchesRegistry(t *testing.T) {
-	registry, err := nodes.Default(config.Default(), t.TempDir())
+	registry, err := nodes.Default(config.Default())
 	if err != nil {
 		t.Fatalf("nodes.Default: %v", err)
 	}

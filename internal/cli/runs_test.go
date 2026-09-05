@@ -73,6 +73,22 @@ func runsSeedRaw(t *testing.T, workspace, id string, manifest []byte) string {
 	return dir
 }
 
+// runsSeedRawAt seeds a damaged run and pins its directory mtime.
+//
+// A run whose manifest cannot be read has no readable CreatedAt, so the
+// listing falls back to the directory's mtime -- which, for a freshly seeded
+// directory, is now. Any test asserting a fixed order among damaged and
+// healthy runs must therefore set it, or the order depends on the wall clock
+// rather than on the fixture.
+func runsSeedRawAt(t *testing.T, workspace, id string, manifest []byte, mtime time.Time) string {
+	t.Helper()
+	dir := runsSeedRaw(t, workspace, id, manifest)
+	if err := os.Chtimes(dir, mtime, mtime); err != nil {
+		t.Fatalf("Chtimes(%q): %v", dir, err)
+	}
+	return dir
+}
+
 // runsIDs extracts the run ids of summaries, in order.
 func runsIDs(summaries []RunSummary) []string {
 	ids := make([]string, len(summaries))
@@ -905,7 +921,10 @@ func TestRunsCommandJSONReportsRealRuns(t *testing.T) {
 	workspace := t.TempDir()
 	runsSeed(t, workspace, runsManifest("run-new", state.RunStatusPaused, runsBase))
 	runsSeed(t, workspace, runsManifest("run-old", state.RunStatusCompleted, runsBase.Add(-time.Hour)))
-	runsSeedRaw(t, workspace, "run-broken", []byte("{"))
+	// Pinned older than run-old: an unreadable run is ordered by directory
+	// mtime, so leaving it at "now" would sort it above a run the fixture
+	// says is an hour old and make this assertion depend on the clock.
+	runsSeedRawAt(t, workspace, "run-broken", []byte("{"), runsBase.Add(-2*time.Hour))
 
 	got := runsRun(t, runsOptions{workspace: workspace, limit: runsDefaultLimit, asJSON: true})
 

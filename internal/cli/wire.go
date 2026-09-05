@@ -454,25 +454,15 @@ func (p *runPlan) resolveReplayAgent() {
 
 // resolveRegistry builds the node graph the dispatcher walks.
 func (p *runPlan) resolveRegistry() {
-	registry, err := nodes.Default(p.config, p.workspace)
-	if err == nil {
-		p.registry = registry
-		return
-	}
-	if errors.Is(err, nodes.ErrFanoutUnavailable) {
+	registry, err := nodes.Default(p.config)
+	if err != nil {
 		p.block(
-			fmt.Sprintf("fanout.enabled is true, and belay cannot finish a best-of-%d run yet. "+
-				"Starting one would copy your repository %d times and spend up to %d times the budget "+
-				"before stopping at a step that is not written.",
-				p.config.Fanout.Candidates, p.config.Fanout.Candidates, p.config.Fanout.Candidates),
-			"set fanout.enabled to false in belay.yaml",
+			fmt.Sprintf("belay cannot assemble its own graph: %v", err),
+			"this is a bug in belay; please report it",
 		)
 		return
 	}
-	p.block(
-		fmt.Sprintf("belay cannot assemble its own graph: %v", err),
-		"this is a bug in belay; please report it",
-	)
+	p.registry = registry
 }
 
 // saveCassette persists a record-mode run's conversation, and reports what it

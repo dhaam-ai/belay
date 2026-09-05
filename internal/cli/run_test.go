@@ -186,34 +186,26 @@ func TestRunRefusesMissingWorkspace(t *testing.T) {
 	}
 }
 
-// TestRunRefusesFanoutInPlainWords is acceptance criterion 6, through the
-// command a person actually types.
-func TestRunRefusesFanoutInPlainWords(t *testing.T) {
+// Fanout is runnable now that the join node exists, so a dry run must plan it
+// rather than refuse it -- and must still create nothing.
+func TestDryRunPlansAFanoutRun(t *testing.T) {
 	ws := goWorkspace(t)
 	writeConfig(t, ws, "version: 1\nfanout:\n  enabled: true\n  candidates: 3\n")
 
-	out, _, err := runCLI(t, "run", "--workspace", ws, "add tests")
-	if err == nil {
-		t.Fatal("belay must refuse a run it cannot finish")
+	out, _, err := runCLI(t, "--dry-run", "run", "--workspace", ws, "add tests")
+	if err != nil {
+		t.Fatalf("a dry run with fanout enabled must succeed, got: %v\n%s", err, out)
 	}
-	assertPlainText(t, "fanout refusal", out)
+	assertPlainText(t, "fanout dry run", out)
 
-	for _, phrase := range []string{
-		"belay will not start this run.",
-		"fanout.enabled is true",
-		"copy your repository 3 times",
-		"to fix it: set fanout.enabled to false",
-		"Nothing was created and nothing was spent.",
-	} {
-		if !strings.Contains(out, phrase) {
-			t.Errorf("the refusal never says %q; got:\n%s", phrase, out)
-		}
+	if strings.Contains(out, "belay will not start this run.") {
+		t.Errorf("fanout is supported now; belay must not refuse it:\n%s", out)
 	}
-	if strings.Contains(out, "ErrFanoutUnavailable") {
-		t.Errorf("the refusal leaks a Go error name:\n%s", out)
+	if strings.Contains(out, "ErrFanoutUnavailable") || strings.Contains(out, "nodes:") {
+		t.Errorf("output leaks a Go error name:\n%s", out)
 	}
 	if _, statErr := os.Stat(filepath.Join(ws, ".belay")); !errors.Is(statErr, os.ErrNotExist) {
-		t.Error("a refused run must not create a run directory")
+		t.Error("a dry run must not create a run directory")
 	}
 }
 
