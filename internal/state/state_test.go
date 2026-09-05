@@ -60,7 +60,7 @@ func TestState_SaveLoad_RoundTrip(t *testing.T) {
 	want.Plan = Plan{Path: "artifacts/plan.md", Approved: true, Digest: "sha256:abc"}
 	want.Code = Code{SessionID: "sess-1", LastDiff: "artifacts/diff-0001.patch", ChangedFiles: []string{"x.go"}}
 	want.Test = NewTest(belay.TestReport{Total: 4, Passed: 3, Failed: 1}, "artifacts/test.json")
-	want.Review = NewReview(belay.QualityReport{Source: "golangci-lint", Gate: belay.GatePass, Issues: []belay.Issue{}})
+	want.Review = NewReview(belay.QualityReport{Source: "golangci-lint", Gate: belay.GatePass, Issues: []belay.Issue{}}, "")
 	want.Fix = Fix{Attempts: 1, GiveUp: false}
 	want.Candidates = []Candidate{{ID: "c1", Dir: "/tmp/c1", TestPassed: true, IssueCount: 0}}
 	want.Winner = "c1"
@@ -166,7 +166,7 @@ func TestReviewRoundTrip_PreservesGateCountsIssues(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			review := NewReview(tt.report)
+			review := NewReview(tt.report, "")
 			got := review.QualityReport()
 
 			if diff := cmp.Diff(tt.report.Gate, got.Gate); diff != "" {
@@ -201,7 +201,7 @@ func TestReviewRoundTrip_PreservesGateCountsIssues(t *testing.T) {
 func TestNewReview_DoesNotAliasInputIssues(t *testing.T) {
 	issues := []belay.Issue{{RuleID: "r1", Severity: belay.SeverityMinor}}
 	report := belay.QualityReport{Issues: issues}
-	review := NewReview(report)
+	review := NewReview(report, "")
 	issues[0].RuleID = "mutated"
 	if review.Issues[0].RuleID != "r1" {
 		t.Errorf("Review.Issues aliases the input slice: got %q, want %q", review.Issues[0].RuleID, "r1")
@@ -215,7 +215,7 @@ func TestNewReview_DoesNotAliasInputIssues(t *testing.T) {
 // would have violated belay.QualityReport.Issues's own "never nil"
 // contract the very first time an adapter reported zero issues.
 func TestNewReview_PreservesNonNilEmptyIssues(t *testing.T) {
-	review := NewReview(belay.QualityReport{Issues: []belay.Issue{}})
+	review := NewReview(belay.QualityReport{Issues: []belay.Issue{}}, "")
 	if review.Issues == nil {
 		t.Error("NewReview turned a non-nil empty Issues slice into nil")
 	}
@@ -234,8 +234,8 @@ func TestReview_JSONKeySetMatchesSpec(t *testing.T) {
 		Gate:   belay.GatePass,
 		Issues: []belay.Issue{{RuleID: "r1", Severity: belay.SeverityMinor, File: "a.go", Line: 1, Message: "m"}},
 		Counts: belay.Counts{Minor: 1},
-	})
-	assertExactJSONKeys(t, review, []string{"source", "gate", "issues", "counts", "summary"})
+	}, "")
+	assertExactJSONKeys(t, review, []string{"source", "gate", "issues", "counts", "summary", "report_path"})
 }
 
 func TestTestRoundTrip_PreservesCounts(t *testing.T) {
@@ -351,7 +351,7 @@ func TestStateGolden(t *testing.T) {
 	st.Test = NewTest(belay.TestReport{Total: 5, Passed: 5, Failed: 0, Failures: []belay.TestFailure{}}, "artifacts/test.json")
 	st.Review = NewReview(belay.QualityReport{
 		Source: "golangci-lint", Gate: belay.GatePass, Issues: []belay.Issue{}, Summary: "clean",
-	})
+	}, "")
 	st.Fix = Fix{Attempts: 0, GiveUp: false}
 	st.Candidates = []Candidate{{ID: "c1", Dir: "/work/candidates/c1", TestPassed: true, IssueCount: 0}}
 	st.Winner = "c1"

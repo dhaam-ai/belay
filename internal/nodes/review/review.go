@@ -288,8 +288,7 @@ func verdict(rc *graph.RunContext, report belay.QualityReport, failOn belay.Seve
 	// field of its own (state.Test has ReportPath, state.Review does not)
 	// and the projection drops Raw. Without this, nothing in state.json
 	// points at the full report.
-	report.Summary = summaryWithPath(report.Summary, path)
-	blackboard := state.NewReview(report)
+	blackboard := state.NewReview(report, path)
 	patch := state.Patch{Review: &blackboard}
 
 	log.Info("review: gate evaluated",
@@ -420,14 +419,6 @@ func breakdown(c belay.Counts, failOn belay.Severity) string {
 		return "0 issues"
 	}
 	return strings.Join(parts, ", ")
-}
-
-// summaryWithPath appends the archived report's path to an adapter's summary.
-func summaryWithPath(summary, path string) string {
-	if summary == "" {
-		return "report " + path
-	}
-	return summary + " (report " + path + ")"
 }
 
 // logger returns rc.Logger, or the default logger if the dispatcher left it

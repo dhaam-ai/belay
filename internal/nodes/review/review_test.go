@@ -617,10 +617,14 @@ func TestArtifactWrittenAndRecorded(t *testing.T) {
 		t.Errorf("artifact Raw = %s, want %s", gotRaw.String(), wantRaw.String())
 	}
 
-	// The path reaches the patch (state.Review has no path field of its own)
-	// and the Note.
-	if !strings.Contains(res.Patch.Review.Summary, wantRel) {
-		t.Errorf("Patch.Review.Summary = %q, want it to carry %q", res.Patch.Review.Summary, wantRel)
+	// The path reaches the patch through its own field, and the Note.
+	if res.Patch.Review.ReportPath != wantRel {
+		t.Errorf("Patch.Review.ReportPath = %q, want %q", res.Patch.Review.ReportPath, wantRel)
+	}
+	// The adapter's own prose must survive untouched: the path has a field
+	// now, so nothing appends to Summary behind the adapter's back.
+	if res.Patch.Review.Summary != src.Summary {
+		t.Errorf("Patch.Review.Summary = %q, want the adapter's verbatim %q", res.Patch.Review.Summary, src.Summary)
 	}
 	if !strings.Contains(res.Note, wantRel) {
 		t.Errorf("Note = %q, want it to carry %q", res.Note, wantRel)
@@ -662,8 +666,7 @@ func TestPatchProjectsReportWithoutHandConstruction(t *testing.T) {
 
 	resolved := src
 	resolved.Gate = belay.GateFail
-	resolved.Summary = res.Patch.Review.Summary // path suffix, asserted elsewhere
-	want := state.NewReview(resolved)
+	want := state.NewReview(resolved, res.Patch.Review.ReportPath)
 	if diff := cmp.Diff(want, *res.Patch.Review); diff != "" {
 		t.Errorf("Patch.Review mismatch (-want +got):\n%s", diff)
 	}

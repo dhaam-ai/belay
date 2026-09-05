@@ -242,18 +242,28 @@ type Review struct {
 	Issues []belay.Issue `json:"issues"`
 	// Counts is belay.QualityReport.Counts.
 	Counts belay.Counts `json:"counts"`
-	// Summary is belay.QualityReport.Summary.
+	// Summary is belay.QualityReport.Summary, carried through verbatim.
+	// The adapter's own prose belongs to the adapter; the pointer to the
+	// archived report is ReportPath, not something appended here.
 	Summary string `json:"summary"`
+	// ReportPath is the run-relative path of the archived full report,
+	// mirroring Test.ReportPath. The blackboard keeps only the fields the
+	// graph acts on, so this is how a human or a later node reaches the
+	// adapter's untruncated output.
+	ReportPath string `json:"report_path"`
 }
 
-// NewReview projects q onto the blackboard's Review shape.
-func NewReview(q belay.QualityReport) Review {
+// NewReview projects q onto the blackboard's Review shape, recording where
+// the full report was archived. Pass an empty reportPath when the report was
+// not written to disk.
+func NewReview(q belay.QualityReport, reportPath string) Review {
 	return Review{
-		Source:  q.Source,
-		Gate:    q.Gate,
-		Issues:  cloneSlice(q.Issues),
-		Counts:  q.Counts,
-		Summary: q.Summary,
+		Source:     q.Source,
+		Gate:       q.Gate,
+		Issues:     cloneSlice(q.Issues),
+		Counts:     q.Counts,
+		Summary:    q.Summary,
+		ReportPath: reportPath,
 	}
 }
 

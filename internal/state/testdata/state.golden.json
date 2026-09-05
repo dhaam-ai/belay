@@ -32,7 +32,8 @@
       "minor": 0,
       "info": 0
     },
-    "summary": "clean"
+    "summary": "clean",
+    "report_path": ""
   },
   "fix": {
     "attempts": 0,
