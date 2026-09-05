@@ -1,0 +1,73 @@
+[
+  {
+    "filePath": "/repo/src/index.js",
+    "messages": [
+      {
+        "ruleId": "no-undef",
+        "severity": 2,
+        "message": "'fetchUser' is not defined.",
+        "line": 12,
+        "column": 3,
+        "nodeType": "Identifier",
+        "messageId": "undef",
+        "endLine": 12,
+        "endColumn": 12
+      },
+      {
+        "ruleId": "no-unused-vars",
+        "severity": 1,
+        "message": "'tmp' is assigned a value but never used.",
+        "line": 18,
+        "column": 7,
+        "nodeType": "Identifier",
+        "messageId": "unusedVar",
+        "endLine": 18,
+        "endColumn": 10
+      },
+      {
+        "ruleId": null,
+        "severity": 1,
+        "message": "Unused eslint-disable directive (no problems were reported from 'no-console').",
+        "line": 30,
+        "column": 1,
+        "nodeType": null
+      }
+    ],
+    "suppressedMessages": [
+      {
+        "ruleId": "no-console",
+        "severity": 1,
+        "message": "Unexpected console statement.",
+        "line": 41,
+        "column": 5,
+        "suppressions": [{"kind": "directive", "justification": ""}]
+      }
+    ],
+    "errorCount": 1,
+    "fatalErrorCount": 0,
+    "warningCount": 2,
+    "fixableErrorCount": 0,
+    "fixableWarningCount": 0,
+    "usedDeprecatedRules": []
+  },
+  {
+    "filePath": "/repo/src/broken.js",
+    "messages": [
+      {
+        "ruleId": null,
+        "fatal": true,
+        "severity": 2,
+        "message": "Parsing error: Unexpected token }",
+        "line": 7,
+        "column": 1
+      }
+    ],
+    "suppressedMessages": [],
+    "errorCount": 1,
+    "fatalErrorCount": 1,
+    "warningCount": 0,
+    "fixableErrorCount": 0,
+    "fixableWarningCount": 0,
+    "usedDeprecatedRules": []
+  }
+]

@@ -1,0 +1,123 @@
+[
+  {
+    "cell": null,
+    "code": "E999",
+    "end_location": {"column": 1, "row": 3},
+    "filename": "/repo/app/broken.py",
+    "fix": null,
+    "location": {"column": 1, "row": 3},
+    "message": "SyntaxError: Expected an expression",
+    "name": "syntax-error",
+    "noqa_row": null,
+    "severity": "error",
+    "url": null
+  },
+  {
+    "cell": null,
+    "code": "F821",
+    "end_location": {"column": 19, "row": 14},
+    "filename": "/repo/app/service.py",
+    "fix": null,
+    "location": {"column": 12, "row": 14},
+    "message": "Undefined name `reqeusts`",
+    "name": "undefined-name",
+    "noqa_row": 14,
+    "severity": "error",
+    "url": "https://docs.astral.sh/ruff/rules/undefined-name"
+  },
+  {
+    "cell": null,
+    "code": "S105",
+    "end_location": {"column": 33, "row": 21},
+    "filename": "/repo/app/config.py",
+    "fix": null,
+    "location": {"column": 12, "row": 21},
+    "message": "Possible hardcoded password assigned to: \"token\"",
+    "name": "hardcoded-password-string",
+    "noqa_row": 21,
+    "severity": "error",
+    "url": "https://docs.astral.sh/ruff/rules/hardcoded-password-string"
+  },
+  {
+    "cell": null,
+    "code": "B006",
+    "end_location": {"column": 30, "row": 8},
+    "filename": "/repo/app/service.py",
+    "fix": null,
+    "location": {"column": 22, "row": 8},
+    "message": "Do not use mutable data structures for argument defaults",
+    "name": "mutable-argument-default",
+    "noqa_row": 8,
+    "severity": "error",
+    "url": "https://docs.astral.sh/ruff/rules/mutable-argument-default"
+  },
+  {
+    "cell": null,
+    "code": "S101",
+    "end_location": {"column": 21, "row": 5},
+    "filename": "/repo/tests/test_service.py",
+    "fix": null,
+    "location": {"column": 5, "row": 5},
+    "message": "Use of `assert` detected",
+    "name": "assert",
+    "noqa_row": 5,
+    "severity": "error",
+    "url": "https://docs.astral.sh/ruff/rules/assert"
+  },
+  {
+    "cell": null,
+    "code": "F401",
+    "end_location": {"column": 18, "row": 1},
+    "filename": "/repo/app/service.py",
+    "fix": {
+      "applicability": "safe",
+      "edits": [{"content": "", "end_location": {"column": 1, "row": 2}, "location": {"column": 1, "row": 1}}],
+      "message": "Remove unused import: `os`"
+    },
+    "location": {"column": 8, "row": 1},
+    "message": "`os` imported but unused",
+    "name": "unused-import",
+    "noqa_row": 1,
+    "severity": "error",
+    "url": "https://docs.astral.sh/ruff/rules/unused-import"
+  },
+  {
+    "cell": null,
+    "code": "E501",
+    "end_location": {"column": 120, "row": 31},
+    "filename": "/repo/app/service.py",
+    "fix": null,
+    "location": {"column": 89, "row": 31},
+    "message": "Line too long (119 > 88)",
+    "name": "line-too-long",
+    "noqa_row": 31,
+    "severity": "error",
+    "url": "https://docs.astral.sh/ruff/rules/line-too-long"
+  },
+  {
+    "cell": null,
+    "code": "I001",
+    "end_location": {"column": 1, "row": 4},
+    "filename": "/repo/app/service.py",
+    "fix": null,
+    "location": {"column": 1, "row": 1},
+    "message": "Import block is un-sorted or un-formatted",
+    "name": "unsorted-imports",
+    "noqa_row": 1,
+    "severity": "error",
+    "url": "https://docs.astral.sh/ruff/rules/unsorted-imports"
+  },
+  {
+    "cell": null,
+    "code": "ZZZ999",
+    "end_location": {"column": 10, "row": 40},
+    "filename": "/repo/app/service.py",
+    "fix": null,
+    "location": {"column": 1, "row": 40},
+    "message": "a rule set belay has never heard of",
+    "name": "future-rule",
+    "noqa_row": 40,
+    "severity": "error",
+    "url": null
+  }
+]

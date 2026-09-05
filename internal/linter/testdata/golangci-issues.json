@@ -1,0 +1,87 @@
+{
+  "Issues": [
+    {
+      "FromLinter": "typecheck",
+      "Text": ": # example.com/app\n./handler.go:14:6: declared and not used: total",
+      "Severity": "",
+      "SourceLines": ["package app"],
+      "Pos": {"Filename": "handler.go", "Offset": 0, "Line": 1, "Column": 0},
+      "ExpectNoLint": false,
+      "ExpectedNoLintLinter": ""
+    },
+    {
+      "FromLinter": "gosec",
+      "Text": "G404: Use of weak random number generator (math/rand instead of crypto/rand)",
+      "Severity": "",
+      "SourceLines": ["\ttoken := rand.Int63()"],
+      "Pos": {"Filename": "crypto.go", "Offset": 412, "Line": 22, "Column": 11},
+      "ExpectNoLint": false,
+      "ExpectedNoLintLinter": ""
+    },
+    {
+      "FromLinter": "errcheck",
+      "Text": "Error return value of `w.Write` is not checked",
+      "Severity": "",
+      "SourceLines": ["\tw.Write(body)"],
+      "Pos": {"Filename": "handler.go", "Offset": 780, "Line": 31, "Column": 11},
+      "ExpectNoLint": false,
+      "ExpectedNoLintLinter": ""
+    },
+    {
+      "FromLinter": "govet",
+      "Text": "printf: non-constant format string in call to fmt.Errorf",
+      "Severity": "",
+      "SourceLines": ["\treturn fmt.Errorf(msg)"],
+      "Pos": {"Filename": "handler.go", "Offset": 1104, "Line": 44, "Column": 16},
+      "ExpectNoLint": false,
+      "ExpectedNoLintLinter": ""
+    },
+    {
+      "FromLinter": "revive",
+      "Text": "package-comments: should have a package comment",
+      "Severity": "warning",
+      "SourceLines": ["package app"],
+      "Pos": {"Filename": "handler.go", "Offset": 0, "Line": 1, "Column": 1},
+      "LineRange": {"From": 1, "To": 1},
+      "ExpectNoLint": false,
+      "ExpectedNoLintLinter": ""
+    },
+    {
+      "FromLinter": "misspell",
+      "Text": "`recieve` is a misspelling of `receive`",
+      "Severity": "",
+      "SourceLines": ["// recieve reads one message."],
+      "Pos": {"Filename": "doc.go", "Offset": 44, "Line": 7, "Column": 4},
+      "ExpectNoLint": false,
+      "ExpectedNoLintLinter": ""
+    },
+    {
+      "FromLinter": "futurelint",
+      "Text": "a linter belay has never heard of, carrying a severity string",
+      "Severity": "error",
+      "SourceLines": ["\tx := 1"],
+      "Pos": {"Filename": "future.go", "Offset": 12, "Line": 3, "Column": 2},
+      "ExpectNoLint": false,
+      "ExpectedNoLintLinter": ""
+    },
+    {
+      "FromLinter": "otherlint",
+      "Text": "a linter belay has never heard of, carrying no severity at all",
+      "Severity": "",
+      "SourceLines": ["\ty := 2"],
+      "Pos": {"Filename": "future.go", "Offset": 24, "Line": 4, "Column": 2},
+      "ExpectNoLint": false,
+      "ExpectedNoLintLinter": ""
+    }
+  ],
+  "Report": {
+    "Linters": [
+      {"Name": "errcheck", "Enabled": true},
+      {"Name": "gosec", "Enabled": true},
+      {"Name": "govet", "Enabled": true},
+      {"Name": "misspell", "Enabled": true},
+      {"Name": "revive", "Enabled": true},
+      {"Name": "typecheck", "Enabled": true}
+    ]
+  }
+}

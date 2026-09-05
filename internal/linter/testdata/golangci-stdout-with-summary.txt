@@ -1,0 +1,3 @@
+{"Issues":[{"FromLinter":"errcheck","Text":"Error return value of `f.Close` is not checked","Severity":"","SourceLines":["\tdefer f.Close()"],"Pos":{"Filename":"main.go","Offset":77,"Line":7,"Column":15},"ExpectNoLint":false,"ExpectedNoLintLinter":""}],"Report":{"Linters":[{"Name":"errcheck","Enabled":true}]}}
+1 issues:
+* errcheck: 1
