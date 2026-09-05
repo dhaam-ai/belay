@@ -1,0 +1,29 @@
+{
+  "type": "result",
+  "subtype": "success",
+  "is_error": false,
+  "duration_ms": 18342,
+  "duration_api_ms": 17110,
+  "num_turns": 7,
+  "result": "Added the Login handler in internal/http/login.go and a table-driven test for it.",
+  "session_id": "3f9c1b52-8a4d-4e21-9c77-2b6f0d5a1e83",
+  "total_cost_usd": 0.4213,
+  "usage": {
+    "input_tokens": 12840,
+    "output_tokens": 3120,
+    "cache_creation_input_tokens": 8200,
+    "cache_read_input_tokens": 154300
+  },
+  "modelUsage": {
+    "claude-opus-5": {
+      "inputTokens": 12840,
+      "outputTokens": 3120,
+      "cacheReadInputTokens": 154300,
+      "cacheCreationInputTokens": 8200,
+      "costUSD": 0.4213,
+      "costBasis": "list"
+    }
+  },
+  "permission_denials": [],
+  "uuid": "b1d0e2f3-4a5b-6c7d-8e9f-0a1b2c3d4e5f"
+}

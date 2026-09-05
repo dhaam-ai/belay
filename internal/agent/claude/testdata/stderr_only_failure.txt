@@ -1,0 +1,2 @@
+error: unknown option '--allowedTool'
+(Did you mean --allowedTools?)

@@ -1,0 +1,17 @@
+{
+  "type": "result",
+  "subtype": "success",
+  "is_error": false,
+  "duration_ms": 9120,
+  "duration_api_ms": 8630,
+  "num_turns": 3,
+  "result": "Renamed the helper and updated its three call sites.",
+  "session_id": "7c2e5a90-1f34-4b8e-a6d2-9e0f3c7b45a1",
+  "usage": {
+    "input_tokens": 40000,
+    "output_tokens": 10000,
+    "cache_creation_input_tokens": 0,
+    "cache_read_input_tokens": 0
+  },
+  "permission_denials": []
+}
