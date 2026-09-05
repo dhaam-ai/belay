@@ -328,12 +328,22 @@ type Reviewer interface {
 	//
 	// If Review cannot reach or run its underlying tool at all — network
 	// down, MCP server unreachable, sonar-scanner not installed — it
-	// returns a zero QualityReport and an error: one wrapping
-	// ErrToolchainMissing for a missing local binary, a plain error
-	// otherwise. Review does not encode a total failure to run as
-	// GateError inside a returned QualityReport; GateError is reserved for
-	// a report where the tool ran, analyzed the change, but the gate
-	// computation itself could not reach a verdict.
+	// returns an error: one wrapping ErrToolchainMissing for a missing
+	// local binary, a plain error otherwise. A non-nil error is
+	// authoritative and the caller must not read the returned report as a
+	// verdict.
+	//
+	// The report accompanying that error must still be structurally valid
+	// — Gate set to GateError and Issues non-nil — because QualityReport's
+	// identical-key-set guarantee holds on every path, including failures.
+	// Returning the zero QualityReport would serialize Issues as null and
+	// break it. This is a serialization requirement, not a verdict: it
+	// does not collapse the distinction below.
+	//
+	// GateError with a nil error means something different and narrower:
+	// the tool ran and analyzed the change, but the gate computation could
+	// not reach a verdict. "We never learned the answer" is not "the
+	// answer was no", so neither case may be reported as GateFail.
 	Review(ctx context.Context, req ReviewRequest) (QualityReport, error)
 }
 

@@ -28,7 +28,8 @@ The test suite records cassettes of MCP and Claude API calls. CI replays cassett
 - **Hard to test new backends**: When Codex or Gemini support lands, cassettes must be recorded for those too. Adds friction to onboarding new adapters.
 
 ### Follow-ups
-- Implement cassette recording/replay in `pkg/cassette/` using go-vcr or similar. Record on first run (or via `belay test --record`), replay in CI.
+- Implement cassette recording/replay in `internal/agent/replay/` as a decorator over `belay.AgentBackend`, using only the standard library. Record on first run (or via `belay test --record`), replay in CI.
+  - Superseded location: this ADR originally named `pkg/cassette/`. The decorator is not public API and belongs beside `internal/agent/claude`, so it landed under `internal/agent/replay/`.
 - Store cassettes in `testdata/cassettes/` with clear naming: `phase_<phase>_backend_<backend>.yaml`.
 - Add a `belay test --live` flag that forces live API calls (for smoke testing). Update CI to run this before release tags.
 - Document in CONTRIBUTING.md: "To record a new cassette: run `belay test --record` locally (requires ANTHROPIC_API_KEY and $1 test credits). Review the cassette diff before committing."
@@ -47,6 +48,6 @@ The test suite records cassettes of MCP and Claude API calls. CI replays cassett
 - Challenge #134 test requirements: conformance suite
 - go-vcr library: https://github.com/dnaeon/go-vcr
 - VCR (Ruby original): https://github.com/vcr/vcr
-- pkg/cassette/ (T46)
+- internal/agent/replay/ (T46)
 - testdata/cassettes/ (T46: cassette storage)
 - CONTRIBUTING.md: cassette recording process (T46)
