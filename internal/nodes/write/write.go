@@ -186,7 +186,10 @@ func (n *Node) openWorkspace(rc *graph.RunContext) (*os.Root, string, error) {
 	if strings.TrimSpace(n.root) != "" {
 		return openRoot(n.root)
 	}
-	dir, err := rootFromLayout(rc.Layout)
+	if rc.Workspace == "" {
+		return nil, "", &WorkspaceError{Reason: "run context names no workspace"}
+	}
+	dir, err := resolveRoot(rc.Workspace)
 	if err != nil {
 		return nil, "", err
 	}

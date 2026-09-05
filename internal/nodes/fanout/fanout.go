@@ -388,19 +388,18 @@ func affordable(rc *graph.RunContext, count int, spent belay.Usage) (belay.Usage
 // becomes one field access and the node stops touching the filesystem
 // entirely.
 func runMetadata(rc *graph.RunContext) (src string, spent belay.Usage, err error) {
-	path := rc.Layout.ManifestPath()
-	m, err := state.LoadManifest(path)
-	if err != nil {
-		return "", belay.Usage{}, fmt.Errorf("%w: read %s: %w", ErrRunMetadata, path, err)
+	// Both facts arrive on the RunContext. This node used to read
+	// manifest.json itself, which worked but made a node depend on a file
+	// the dispatcher owns -- and ADR 0002 keeps that ownership in one
+	// place precisely so a node cannot disagree with it.
+	if rc.Workspace == "" {
+		return "", belay.Usage{}, fmt.Errorf("%w: run context names no workspace to copy candidates from", ErrRunMetadata)
 	}
-	if m.Workspace == "" {
-		return "", belay.Usage{}, fmt.Errorf("%w: manifest %s names no workspace to copy candidates from", ErrRunMetadata, path)
-	}
-	return m.Workspace, belay.Usage{
-		InputTokens:  m.Budget.TokensIn,
-		OutputTokens: m.Budget.TokensOut,
-		USD:          m.Budget.SpentUSD,
-		Estimated:    m.Budget.Estimated,
+	return rc.Workspace, belay.Usage{
+		InputTokens:  rc.Budget.TokensIn,
+		OutputTokens: rc.Budget.TokensOut,
+		USD:          rc.Budget.SpentUSD,
+		Estimated:    rc.Budget.Estimated,
 	}, nil
 }
 

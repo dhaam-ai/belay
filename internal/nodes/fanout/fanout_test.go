@@ -9,8 +9,8 @@ import (
 	"path/filepath"
 	"sync"
 	"testing"
-	"time"
 
+	"github.com/belay-dev/belay/internal/budget"
 	"github.com/belay-dev/belay/internal/config"
 	"github.com/belay-dev/belay/internal/graph"
 	"github.com/belay-dev/belay/internal/journal"
@@ -37,14 +37,23 @@ func enabledConfig(candidates int) config.Config {
 
 // newLayout returns a Layout over a fresh run directory, plus the source
 // repository path a candidate would be copied from.
+// newLayout returns a Layout rooted at the repository belay is operating on,
+// and that repository's path.
+//
+// The run directory lives inside the workspace (<repo>/.belay/runs/<id>), so
+// Layout.WorkspaceDir -- which is what the dispatcher puts on
+// RunContext.Workspace, and therefore what fanout copies from -- is the repo
+// itself. An earlier version rooted the Layout one level above the repo and
+// relied on the manifest to name the real source separately; the two could
+// then disagree, which is exactly what carrying the workspace on the context
+// removes.
 func newLayout(t *testing.T) (state.Layout, string) {
 	t.Helper()
-	root := t.TempDir()
-	src := filepath.Join(root, "repo")
+	src := filepath.Join(t.TempDir(), "repo")
 	if err := os.MkdirAll(src, 0o750); err != nil {
 		t.Fatalf("create source repo: %v", err)
 	}
-	layout, err := state.NewLayout(root, testRunID)
+	layout, err := state.NewLayout(src, testRunID)
 	if err != nil {
 		t.Fatalf("NewLayout: %v", err)
 	}
@@ -54,28 +63,33 @@ func newLayout(t *testing.T) (state.Layout, string) {
 	return layout, src
 }
 
-// writeManifest persists a manifest recording workspace as the run's
-// target repository and spent as its budget ledger so far.
-func writeManifest(t *testing.T, layout state.Layout, workspace string, cfg config.Config, spent state.Budget) {
-	t.Helper()
-	m := state.NewManifest(time.Now(), testRunID, workspace, "add a feature", cfg)
-	m.Budget = spent
-	if err := state.SaveManifest(layout.ManifestPath(), m); err != nil {
-		t.Fatalf("SaveManifest: %v", err)
+// snapshot converts a manifest budget into the snapshot the dispatcher hands
+// a node, so a test says "this run has already spent X" without touching a
+// file the node no longer reads.
+func snapshot(spent state.Budget) budget.Snapshot {
+	return budget.Snapshot{
+		LimitUSD:  spent.LimitUSD,
+		SpentUSD:  spent.SpentUSD,
+		TokensIn:  spent.TokensIn,
+		TokensOut: spent.TokensOut,
+		Estimated: spent.Estimated,
 	}
 }
 
-func newRunContext(cfg config.Config, layout state.Layout, iso belay.Isolator) *graph.RunContext {
+func newRunContext(cfg config.Config, layout state.Layout, iso belay.Isolator, spent state.Budget) *graph.RunContext {
 	return &graph.RunContext{
-		Goal:     "add a feature",
-		State:    state.NewState("add a feature"),
-		Config:   cfg,
-		Layout:   layout,
-		NodeName: graph.NodeFanout,
-		Step:     7,
-		Attempt:  1,
-		Logger:   slog.New(slog.NewTextHandler(io.Discard, nil)),
-		Isolator: iso,
+		Goal:      "add a feature",
+		State:     state.NewState("add a feature"),
+		Config:    cfg,
+		Layout:    layout,
+		Workspace: layout.WorkspaceDir(),
+		RunID:     layout.RunID(),
+		Budget:    snapshot(spent),
+		NodeName:  graph.NodeFanout,
+		Step:      7,
+		Attempt:   1,
+		Logger:    slog.New(slog.NewTextHandler(io.Discard, nil)),
+		Isolator:  iso,
 	}
 }
 
@@ -84,9 +98,8 @@ func newRunContext(cfg config.Config, layout state.Layout, iso belay.Isolator) *
 func newFixture(t *testing.T, cfg config.Config, spent state.Budget) (*graph.RunContext, *belaytest.FakeIsolator, string) {
 	t.Helper()
 	layout, src := newLayout(t)
-	writeManifest(t, layout, src, cfg, spent)
 	iso := &belaytest.FakeIsolator{}
-	return newRunContext(cfg, layout, iso), iso, src
+	return newRunContext(cfg, layout, iso, spent), iso, src
 }
 
 func TestNodeName(t *testing.T) {
@@ -158,10 +171,9 @@ func TestRunConfigGuards(t *testing.T) {
 
 // A nil Isolator is a typed error, never a panic.
 func TestRunNilIsolatorDoesNotPanic(t *testing.T) {
-	layout, src := newLayout(t)
+	layout, _ := newLayout(t)
 	cfg := enabledConfig(3)
-	writeManifest(t, layout, src, cfg, state.Budget{})
-	rc := newRunContext(cfg, layout, nil)
+	rc := newRunContext(cfg, layout, nil, state.Budget{})
 	rc.Logger = nil // the dispatcher always sets one; a hand-built context may not
 
 	defer func() {
@@ -175,26 +187,14 @@ func TestRunNilIsolatorDoesNotPanic(t *testing.T) {
 }
 
 func TestRunUnusableRunMetadata(t *testing.T) {
-	t.Run("no manifest", func(t *testing.T) {
+	// The dispatcher always supplies Workspace. If it is ever empty there is
+	// nothing to copy candidates from, and guessing would hand every
+	// candidate a directory belay merely happens to be standing in.
+	t.Run("context names no workspace", func(t *testing.T) {
 		layout, _ := newLayout(t)
 		iso := &belaytest.FakeIsolator{}
-		rc := newRunContext(enabledConfig(3), layout, iso)
-
-		_, err := fanout.New().Run(context.Background(), rc)
-		if !errors.Is(err, fanout.ErrRunMetadata) {
-			t.Fatalf("Run() error = %v, want ErrRunMetadata", err)
-		}
-		if calls := iso.CreateCalls(); len(calls) != 0 {
-			t.Errorf("isolator Create called %d time(s) without a readable manifest", len(calls))
-		}
-	})
-
-	t.Run("manifest names no workspace", func(t *testing.T) {
-		layout, _ := newLayout(t)
-		cfg := enabledConfig(3)
-		writeManifest(t, layout, "", cfg, state.Budget{})
-		iso := &belaytest.FakeIsolator{}
-		rc := newRunContext(cfg, layout, iso)
+		rc := newRunContext(enabledConfig(3), layout, iso, state.Budget{})
+		rc.Workspace = ""
 
 		_, err := fanout.New().Run(context.Background(), rc)
 		if !errors.Is(err, fanout.ErrRunMetadata) {
@@ -340,9 +340,9 @@ func candidateDirs(t *testing.T, src string, ids ...string) []state.Candidate {
 func TestRunCreatesAndRecordsCandidates(t *testing.T) {
 	cfg := enabledConfig(3)
 	layout, src := newLayout(t)
-	writeManifest(t, layout, src, cfg, state.Budget{LimitUSD: 10, SpentUSD: 1})
+	spent := state.Budget{LimitUSD: 10, SpentUSD: 1}
 	iso := ephemeralIsolator(t, nil)
-	rc := newRunContext(cfg, layout, iso)
+	rc := newRunContext(cfg, layout, iso, spent)
 
 	res, err := fanout.New().Run(context.Background(), rc)
 	if err != nil {
@@ -414,8 +414,8 @@ func fileMissing(t *testing.T, path string) bool {
 // created are destroyed, newest first.
 func TestRunPartialFailureDestroysEverythingCreated(t *testing.T) {
 	cfg := enabledConfig(5)
-	layout, src := newLayout(t)
-	writeManifest(t, layout, src, cfg, state.Budget{LimitUSD: 100, SpentUSD: 1})
+	layout, _ := newLayout(t)
+	spent := state.Budget{LimitUSD: 100, SpentUSD: 1}
 
 	boom := errors.New("disk full")
 	iso := &belaytest.FakeIsolator{
@@ -432,7 +432,7 @@ func TestRunPartialFailureDestroysEverythingCreated(t *testing.T) {
 	}
 	failing.DestroyFunc = func(ctx context.Context, ws belay.Workspace) error { return iso.Destroy(ctx, ws) }
 
-	res, err := fanout.New().Run(context.Background(), newRunContext(cfg, layout, failing))
+	res, err := fanout.New().Run(context.Background(), newRunContext(cfg, layout, failing, spent))
 	if !errors.Is(err, boom) {
 		t.Fatalf("Run() error = %v, want it to wrap %v", err, boom)
 	}
@@ -460,8 +460,8 @@ func TestRunPartialFailureDestroysEverythingCreated(t *testing.T) {
 // occupies is never coming back on its own.
 func TestRunUnwindReportsDestroyFailures(t *testing.T) {
 	cfg := enabledConfig(3)
-	layout, src := newLayout(t)
-	writeManifest(t, layout, src, cfg, state.Budget{LimitUSD: 100, SpentUSD: 1})
+	layout, _ := newLayout(t)
+	spent := state.Budget{LimitUSD: 100, SpentUSD: 1}
 
 	createBoom := errors.New("create failed")
 	destroyBoom := errors.New("destroy failed")
@@ -474,7 +474,7 @@ func TestRunUnwindReportsDestroyFailures(t *testing.T) {
 	}
 	iso.DestroyFunc = func(context.Context, belay.Workspace) error { return destroyBoom }
 
-	_, err := fanout.New().Run(context.Background(), newRunContext(cfg, layout, iso))
+	_, err := fanout.New().Run(context.Background(), newRunContext(cfg, layout, iso, spent))
 	if !errors.Is(err, createBoom) {
 		t.Errorf("Run() error = %v, want it to wrap the create failure %v", err, createBoom)
 	}
@@ -497,8 +497,8 @@ func TestRunCancellationCleansUp(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			cfg := enabledConfig(3)
-			layout, src := newLayout(t)
-			writeManifest(t, layout, src, cfg, state.Budget{LimitUSD: 100, SpentUSD: 1})
+			layout, _ := newLayout(t)
+			spent := state.Budget{LimitUSD: 100, SpentUSD: 1}
 
 			ctx, cancel := context.WithCancel(context.Background())
 			defer cancel()
@@ -511,7 +511,7 @@ func TestRunCancellationCleansUp(t *testing.T) {
 				cancel()
 			}
 
-			res, err := fanout.New().Run(ctx, newRunContext(cfg, layout, iso))
+			res, err := fanout.New().Run(ctx, newRunContext(cfg, layout, iso, spent))
 			if !errors.Is(err, context.Canceled) {
 				t.Fatalf("Run() error = %v, want it to wrap context.Canceled", err)
 			}
@@ -535,13 +535,13 @@ func TestRunCancellationCleansUp(t *testing.T) {
 // the workspace it claims to have made is still unwound.
 func TestRunRejectsWorkspaceWithoutDir(t *testing.T) {
 	cfg := enabledConfig(3)
-	layout, src := newLayout(t)
-	writeManifest(t, layout, src, cfg, state.Budget{LimitUSD: 100, SpentUSD: 1})
+	layout, _ := newLayout(t)
+	spent := state.Budget{LimitUSD: 100, SpentUSD: 1}
 
 	iso := &belaytest.FakeIsolator{
 		CreateResponses: []belay.Workspace{{ID: "cand-01-a1"}},
 	}
-	_, err := fanout.New().Run(context.Background(), newRunContext(cfg, layout, iso))
+	_, err := fanout.New().Run(context.Background(), newRunContext(cfg, layout, iso, spent))
 	if !errors.Is(err, fanout.ErrIsolatorContract) {
 		t.Fatalf("Run() error = %v, want ErrIsolatorContract", err)
 	}
@@ -557,13 +557,13 @@ func TestRunRejectsWorkspaceWithoutDir(t *testing.T) {
 // candidate directories, which are still on disk.
 func TestRunCandidateIDsAreUniquePerAttempt(t *testing.T) {
 	cfg := enabledConfig(2)
-	layout, src := newLayout(t)
-	writeManifest(t, layout, src, cfg, state.Budget{LimitUSD: 100, SpentUSD: 1})
+	layout, _ := newLayout(t)
+	spent := state.Budget{LimitUSD: 100, SpentUSD: 1}
 
 	seen := map[string]bool{}
 	for _, attempt := range []int{0, 1, 2} {
 		iso := ephemeralIsolator(t, nil)
-		rc := newRunContext(cfg, layout, iso)
+		rc := newRunContext(cfg, layout, iso, spent)
 		rc.Attempt = attempt
 
 		res, err := fanout.New().Run(context.Background(), rc)
@@ -590,8 +590,8 @@ func TestRunCandidateIDsAreUniquePerAttempt(t *testing.T) {
 // workspaces this path exists to reclaim.
 func TestRunCleanupUsesAnUncancelledContext(t *testing.T) {
 	cfg := enabledConfig(3)
-	layout, src := newLayout(t)
-	writeManifest(t, layout, src, cfg, state.Budget{LimitUSD: 100, SpentUSD: 1})
+	layout, _ := newLayout(t)
+	spent := state.Budget{LimitUSD: 100, SpentUSD: 1}
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -610,7 +610,7 @@ func TestRunCleanupUsesAnUncancelledContext(t *testing.T) {
 		return ctx.Err() // dircopy behaves this way: a cancelled context destroys nothing
 	}
 
-	_, err := fanout.New().Run(ctx, newRunContext(cfg, layout, iso))
+	_, err := fanout.New().Run(ctx, newRunContext(cfg, layout, iso, spent))
 	if !errors.Is(err, context.Canceled) {
 		t.Fatalf("Run() error = %v, want it to wrap context.Canceled", err)
 	}

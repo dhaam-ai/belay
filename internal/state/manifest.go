@@ -424,7 +424,8 @@ func NewRunIDAt(now time.Time, random io.Reader) (string, error) {
 // Layout owns every path under one run directory, so no other package
 // string-concatenates ".belay/runs/...". Construct one with NewLayout.
 type Layout struct {
-	root string
+	workspace string
+	root      string
 }
 
 // NewLayout returns the Layout for runID's run directory under
@@ -438,7 +439,34 @@ func NewLayout(workspaceDir, runID string) (Layout, error) {
 	if err := validateSegment("run id", runID); err != nil {
 		return Layout{}, err
 	}
-	return Layout{root: filepath.Join(workspaceDir, ".belay", "runs", runID)}, nil
+	// The workspace must be absolute. A relative or empty value silently
+	// resolves against whatever directory belay happens to be running in,
+	// which would point a target repository's test suite -- and an agent
+	// with write access -- at belay's own tree.
+	if !filepath.IsAbs(workspaceDir) {
+		return Layout{}, fmt.Errorf("%w: workspace %q is not an absolute path",
+			ErrInvalidPathSegment, workspaceDir)
+	}
+	return Layout{
+		workspace: workspaceDir,
+		root:      filepath.Join(workspaceDir, ".belay", "runs", runID),
+	}, nil
+}
+
+// WorkspaceDir returns the workspace this run belongs to: the repository
+// belay is operating on, and the root a node hands an agent.
+//
+// It is stored rather than derived. Reconstructing it by walking up from
+// RunDir couples every caller to the ".belay/runs/<id>" shape, and a caller
+// that gets the depth wrong points an agent at the wrong tree.
+func (l Layout) WorkspaceDir() string { return l.workspace }
+
+// RunID returns the run's identifier, the last segment of RunDir.
+func (l Layout) RunID() string {
+	if l.root == "" {
+		return ""
+	}
+	return filepath.Base(l.root)
 }
 
 // RunDir returns the run's root directory.
@@ -459,9 +487,28 @@ func (l Layout) ArtifactsDir() string { return filepath.Join(l.root, "artifacts"
 
 // ArtifactPath returns the path to a named artifact under artifacts/, such
 // as "plan.md", "review.json" or "diff-0007.patch". It rejects a name that
-// could escape artifacts/.
+// could escape artifacts/, and refuses a zero Layout outright.
 func (l Layout) ArtifactPath(name string) (string, error) {
+	if err := l.check(); err != nil {
+		return "", err
+	}
 	return joinSafe("artifact name", l.ArtifactsDir(), name)
+}
+
+// check refuses a Layout that never went through NewLayout.
+//
+// The zero value's root is the empty string, so every filepath.Join in this
+// type silently produces a path relative to whatever directory the process
+// happens to be in. Under `go test` that is the package's own source
+// directory, which is how a run's artifacts once landed inside this
+// repository. In production it would scatter a run's state across the
+// user's shell cwd. Refusing is the only safe reading of a zero Layout.
+func (l Layout) check() error {
+	if l.root == "" {
+		return fmt.Errorf("%w: zero Layout has no run directory; construct one with NewLayout",
+			ErrInvalidPathSegment)
+	}
+	return nil
 }
 
 // NodesDir returns the run's nodes/ directory.
@@ -472,6 +519,9 @@ func (l Layout) NodesDir() string { return filepath.Join(l.root, "nodes") }
 // logs. seq is zero-padded to three digits. It rejects a negative seq or a
 // name that could escape nodes/.
 func (l Layout) NodeDir(seq int, name string) (string, error) {
+	if err := l.check(); err != nil {
+		return "", err
+	}
 	if seq < 0 {
 		return "", &PathSegmentError{Kind: "node seq", Segment: strconv.Itoa(seq), Reason: "must not be negative"}
 	}
@@ -485,6 +535,9 @@ func (l Layout) CandidatesDir() string { return filepath.Join(l.root, "candidate
 // directory, candidates/<id>/, which holds its own workspace/, state.json
 // and journal.ndjson. It rejects an id that could escape candidates/.
 func (l Layout) CandidateDir(id string) (string, error) {
+	if err := l.check(); err != nil {
+		return "", err
+	}
 	return joinSafe("candidate id", l.CandidatesDir(), id)
 }
 

@@ -51,7 +51,6 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
-	"path/filepath"
 	"strings"
 
 	"github.com/belay-dev/belay/internal/graph"
@@ -158,7 +157,7 @@ func (*Node) Run(ctx context.Context, rc *graph.RunContext) (graph.Result, error
 	if rc.Agent == nil {
 		return graph.Result{}, ErrNoAgent
 	}
-	workDir, err := workspaceDir(rc.Layout)
+	workDir, err := workspaceDir(rc)
 	if err != nil {
 		return graph.Result{}, err
 	}
@@ -256,13 +255,11 @@ func Digest(plan []byte) string {
 // NewLayout (the zero Layout, typically), and is reported rather than
 // passed to a backend that would resolve it against its own process
 // directory.
-func workspaceDir(l state.Layout) (string, error) {
-	run := l.RunDir()
-	ws := filepath.Dir(filepath.Dir(filepath.Dir(run)))
-	if run == "" || !filepath.IsAbs(ws) {
-		return "", fmt.Errorf("%w: run dir %q", ErrNoWorkspace, run)
+func workspaceDir(rc *graph.RunContext) (string, error) {
+	if rc.Workspace == "" {
+		return "", ErrNoWorkspace
 	}
-	return ws, nil
+	return rc.Workspace, nil
 }
 
 // writeRequestEvidence records the prompt exactly as sent, plus the whole

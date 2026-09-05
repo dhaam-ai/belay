@@ -9,6 +9,7 @@ import (
 
 	"github.com/google/go-cmp/cmp"
 
+	"github.com/belay-dev/belay/internal/graph"
 	"github.com/belay-dev/belay/internal/state"
 	"github.com/belay-dev/belay/pkg/belay"
 )
@@ -449,19 +450,19 @@ func TestCauseNoteAndExhaustedNote(t *testing.T) {
 	}
 }
 
-// TestWorkDirRejectsAShallowLayout: a layout with no workspace above it
-// must fail loudly rather than send the agent to "." — the belay process's
-// own working directory, which is very unlikely to be the repository.
-func TestWorkDirRejectsAShallowLayout(t *testing.T) {
-	shallow, err := state.NewLayout("", "run-1")
-	if err != nil {
-		t.Fatalf("NewLayout: %v", err)
+// TestWorkDirRejectsAnUnsetWorkspace: rather than send the agent to "." --
+// the belay process's own working directory, very unlikely to be the
+// repository -- an unset workspace must fail loudly.
+func TestWorkDirRejectsAnUnsetWorkspace(t *testing.T) {
+	if _, err := workDir(&graph.RunContext{}); !errors.Is(err, ErrNoWorkspace) {
+		t.Fatalf("workDir(empty workspace) error = %v, want ErrNoWorkspace", err)
 	}
-	if _, err := workDir(shallow); !errors.Is(err, ErrNoWorkspace) {
-		t.Fatalf("workDir() error = %v, want ErrNoWorkspace", err)
-	}
-	if _, err := workDir(state.Layout{}); !errors.Is(err, ErrNoWorkspace) {
-		t.Fatalf("workDir(zero) error = %v, want ErrNoWorkspace", err)
+
+	// The upstream guard: a relative workspace cannot enter a Layout at all.
+	for _, ws := range []string{"", ".", "relative/path"} {
+		if _, err := state.NewLayout(ws, "run-1"); err == nil {
+			t.Errorf("NewLayout(%q) succeeded; want refusal", ws)
+		}
 	}
 }
 

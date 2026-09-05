@@ -50,13 +50,15 @@ func newFixture(t *testing.T, mode config.ReviewMode, failOn config.Severity) *f
 		workspace: ws,
 		runDir:    layout.RunDir(),
 		rc: &graph.RunContext{
-			Goal:     "make the tests pass",
-			Config:   cfg,
-			Layout:   layout,
-			NodeName: graph.NodeReview,
-			Step:     6,
-			Attempt:  1,
-			Logger:   slog.New(slog.NewTextHandler(io.Discard, nil)),
+			Goal:      "make the tests pass",
+			Config:    cfg,
+			Layout:    layout,
+			Workspace: layout.WorkspaceDir(),
+			RunID:     layout.RunID(),
+			NodeName:  graph.NodeReview,
+			Step:      6,
+			Attempt:   1,
+			Logger:    slog.New(slog.NewTextHandler(io.Discard, nil)),
 		},
 	}
 }

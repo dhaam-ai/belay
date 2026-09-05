@@ -36,14 +36,16 @@ func newRC(t *testing.T, plan string) *graph.RunContext {
 		t.Fatalf("NewLayout: %v", err)
 	}
 	rc := &graph.RunContext{
-		Goal:     "add the thing",
-		State:    state.NewState("add the thing"),
-		Config:   config.Default(),
-		Layout:   layout,
-		NodeName: graph.NodeApprove,
-		Step:     2,
-		Attempt:  1,
-		Logger:   slog.New(slog.NewTextHandler(io.Discard, nil)),
+		Goal:      "add the thing",
+		State:     state.NewState("add the thing"),
+		Config:    config.Default(),
+		Layout:    layout,
+		Workspace: layout.WorkspaceDir(),
+		RunID:     layout.RunID(),
+		NodeName:  graph.NodeApprove,
+		Step:      2,
+		Attempt:   1,
+		Logger:    slog.New(slog.NewTextHandler(io.Discard, nil)),
 	}
 	if plan != "" {
 		rel, werr := rc.WriteArtifact("plan.md", []byte(plan))

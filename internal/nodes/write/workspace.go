@@ -147,25 +147,6 @@ func openRoot(dir string) (*os.Root, string, error) {
 // so the workspace is three levels up. The derivation is verified rather than
 // assumed: the two intermediate components must actually be named "runs" and
 // ".belay", so a Layout built some other way fails loudly here instead of
-// silently designating some unrelated ancestor as "the workspace" — which, in
-// a node whose whole job is to bound what may be touched, is the one mistake
-// that must not be quiet.
-func rootFromLayout(l state.Layout) (string, error) {
-	runDir := filepath.Clean(l.RunDir())
-	if runDir == "" || runDir == "." {
-		return "", &WorkspaceError{Dir: runDir, Reason: "run layout has no run directory"}
-	}
-	runsDir := filepath.Dir(runDir)
-	belayDir := filepath.Dir(runsDir)
-	root := filepath.Dir(belayDir)
-	if filepath.Base(runsDir) != "runs" || filepath.Base(belayDir) != belayDirName {
-		return "", &WorkspaceError{
-			Dir:    runDir,
-			Reason: fmt.Sprintf("cannot derive a workspace from a run directory outside %s/runs/", belayDirName),
-		}
-	}
-	return resolveRoot(root)
-}
 
 // safeJoin turns one workspace-relative path claimed by the change set into
 // the absolute path it denotes inside root, refusing anything that cannot be

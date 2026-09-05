@@ -29,13 +29,15 @@ func newRC(t *testing.T, runner belay.TestRunner) (*graph.RunContext, string) {
 		t.Fatalf("NewLayout: %v", err)
 	}
 	return &graph.RunContext{
-		Goal:     "make the suite green",
-		Layout:   layout,
-		NodeName: graph.NodeTest,
-		Step:     7,
-		Attempt:  1,
-		Runner:   runner,
-		Logger:   slog.New(slog.DiscardHandler),
+		Goal:      "make the suite green",
+		Layout:    layout,
+		Workspace: layout.WorkspaceDir(),
+		RunID:     layout.RunID(),
+		NodeName:  graph.NodeTest,
+		Step:      7,
+		Attempt:   1,
+		Runner:    runner,
+		Logger:    slog.New(slog.DiscardHandler),
 	}, ws
 }
 

@@ -20,23 +20,23 @@ import (
 func TestRunRefusesARelativeWorkspace(t *testing.T) {
 	t.Parallel()
 
+	// A relative workspace can no longer reach a node: state.NewLayout
+	// refuses it outright, so the "." fallback is unreachable by
+	// construction rather than caught downstream.
 	for _, ws := range []string{"", "relative/repo"} {
-		t.Run("workspace="+ws, func(t *testing.T) {
+		t.Run("NewLayout refuses "+ws, func(t *testing.T) {
 			t.Parallel()
-
-			layout, err := state.NewLayout(ws, "run-1")
-			if err != nil {
-				t.Fatalf("NewLayout: %v", err)
-			}
-			got, err := workspaceDir(layout)
-			if !errors.Is(err, ErrNoWorkspace) {
-				t.Fatalf("workspaceDir() = %q, %v; want ErrNoWorkspace", got, err)
-			}
-			if got == "." {
-				t.Error("derived the current working directory; that is the fallback this must refuse")
+			if _, err := state.NewLayout(ws, "run-1"); err == nil {
+				t.Fatalf("NewLayout(%q) succeeded; want refusal", ws)
 			}
 		})
 	}
+	t.Run("unset workspace on the context", func(t *testing.T) {
+		t.Parallel()
+		if _, err := workspaceDir(&graph.RunContext{}); !errors.Is(err, ErrNoWorkspace) {
+			t.Fatalf("workspaceDir(unset) = %v, want ErrNoWorkspace", err)
+		}
+	})
 }
 
 // TestRunHonoursCancellationTheRunnerIgnored covers the re-check after the

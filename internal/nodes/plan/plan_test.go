@@ -43,15 +43,17 @@ func newRunContext(t *testing.T, agent belay.AgentBackend) *graph.RunContext {
 		t.Fatalf("state.NewLayout: %v", err)
 	}
 	return &graph.RunContext{
-		Goal:     testGoal,
-		State:    state.NewState(testGoal),
-		Config:   config.Default(),
-		Layout:   layout,
-		NodeName: graph.NodePlan,
-		Step:     1,
-		Attempt:  1,
-		Logger:   slog.New(slog.NewTextHandler(io.Discard, nil)),
-		Agent:    agent,
+		Goal:      testGoal,
+		State:     state.NewState(testGoal),
+		Config:    config.Default(),
+		Layout:    layout,
+		Workspace: layout.WorkspaceDir(),
+		RunID:     layout.RunID(),
+		NodeName:  graph.NodePlan,
+		Step:      1,
+		Attempt:   1,
+		Logger:    slog.New(slog.NewTextHandler(io.Discard, nil)),
+		Agent:     agent,
 	}
 }
 
@@ -251,12 +253,8 @@ func TestRunBuildsRequestFromConfigAndLayout(t *testing.T) {
 	}
 	req, _ := agent.LastCall()
 
-	wantWorkDir, err := workspaceDir(rc.Layout)
-	if err != nil {
-		t.Fatalf("workspaceDir: %v", err)
-	}
-	if req.WorkDir != wantWorkDir {
-		t.Errorf("WorkDir = %q, want %q", req.WorkDir, wantWorkDir)
+	if req.WorkDir != rc.Workspace {
+		t.Errorf("WorkDir = %q, want rc.Workspace %q", req.WorkDir, rc.Workspace)
 	}
 	if !filepath.IsAbs(req.WorkDir) {
 		t.Errorf("WorkDir = %q, want an absolute path", req.WorkDir)
@@ -501,15 +499,11 @@ func TestWorkspaceDirMatchesNewLayout(t *testing.T) {
 	if err != nil {
 		t.Fatalf("state.NewLayout: %v", err)
 	}
-	got, err := workspaceDir(layout)
-	if err != nil {
-		t.Fatalf("workspaceDir: %v", err)
+	if got := layout.WorkspaceDir(); got != ws {
+		t.Errorf("Layout.WorkspaceDir() = %q, want %q", got, ws)
 	}
-	if got != ws {
-		t.Errorf("workspaceDir = %q, want %q", got, ws)
-	}
-	if _, err := workspaceDir(state.Layout{}); !errors.Is(err, ErrNoWorkspace) {
-		t.Errorf("workspaceDir(zero Layout) = %v, want ErrNoWorkspace", err)
+	if _, err := workspaceDir(&graph.RunContext{}); !errors.Is(err, ErrNoWorkspace) {
+		t.Errorf("workspaceDir(unset) = %v, want ErrNoWorkspace", err)
 	}
 }
 

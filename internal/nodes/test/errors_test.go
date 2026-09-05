@@ -118,12 +118,13 @@ func TestRunPropagatesANonToolchainRunnerError(t *testing.T) {
 }
 
 // TestRunRefusesAnUnderivableWorkspace pins the refusal rather than a fallback:
-// a zero Layout must never resolve to the process's working directory, because
-// that would run a stranger's test suite in whatever directory belay started in.
+// an unset Workspace must never resolve to the process's working directory,
+// because that would run a stranger's test suite -- and hand an agent write
+// access -- in whatever directory belay started in.
 func TestRunRefusesAnUnderivableWorkspace(t *testing.T) {
 	runner := &belaytest.FakeRunner{Responses: []belay.TestReport{{Total: 1, Passed: 1}}}
 	rc, _ := newRC(t, runner)
-	rc.Layout = state.Layout{} // zero value: RunDir() == ""
+	rc.Workspace = "" // the dispatcher always sets this; prove the node checks
 
 	res, err := New().Run(context.Background(), rc)
 	if !errors.Is(err, ErrNoWorkspace) {
@@ -137,21 +138,31 @@ func TestRunRefusesAnUnderivableWorkspace(t *testing.T) {
 	}
 }
 
-// TestWorkspaceDirDerivesTheRepositoryRoot pins the inverse of state.NewLayout,
-// including the malformed shapes it must reject instead of guessing.
-func TestWorkspaceDirDerivesTheRepositoryRoot(t *testing.T) {
+// TestUnsetWorkspaceIsRefused: the dispatcher supplies RunContext.Workspace.
+// If it is ever empty the node must refuse, never fall back to a relative path
+// -- that would run the target's suite inside belay's own directory.
+func TestUnsetWorkspaceIsRefused(t *testing.T) {
 	t.Parallel()
 
-	good, err := state.NewLayout("/repos/app", "run-1")
-	if err != nil {
-		t.Fatalf("NewLayout: %v", err)
-	}
-	if got, err := workspaceDir(good); err != nil || got != "/repos/app" {
-		t.Errorf("workspaceDir() = %q, %v; want %q, nil", got, err, "/repos/app")
-	}
+	rc, _ := newRC(t, &belaytest.FakeRunner{
+		Responses: []belay.TestReport{{Total: 1, Passed: 1}},
+	})
+	rc.Workspace = ""
 
-	if _, err := workspaceDir(state.Layout{}); !errors.Is(err, ErrNoWorkspace) {
-		t.Errorf("workspaceDir(zero) error = %v, want ErrNoWorkspace", err)
+	if _, err := New().Run(context.Background(), rc); !errors.Is(err, ErrNoWorkspace) {
+		t.Fatalf("Run() error = %v, want ErrNoWorkspace", err)
+	}
+}
+
+// state.NewLayout is the upstream guard: a relative or empty workspace can
+// never enter a Layout in the first place.
+func TestNewLayoutRefusesARelativeWorkspace(t *testing.T) {
+	t.Parallel()
+
+	for _, ws := range []string{"", ".", "relative/path"} {
+		if _, err := state.NewLayout(ws, "run-1"); err == nil {
+			t.Errorf("NewLayout(%q) succeeded; want refusal", ws)
+		}
 	}
 }
 

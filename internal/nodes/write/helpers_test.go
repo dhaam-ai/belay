@@ -39,12 +39,14 @@ func newRC(t *testing.T, step int, changed []string) (*graph.RunContext, string)
 		t.Fatalf("NewLayout: %v", err)
 	}
 	return &graph.RunContext{
-		Goal:     "make the tests pass",
-		State:    state.State{Code: state.Code{SessionID: "sess-1", ChangedFiles: changed}},
-		Layout:   layout,
-		NodeName: graph.NodeWrite,
-		Step:     step,
-		Attempt:  1,
+		Goal:      "make the tests pass",
+		State:     state.State{Code: state.Code{SessionID: "sess-1", ChangedFiles: changed}},
+		Layout:    layout,
+		Workspace: layout.WorkspaceDir(),
+		RunID:     layout.RunID(),
+		NodeName:  graph.NodeWrite,
+		Step:      step,
+		Attempt:   1,
 	}, root
 }
 

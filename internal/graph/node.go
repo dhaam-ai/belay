@@ -24,6 +24,7 @@ import (
 	"path/filepath"
 	"sort"
 
+	"github.com/belay-dev/belay/internal/budget"
 	"github.com/belay-dev/belay/internal/config"
 	"github.com/belay-dev/belay/internal/journal"
 	"github.com/belay-dev/belay/internal/state"
@@ -147,6 +148,23 @@ type RunContext struct {
 	// Layout resolves every path inside the run directory. Nodes must use
 	// it rather than joining paths themselves.
 	Layout state.Layout
+
+	// Workspace is the absolute path of the repository this node operates
+	// on: the tree whose tests run, whose files an agent edits, and which
+	// a reviewer scans. For a fanout candidate it is that candidate's
+	// isolated copy, not the original checkout, which is why it is a field
+	// the dispatcher sets rather than something a node derives.
+	Workspace string
+
+	// RunID identifies the run. Nodes need it to tell a human how to come
+	// back -- the approve gate's pause message is useless without it.
+	RunID string
+
+	// Budget is the run's spend so far, as recorded in the manifest. It is
+	// supplied here so a node that must reason about cost before incurring
+	// it -- fanout, which multiplies spend by N -- can do so without
+	// reading manifest.json, which the dispatcher owns.
+	Budget budget.Snapshot
 
 	// NodeName is the name of the executing node, and Step its position in
 	// the run. Attempt is 1 on a first execution and increments when the

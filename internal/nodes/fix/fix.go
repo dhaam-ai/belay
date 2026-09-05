@@ -51,7 +51,6 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
-	"path/filepath"
 
 	"github.com/belay-dev/belay/internal/graph"
 	"github.com/belay-dev/belay/internal/journal"
@@ -167,7 +166,7 @@ func (n *Node) Run(ctx context.Context, rc *graph.RunContext) (graph.Result, err
 	if rc.Agent == nil {
 		return graph.Result{}, ErrNoAgent
 	}
-	dir, err := workDir(rc.Layout)
+	dir, err := workDir(rc)
 	if err != nil {
 		return graph.Result{}, err
 	}
@@ -301,16 +300,11 @@ func goal(rc *graph.RunContext) string {
 // derivation is asserted against state.NewLayout in this package's tests,
 // so a change to the layout fails here loudly instead of pointing an agent
 // at the wrong directory.
-func workDir(l state.Layout) (string, error) {
-	runDir := l.RunDir()
-	if runDir == "" {
+func workDir(rc *graph.RunContext) (string, error) {
+	if rc.Workspace == "" {
 		return "", ErrNoWorkspace
 	}
-	dir := filepath.Dir(filepath.Dir(filepath.Dir(runDir)))
-	if dir == "" || dir == "." || dir == string(filepath.Separator) {
-		return "", fmt.Errorf("%w: run dir %q", ErrNoWorkspace, runDir)
-	}
-	return dir, nil
+	return rc.Workspace, nil
 }
 
 // logger returns rc's logger, or a discarding one. A node that panics

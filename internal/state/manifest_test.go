@@ -658,3 +658,45 @@ func TestStore_ApplyPatch_ConcurrentGoroutinesWithinOneProcess(t *testing.T) {
 		}
 	}
 }
+
+// A zero Layout must never yield a path. Its root is the empty string, so
+// every filepath.Join in the type resolves against the process working
+// directory: under `go test` that is the package source directory, and a run
+// once wrote its artifacts and node evidence straight into this repository.
+func TestZeroLayoutRefusesEveryWritablePath(t *testing.T) {
+	t.Parallel()
+
+	var zero Layout
+
+	if _, err := zero.ArtifactPath("plan.md"); !errors.Is(err, ErrInvalidPathSegment) {
+		t.Errorf("ArtifactPath on a zero Layout = %v, want ErrInvalidPathSegment", err)
+	}
+	if _, err := zero.NodeDir(1, "plan"); !errors.Is(err, ErrInvalidPathSegment) {
+		t.Errorf("NodeDir on a zero Layout = %v, want ErrInvalidPathSegment", err)
+	}
+	if _, err := zero.CandidateDir("c1"); !errors.Is(err, ErrInvalidPathSegment) {
+		t.Errorf("CandidateDir on a zero Layout = %v, want ErrInvalidPathSegment", err)
+	}
+}
+
+// NewLayout is the upstream half of the same guard: a relative workspace can
+// never enter a Layout, so the "." fallback is unreachable by construction.
+func TestNewLayoutRequiresAnAbsoluteWorkspace(t *testing.T) {
+	t.Parallel()
+
+	for _, ws := range []string{"", ".", "relative/repo", "./repo"} {
+		if _, err := NewLayout(ws, "run-1"); !errors.Is(err, ErrInvalidPathSegment) {
+			t.Errorf("NewLayout(%q) = %v, want ErrInvalidPathSegment", ws, err)
+		}
+	}
+	abs, err := NewLayout("/repos/app", "run-1")
+	if err != nil {
+		t.Fatalf("NewLayout(absolute): %v", err)
+	}
+	if got := abs.WorkspaceDir(); got != "/repos/app" {
+		t.Errorf("WorkspaceDir() = %q, want %q", got, "/repos/app")
+	}
+	if got := abs.RunID(); got != "run-1" {
+		t.Errorf("RunID() = %q, want %q", got, "run-1")
+	}
+}

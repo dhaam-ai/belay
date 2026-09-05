@@ -133,7 +133,7 @@ func (*Node) Run(ctx context.Context, rc *graph.RunContext) (graph.Result, error
 	if err != nil {
 		return graph.Result{Status: journal.StatusFailed}, err
 	}
-	dir, err := workspaceDir(rc.Layout)
+	dir, err := workspaceDir(rc)
 	if err != nil {
 		return graph.Result{Status: journal.StatusFailed}, err
 	}
@@ -162,12 +162,11 @@ func threshold(s config.Severity) (belay.Severity, error) {
 // as <workspace>/.belay/runs/<run-id>, so walking three parents back is the
 // exact inverse of its construction — and the only derivation available to a
 // node that must not read manifest.json itself (ADR 0002).
-func workspaceDir(l state.Layout) (string, error) {
-	root := l.RunDir()
-	if root == "" {
-		return "", fmt.Errorf("%w: cannot locate the workspace", ErrNoWorkspace)
+func workspaceDir(rc *graph.RunContext) (string, error) {
+	if rc.Workspace == "" {
+		return "", ErrNoWorkspace
 	}
-	return filepath.Dir(filepath.Dir(filepath.Dir(root))), nil
+	return rc.Workspace, nil
 }
 
 // runGate dispatches on review.mode and returns the adapter's report.

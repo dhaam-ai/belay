@@ -63,20 +63,11 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
-	"path/filepath"
 
 	"github.com/belay-dev/belay/internal/graph"
 	"github.com/belay-dev/belay/internal/journal"
 	"github.com/belay-dev/belay/internal/state"
 	"github.com/belay-dev/belay/pkg/belay"
-)
-
-// The run directory layout this node walks back up to find the workspace root.
-// They mirror the literals in state.NewLayout, which is the only constructor
-// that can produce a non-zero state.Layout.
-const (
-	belayDirName = ".belay"
-	runsDirName  = "runs"
 )
 
 // Errors returned by Run when it cannot reach a verdict. None of them mean
@@ -132,7 +123,7 @@ func (*Node) Run(ctx context.Context, rc *graph.RunContext) (graph.Result, error
 	if err := ctx.Err(); err != nil {
 		return graph.Result{}, fmt.Errorf("nodes/test: %w", err)
 	}
-	dir, err := workspaceDir(rc.Layout)
+	dir, err := workspaceDir(rc)
 	if err != nil {
 		return graph.Result{}, err
 	}
@@ -255,28 +246,11 @@ func note(runner string, r belay.TestReport) string {
 // a zero Layout would otherwise relativize to ".", and running the suite in
 // whatever directory belay was started from is a far worse outcome than
 // refusing.
-func workspaceDir(l state.Layout) (string, error) {
-	runDir := l.RunDir()
-	if runDir == "" {
-		return "", fmt.Errorf("%w: layout has no run directory", ErrNoWorkspace)
+func workspaceDir(rc *graph.RunContext) (string, error) {
+	if rc.Workspace == "" {
+		return "", ErrNoWorkspace
 	}
-	runs := filepath.Dir(runDir)
-	belayDir := filepath.Dir(runs)
-	if filepath.Base(runs) != runsDirName || filepath.Base(belayDir) != belayDirName {
-		return "", fmt.Errorf("%w: run directory %q is not <workspace>/%s/%s/<run id>",
-			ErrNoWorkspace, runDir, belayDirName, runsDirName)
-	}
-
-	ws := filepath.Dir(belayDir)
-	// A Layout built over an empty or relative workspace lands on "." here,
-	// which is the CWD fallback this function exists to prevent — it would run
-	// a stranger's suite in whatever directory belay was started in.
-	// Manifest.Workspace is documented as an absolute path, so anything else
-	// is a wiring bug worth refusing.
-	if !filepath.IsAbs(ws) {
-		return "", fmt.Errorf("%w: %q is not absolute (from run directory %q)", ErrNoWorkspace, ws, runDir)
-	}
-	return ws, nil
+	return rc.Workspace, nil
 }
 
 // logger returns rc's logger, or one that discards, so a RunContext built

@@ -52,15 +52,17 @@ func newHarness(t *testing.T, st state.State) *harness {
 		ws:    ws,
 		agent: agent,
 		rc: &graph.RunContext{
-			Goal:     "add rate limiting to the login handler",
-			State:    st,
-			Config:   config.Default(),
-			Layout:   layout,
-			NodeName: graph.NodeFix,
-			Step:     fixStep,
-			Attempt:  1,
-			Logger:   slog.New(slog.DiscardHandler),
-			Agent:    agent,
+			Goal:      "add rate limiting to the login handler",
+			State:     st,
+			Config:    config.Default(),
+			Layout:    layout,
+			Workspace: layout.WorkspaceDir(),
+			RunID:     layout.RunID(),
+			NodeName:  graph.NodeFix,
+			Step:      fixStep,
+			Attempt:   1,
+			Logger:    slog.New(slog.DiscardHandler),
+			Agent:     agent,
 		},
 	}
 }
@@ -522,9 +524,9 @@ func TestPreconditionErrors(t *testing.T) {
 		}
 	})
 
-	t.Run("unusable layout", func(t *testing.T) {
+	t.Run("unset workspace", func(t *testing.T) {
 		h := newHarness(t, failingState(0))
-		h.rc.Layout = state.Layout{}
+		h.rc.Workspace = ""
 		if _, err := fix.New().Run(context.Background(), h.rc); !errors.Is(err, fix.ErrNoWorkspace) {
 			t.Fatalf("err = %v, want ErrNoWorkspace", err)
 		}
@@ -582,12 +584,13 @@ func TestWorkDirTracksLayout(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewLayout: %v", err)
 	}
-	if got, want := filepath.Dir(filepath.Dir(filepath.Dir(layout.RunDir()))), ws; got != want {
-		t.Fatalf("workspace derivation = %q, want %q; state.Layout's shape changed", got, want)
+	if got, want := layout.WorkspaceDir(), ws; got != want {
+		t.Fatalf("Layout.WorkspaceDir() = %q, want %q", got, want)
 	}
 
 	h := newHarness(t, failingState(0))
 	h.rc.Layout = layout
+	h.rc.Workspace = layout.WorkspaceDir()
 	if _, err := fix.New().Run(context.Background(), h.rc); err != nil {
 		t.Fatalf("Run: %v", err)
 	}

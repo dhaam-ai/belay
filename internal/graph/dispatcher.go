@@ -539,9 +539,16 @@ func (d *Dispatcher) loop(
 			slog.String("node", current), slog.Int("step", step), slog.Int("attempt", attempt))
 		logger.Info("belay/graph: node started")
 
+		layout := d.store.Layout()
 		exec := d.execute(ctx, node, &RunContext{
-			Goal: man.Goal, State: st, Config: d.cfg, Layout: d.store.Layout(),
-			NodeName: current, Step: step, Attempt: attempt, Logger: logger,
+			Goal: man.Goal, State: st, Config: d.cfg, Layout: layout,
+			// Supplied, not derived: six nodes previously reconstructed
+			// the workspace by walking up from the run directory, which
+			// yields belay's own tree for a zero Layout.
+			Workspace: layout.WorkspaceDir(),
+			RunID:     man.RunID,
+			Budget:    ledger.Snapshot(d.cfg.Budget.MaxUSD),
+			NodeName:  current, Step: step, Attempt: attempt, Logger: logger,
 			Agent: d.agent, Runner: d.runner, Linter: d.linter,
 			Reviewer: d.reviewer, Isolator: d.isolator,
 		})
