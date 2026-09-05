@@ -1,27 +1,18 @@
 package code
 
-import (
-	"fmt"
-	"strings"
-)
-
-// diffArtifactName returns the artifact name for the diff proposed at
-// step.
-//
-// Numbering by graph.RunContext.Step rather than by a fixed name is what
-// keeps a fix loop's history intact: every pass through the code node runs
-// at a later step, so attempt one's diff is still on disk when attempt two
-// writes its own. Zero padding keeps the artifacts directory sorted the
-// way the run actually happened.
-func diffArtifactName(step int) string { return fmt.Sprintf("diff-%04d.patch", step) }
+import "strings"
 
 // extractDiff pulls the unified diff out of an agent's reply, or returns
 // "" if the reply contains none.
 //
-// The prompt asks for a fenced block tagged "diff", which is what a
-// cooperative backend produces; the bare-diff fallback exists because a
-// model that forgets the fence has still done the work, and throwing that
-// away would cost a paid invocation to recover something already in hand.
+// Nothing asks the agent for a diff any more — the prompt asks it to edit
+// files and report their paths. This is the salvage path described in
+// changeSet: a backend that volunteers a diff anyway has still said which
+// files it touched, and harvesting those paths costs nothing, where
+// discarding them would mean paying for another invocation to learn
+// something already in hand. The bare-diff fallback below exists for the
+// same reason, one level down: a model that emitted a diff but forgot to
+// fence it has still done the work.
 func extractDiff(text string) string {
 	if block, ok := fencedDiff(text); ok {
 		return block
@@ -62,7 +53,7 @@ func fencedDiff(text string) (string, bool) {
 // that patches a Markdown file terminate its own block early.
 func isDiffFenceOpen(line string) bool {
 	s := strings.TrimSpace(line)
-	if !strings.HasPrefix(s, diffFence) {
+	if !strings.HasPrefix(s, fence) {
 		return false
 	}
 	info := strings.ToLower(strings.TrimSpace(strings.TrimLeft(s, "`")))
@@ -71,7 +62,7 @@ func isDiffFenceOpen(line string) bool {
 
 // isFenceClose reports whether line is a closing fence in column zero.
 func isFenceClose(line string) bool {
-	if !strings.HasPrefix(line, diffFence) {
+	if !strings.HasPrefix(line, fence) {
 		return false
 	}
 	return strings.TrimSpace(strings.TrimLeft(line, "`")) == ""

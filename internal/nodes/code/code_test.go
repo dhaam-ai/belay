@@ -84,7 +84,7 @@ func TestRunSendsThePlanAndGoalToTheBackend(t *testing.T) {
 		t.Errorf("request Prompt is missing the goal or the plan:\n%s", req.Prompt)
 	}
 	if req.SystemPrompt == "" {
-		t.Error("request SystemPrompt is empty; the propose-do-not-apply rule is unstated")
+		t.Error("request SystemPrompt is empty; the edit-in-place instruction is unstated")
 	}
 	if req.WorkDir != f.ws {
 		t.Errorf("WorkDir = %q, want the workspace root %q", req.WorkDir, f.ws)
@@ -95,15 +95,37 @@ func TestRunSendsThePlanAndGoalToTheBackend(t *testing.T) {
 	if req.Model != f.rc.Config.Agent.Model {
 		t.Errorf("Model = %q, want config value %q", req.Model, f.rc.Config.Agent.Model)
 	}
-	for _, banned := range []string{"Write", "Edit", "Bash"} {
-		for _, tool := range req.AllowedTools {
-			if tool == banned {
-				t.Errorf("AllowedTools contains %q; the code node must not be able to edit the workspace", banned)
-			}
+	assertTools(t, req.AllowedTools)
+}
+
+// The capability contract, asserted against what the backend actually
+// received rather than against the constructor that built it.
+//
+// Edit and Write are what make this node able to do its job at all: nothing
+// downstream applies a patch, so an agent without them leaves the workspace
+// untouched and the run loops test -> fix -> test until the give-up budget is
+// gone. Bash is withheld just as deliberately — the test node owns running the
+// suite, and a coding agent with a shell can also commit, which is what makes
+// a run abandonable.
+func assertTools(t *testing.T, tools []string) {
+	t.Helper()
+
+	granted := make(map[string]bool, len(tools))
+	for _, tool := range tools {
+		granted[tool] = true
+	}
+	for _, want := range []string{"Read", "Grep", "Glob", "Edit", "Write"} {
+		if !granted[want] {
+			t.Errorf("AllowedTools is missing %q; the agent cannot implement the plan without it: %v",
+				want, tools)
 		}
 	}
-	if len(req.AllowedTools) == 0 {
-		t.Error("AllowedTools is empty, which means the backend's default (writable) tool set")
+	if granted["Bash"] {
+		t.Errorf("AllowedTools grants \"Bash\"; the test node runs the suite and the agent must not "+
+			"run arbitrary commands or commit: %v", tools)
+	}
+	if len(tools) == 0 {
+		t.Error("AllowedTools is empty, which selects the backend's default tool set, not this node's")
 	}
 }
 
@@ -388,13 +410,16 @@ func TestRunRespectsContextCancellation(t *testing.T) {
 	})
 }
 
-// A zero Layout cannot name a workspace; the node must say so rather than
-// pointing the agent at whatever directory happens to be the process's
+// A zero Layout cannot name a workspace; the node must refuse it rather
+// than pointing the agent at whatever directory happens to be the process's
 // current one.
 //
-// Chdir is what makes this reachable: a zero Layout resolves
-// artifacts/plan.md relative to the working directory, so the plan read
-// succeeds and execution gets as far as the workspace check.
+// The sentinel is deliberately not pinned. state.Layout now refuses a zero
+// value inside ArtifactPath, so the plan read fails first and the run never
+// reaches this package's own ErrWorkspace check — which stays in place as
+// the guard for any Layout that is constructible but wrongly shaped. What
+// this test protects is the property that survives either route: an
+// unusable Layout costs no paid invocation.
 func TestRunRejectsALayoutItCannotInvert(t *testing.T) {
 	f := newFixture(t, belay.AgentResponse{Text: "done"})
 
@@ -411,8 +436,8 @@ func TestRunRejectsALayoutItCannotInvert(t *testing.T) {
 	rc.Layout = state.Layout{}
 
 	_, err := code.New().Run(context.Background(), &rc)
-	if !errors.Is(err, code.ErrWorkspace) {
-		t.Fatalf("Run error = %v, want ErrWorkspace", err)
+	if err == nil {
+		t.Fatal("Run succeeded on a Layout that names no run directory")
 	}
 	if f.agent.CallCount() != 0 {
 		t.Fatal("the agent was invoked without a resolvable workspace directory")
