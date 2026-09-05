@@ -167,6 +167,14 @@ func (*Node) Run(ctx context.Context, rc *graph.RunContext) (graph.Result, error
 	}
 	if report.OK() {
 		res.Next = graph.NodeReview
+		// Clear the fix budget on green. The fix node cannot do this
+		// itself -- it only runs while something is failing, so it never
+		// observes the passing run that earns the reset. Without this, a
+		// run that breaks, gets repaired, and breaks again later inherits
+		// a nearly-exhausted budget and gives up almost immediately on an
+		// unrelated failure. Resetting is not cap enforcement, so the fix
+		// node remains the sole owner of give_up itself.
+		res.Patch.Fix = &state.Fix{Attempts: 0, GiveUp: false}
 	}
 
 	log.Info("tests finished",
