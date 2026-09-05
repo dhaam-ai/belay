@@ -15,6 +15,7 @@ This directory contains architecture decisions for belay, recorded to capture th
 | [0007](0007-budget-ledger-day-one.md) | Budget Ledger and Cost Caps on Day One | Accepted | Budget controls track spend and abort if cap exceeded. Fanout is safe by default. Cost: adds operational complexity; requires understanding budget fields. |
 | [0008](0008-local-linters-default.md) | Local Linters as Default Quality Gate; SonarQube Opt-In | Accepted | Zero-setup linters are default; SonarQube requires infrastructure. Cost: two review paths to maintain; linters miss semantic bugs. |
 | [0009](0009-record-replay-cassettes.md) | Record/Replay Cassettes for Zero-Cost CI | Accepted | Tests record/replay MCP and Claude calls. CI costs zero. Cost: cassettes can drift; maintainer live-smoke test gates releases. |
+| [0010](0010-cli-designed-for-how-people-think.md) | The CLI is designed against a cognitive model, not a feature list | Accepted | Commands are designed against the six cognitive systems in Whalen's *Designing for How People Think*, so parallel contributors produce one coherent tool. |
 
 ## Reading ADRs
 
