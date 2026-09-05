@@ -1,0 +1,9 @@
+{
+  "format_version": 99,
+  "provenance": {
+    "belay_version": "v99.0.0-from-the-future",
+    "backend": "claude-code",
+    "note": "Fixture for TestLoadCassette_UnsupportedFormatVersion: this format_version does not exist yet, and LoadCassette must reject it with a typed FormatVersionError rather than guess at an incompatible shape."
+  },
+  "interactions": []
+}

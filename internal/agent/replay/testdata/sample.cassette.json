@@ -1,0 +1,33 @@
+{
+  "format_version": 1,
+  "provenance": {
+    "belay_version": "v0.1.0-example",
+    "backend": "claude-code",
+    "model": "claude-opus-4",
+    "recorded_at": "2026-08-01T09:00:00Z",
+    "note": "Hand-authored example cassette for internal/agent/replay tests and documentation. Not a real recording — every response below is fabricated. This is what a reviewer should expect to see in a real cassette diff: a fingerprint, the normalized request it came from, and the response served for it."
+  },
+  "interactions": [
+    {
+      "fingerprint": "sha256:example0000000000000000000000000000000000000000000000000000",
+      "request": {
+        "prompt": "plan the Login handler described in docs/spec.md",
+        "work_dir": "<workdir>",
+        "max_turns": 6,
+        "model": "claude-opus-4"
+      },
+      "response": {
+        "text": "Plan: 1) add LoginRequest/LoginResponse types 2) wire the handler into the router 3) add table-driven tests for invalid credentials and rate limiting.",
+        "session_id": "sess-example-1",
+        "usage": {
+          "input_tokens": 812,
+          "output_tokens": 264,
+          "usd": 0.041,
+          "estimated": false
+        },
+        "turns": 2,
+        "raw": "{\"subtype\":\"success\",\"num_turns\":2,\"total_cost_usd\":0.041}"
+      }
+    }
+  ]
+}
