@@ -22,10 +22,18 @@ import (
 // is the first. Every variable a child receives beyond this list is therefore
 // an explicit, per-call decision by the caller.
 //
-// The five entries below are the minimum for a child to locate its own
+// The six entries below are the minimum for a child to locate its own
 // toolchain (PATH), find a writable scratch and config root (HOME, TMPDIR),
-// and produce stable, parseable output (LANG, TERM).
-var baseEnvNames = []string{"HOME", "LANG", "PATH", "TERM", "TMPDIR"}
+// produce stable, parseable output (LANG, TERM), and identify the invoking
+// account (USER).
+//
+// USER is here because omitting it broke the only shipped agent backend, and
+// broke it misleadingly. The claude CLI resolves its stored credentials
+// through the account's keychain, and without USER it cannot; it then reports
+// "Not logged in - Please run /login", which sends the user to re-authenticate
+// a CLI that is in fact already authenticated. None of it is sensitive: USER
+// is the account name, already implicit in HOME.
+var baseEnvNames = []string{"HOME", "LANG", "PATH", "TERM", "TMPDIR", "USER"}
 
 // BaseEnvNames returns the always-allowed environment variable names.
 //

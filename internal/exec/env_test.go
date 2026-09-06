@@ -243,3 +243,26 @@ func cmpEmptySlices() cmp.Option {
 		return len(x) == 0 && len(y) == 0
 	}, cmp.Comparer(func(_, _ []string) bool { return true }))
 }
+
+// USER must stay in the base allowlist.
+//
+// Its absence is not a theoretical gap: it broke the only shipped agent
+// backend on the first live run, and broke it misleadingly. The claude CLI
+// resolves stored credentials through the account keychain and cannot without
+// USER; it then reports "Not logged in - Please run /login", sending the user
+// to re-authenticate a CLI that is already authenticated. Nothing about the
+// failure points at belay, which is what makes it expensive.
+func TestBaseEnvIncludesUSER(t *testing.T) {
+	t.Parallel()
+
+	names := BaseEnvNames()
+	if !slices.Contains(names, "USER") {
+		t.Fatalf("BaseEnvNames() = %v, missing USER: the agent backend cannot reach its "+
+			"credentials without it and fails as if the user were logged out", names)
+	}
+	// It must not be treated as secret-bearing -- redacting an account name
+	// would corrupt captured output for no benefit.
+	if IsSecretName("USER") {
+		t.Error("USER is classified as secret-bearing; it is an account name, already implicit in HOME")
+	}
+}
