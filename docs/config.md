@@ -4,7 +4,7 @@ Belay is configured via a `belay.yaml` file in the project root. This document d
 
 ## File Location
 
-Belay looks for `belay.yaml` in the current directory. You can also specify an alternate path with `belay run --config /path/to/config.yaml`.
+Belay looks for `belay.yaml` in the workspace directory (specified by `--workspace`, defaulting to `.`). For example, `belay run --workspace ../other-repo "your goal"` reads `../other-repo/belay.yaml`. You can also specify an alternate path with `belay run --config /path/to/config.yaml`, which overrides the automatic lookup.
 
 ## Top-Level Fields
 
@@ -71,12 +71,20 @@ Configuration for the execution graph (DAG phases, ordering, timeouts).
 
 ### `graph.give_up`
 
-**Type**: Boolean  
-**Default**: `false`
+**Type**: Integer  
+**Default**: `3`
 
-If `true`, the graph stops and returns success if any phase fails. Useful for MVP/exploratory runs where partial results are acceptable.
+How many times the fix node may attempt a repair before belay stops and hands
+the problem back to you. The fix loop is entered by a failing test suite and by
+a failed quality gate alike; each pass through it consumes one attempt.
 
-If `false` (default), the graph retries failed phases up to `graph.max_steps` times.
+At the cap the run ends as failed, with a note naming the exhaustion — it does
+not silently return a partial result. Set it higher for a task you expect to
+take several rounds, lower to fail fast. It must be at least 1.
+
+Not to be confused with the `give_up` field belay writes into a run's
+`state.json`, which is a boolean recording whether the loop *has* exhausted
+this budget.
 
 ### `graph.max_steps`
 
@@ -96,13 +104,21 @@ The timeout for a single node (phase) to complete. If a phase takes longer, it i
 
 ### `graph.approval`
 
-**Type**: String  
-**Default**: `"manual"`  
-**Valid values**: `"manual"`, `"auto"`
+**Type**: Boolean  
+**Default**: `true`
 
-Whether the approval phase requires manual user input:
-- `"manual"`: Pause at the approval phase and wait for user to approve or reject
-- `"auto"`: Skip manual approval (useful for CI/testing)
+Whether belay stops after planning so a human can read the plan before any code
+is written.
+
+With `true`, the run pauses at the approve node and exits cleanly; the plan is
+at `<run-dir>/artifacts/plan.md`, you may edit it, and `belay resume` continues
+from there — reading the file again, so your edits are what the agent receives.
+Because the pause is a clean exit rather than a blocked terminal, a run can
+wait indefinitely and survive the session that started it.
+
+With `false`, planning routes straight to coding. That is the right setting for
+an unattended or CI run, and the wrong one for the first time you point belay
+at a repository you care about.
 
 ## `test`
 

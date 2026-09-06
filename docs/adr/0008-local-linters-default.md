@@ -20,7 +20,9 @@ Local linters (golangci-lint, eslint, bandit, sqlcheck) are the default quality 
 ## Consequences
 
 ### Positive
-- **Works out of the box**: A new user can run `belay run --plan "fix the bug" --project .` and get a quality gate without installing Docker or creating a SonarQube account. Immediate value.
+- **Works out of the box**: A new user can run `belay run "fix the bug" --workspace .` and get a quality gate without installing Docker or creating a SonarQube account. Immediate value.
+
+> **Correction (2026-09-06)**: The command example on this line originally read `belay run --plan "fix the bug" --project .`. The shipped CLI uses `belay run "<what you want built>" --workspace <dir>`. See `belay run --help` for the current interface.
 - **Fast feedback**: Linters run in seconds locally. No network latency, no server queues.
 - **Zero cost**: Linters are free. SonarQube is free tier (limited) or commercial.
 - **Easy to debug**: Linter failures are local and deterministic; reproduce instantly.

@@ -500,9 +500,26 @@ func projectLine(projects []detect.Project) string {
 	if len(projects) == 0 {
 		return "belay recognises no Go, Node or Python project here"
 	}
-	kinds := make([]string, 0, len(projects))
+	// Count kinds rather than listing one entry per detected module. A
+	// repository with nested modules -- belay's own, with two fixture
+	// modules under it -- otherwise renders as "go, go, go", which repeats a
+	// word three times and tells the reader nothing they can act on.
+	counts := make(map[string]int, len(projects))
+	order := make([]string, 0, len(projects))
 	for _, p := range projects {
-		kinds = append(kinds, p.Kind.String())
+		k := p.Kind.String()
+		if counts[k] == 0 {
+			order = append(order, k)
+		}
+		counts[k]++
+	}
+	kinds := make([]string, 0, len(order))
+	for _, k := range order {
+		if n := counts[k]; n > 1 {
+			kinds = append(kinds, fmt.Sprintf("%s (%d modules)", k, n))
+			continue
+		}
+		kinds = append(kinds, k)
 	}
 	return "belay found: " + strings.Join(kinds, ", ")
 }
