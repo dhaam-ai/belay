@@ -16,10 +16,10 @@ import (
 
 	"github.com/spf13/cobra"
 
-	"github.com/belay-dev/belay/internal/config"
-	"github.com/belay-dev/belay/internal/detect"
-	"github.com/belay-dev/belay/internal/graph"
-	"github.com/belay-dev/belay/internal/state"
+	"github.com/dhaam-ai/belay/internal/config"
+	"github.com/dhaam-ai/belay/internal/detect"
+	"github.com/dhaam-ai/belay/internal/graph"
+	"github.com/dhaam-ai/belay/internal/state"
 )
 
 // runFlags holds the settings `belay run` and `belay resume` share. Both

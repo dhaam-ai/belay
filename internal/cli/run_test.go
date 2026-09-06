@@ -13,9 +13,9 @@ import (
 
 	"github.com/spf13/cobra"
 
-	"github.com/belay-dev/belay/internal/graph"
-	"github.com/belay-dev/belay/internal/nodes/approve"
-	"github.com/belay-dev/belay/internal/state"
+	"github.com/dhaam-ai/belay/internal/graph"
+	"github.com/dhaam-ai/belay/internal/nodes/approve"
+	"github.com/dhaam-ai/belay/internal/state"
 )
 
 // runCLI executes the command tree the way a shell would, with both streams

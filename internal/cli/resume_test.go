@@ -9,11 +9,11 @@ import (
 	"testing"
 	"time"
 
-	"github.com/belay-dev/belay/internal/config"
-	"github.com/belay-dev/belay/internal/graph"
-	"github.com/belay-dev/belay/internal/journal"
-	"github.com/belay-dev/belay/internal/nodes/approve"
-	"github.com/belay-dev/belay/internal/state"
+	"github.com/dhaam-ai/belay/internal/config"
+	"github.com/dhaam-ai/belay/internal/graph"
+	"github.com/dhaam-ai/belay/internal/journal"
+	"github.com/dhaam-ai/belay/internal/nodes/approve"
+	"github.com/dhaam-ai/belay/internal/state"
 )
 
 // seedManifest writes a run directory holding only a manifest, which is all

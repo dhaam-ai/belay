@@ -118,8 +118,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/belay-dev/belay/internal/exec"
-	"github.com/belay-dev/belay/pkg/belay"
+	"github.com/dhaam-ai/belay/internal/exec"
+	"github.com/dhaam-ai/belay/pkg/belay"
 )
 
 // Source is the QualityReport.Source every report from this package carries.

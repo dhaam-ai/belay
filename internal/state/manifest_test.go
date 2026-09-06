@@ -14,8 +14,8 @@ import (
 
 	"github.com/google/go-cmp/cmp"
 
-	"github.com/belay-dev/belay/internal/config"
-	"github.com/belay-dev/belay/pkg/belay"
+	"github.com/dhaam-ai/belay/internal/config"
+	"github.com/dhaam-ai/belay/pkg/belay"
 )
 
 func TestRunStatus_StringParseRoundTrip(t *testing.T) {

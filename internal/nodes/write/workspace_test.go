@@ -7,7 +7,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/belay-dev/belay/internal/state"
+	"github.com/dhaam-ai/belay/internal/state"
 )
 
 // escapeTarget is the sentinel content an escape test would write if the gate

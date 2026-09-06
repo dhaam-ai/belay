@@ -41,9 +41,9 @@ var allowedImports = map[string]bool{
 	// package is otherwise capable of exec and sockets, so
 	// TestSyscallIsUsedOnlyForErrno pins the usage down to that one name.
 	"syscall": true,
-	"github.com/belay-dev/belay/internal/graph":   true,
-	"github.com/belay-dev/belay/internal/journal": true,
-	"github.com/belay-dev/belay/internal/state":   true,
+	"github.com/dhaam-ai/belay/internal/graph":   true,
+	"github.com/dhaam-ai/belay/internal/journal": true,
+	"github.com/dhaam-ai/belay/internal/state":   true,
 }
 
 // sourceFiles returns every non-test .go file in the package directory.

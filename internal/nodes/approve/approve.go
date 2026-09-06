@@ -42,9 +42,9 @@ import (
 	"log/slog"
 	"path/filepath"
 
-	"github.com/belay-dev/belay/internal/graph"
-	"github.com/belay-dev/belay/internal/journal"
-	"github.com/belay-dev/belay/internal/state"
+	"github.com/dhaam-ai/belay/internal/graph"
+	"github.com/dhaam-ai/belay/internal/journal"
+	"github.com/dhaam-ai/belay/internal/state"
 )
 
 // ErrPlanUnavailable reports that the approve gate could not obtain the plan

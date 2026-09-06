@@ -9,11 +9,11 @@ import (
 	"testing"
 	"time"
 
-	"github.com/belay-dev/belay/internal/config"
-	"github.com/belay-dev/belay/internal/graph"
-	"github.com/belay-dev/belay/internal/journal"
-	"github.com/belay-dev/belay/internal/nodes"
-	"github.com/belay-dev/belay/internal/state"
+	"github.com/dhaam-ai/belay/internal/config"
+	"github.com/dhaam-ai/belay/internal/graph"
+	"github.com/dhaam-ai/belay/internal/journal"
+	"github.com/dhaam-ai/belay/internal/nodes"
+	"github.com/dhaam-ai/belay/internal/state"
 )
 
 // loopHarness owns one run's real, on-disk run directory — manifest.json,

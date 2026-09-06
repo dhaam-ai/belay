@@ -13,7 +13,7 @@ import (
 	"syscall"
 	"testing"
 
-	"github.com/belay-dev/belay/pkg/belay"
+	"github.com/dhaam-ai/belay/pkg/belay"
 )
 
 // TestCreateCopiesTheTree is the baseline: structure and content arrive

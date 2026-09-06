@@ -9,8 +9,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/belay-dev/belay/pkg/belay"
-	"github.com/belay-dev/belay/pkg/belay/belaytest"
+	"github.com/dhaam-ai/belay/pkg/belay"
+	"github.com/dhaam-ai/belay/pkg/belay/belaytest"
 )
 
 // fixedClock returns a deterministic Now func for tests that assert exact

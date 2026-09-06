@@ -4,7 +4,7 @@ import (
 	"context"
 	"sync"
 
-	"github.com/belay-dev/belay/pkg/belay"
+	"github.com/dhaam-ai/belay/pkg/belay"
 )
 
 // FakeRunner is a scriptable belay.TestRunner for tests.

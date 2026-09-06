@@ -5,8 +5,8 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/belay-dev/belay/internal/config"
-	"github.com/belay-dev/belay/internal/state"
+	"github.com/dhaam-ai/belay/internal/config"
+	"github.com/dhaam-ai/belay/internal/state"
 )
 
 // Sentinel errors returned by Select. Callers detect them with errors.Is.

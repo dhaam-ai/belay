@@ -4,7 +4,7 @@ import (
 	"context"
 	"sync"
 
-	"github.com/belay-dev/belay/pkg/belay"
+	"github.com/dhaam-ai/belay/pkg/belay"
 )
 
 // FakeLinter is a scriptable belay.Linter for tests.

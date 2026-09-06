@@ -20,13 +20,13 @@ belay timeline
 ### From Source (requires Go 1.21+)
 
 ```bash
-git clone https://github.com/belay-dev/belay.git
+git clone https://github.com/dhaam-ai/belay.git
 cd belay
 make build
 ./bin/belay --help
 ```
 
-**Note on Module Path**: The path `github.com/belay-dev/belay` is a placeholder. The real repo details will change before v1.0; stay tuned for updates.
+**Note on Module Path**: The path `github.com/dhaam-ai/belay` is a placeholder. The real repo details will change before v1.0; stay tuned for updates.
 
 ## Five-Minute Quickstart
 
@@ -278,7 +278,7 @@ belay is **early but real**. Use it for:
 
 1. **Only Claude Code is shipped**: v0.1 includes the Claude Code agent backend. The `AgentBackend` interface is exported so Codex and Gemini can be added, but only Claude Code is tested and supported. See ADR-0005.
 
-2. **Module path is a placeholder**: `github.com/belay-dev/belay` will change when the real repo is public. Use `go get github.com/belay-dev/belay@latest` or clone from the URL when it exists.
+2. **Module path is a placeholder**: `github.com/dhaam-ai/belay` will change when the real repo is public. Use `go get github.com/dhaam-ai/belay@latest` or clone from the URL when it exists.
 
 3. **Unix only**: belay's process runner, linter launcher, and workspace isolation use unix-specific system calls. Windows and macOS 11 (Monterey) are not supported. (Contributions welcome.)
 
@@ -297,7 +297,7 @@ belay welcomes contributions. Read `CONTRIBUTING.md` for commit message conventi
 ### Development
 
 ```bash
-git clone https://github.com/belay-dev/belay.git
+git clone https://github.com/dhaam-ai/belay.git
 cd belay
 make build
 ./bin/belay --help

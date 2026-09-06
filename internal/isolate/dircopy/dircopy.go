@@ -78,7 +78,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/belay-dev/belay/pkg/belay"
+	"github.com/dhaam-ai/belay/pkg/belay"
 )
 
 // Isolator implements belay.Isolator by copying a source tree into a

@@ -6,7 +6,7 @@ import (
 	"regexp"
 	"strings"
 
-	"github.com/belay-dev/belay/pkg/belay"
+	"github.com/dhaam-ai/belay/pkg/belay"
 )
 
 // redacted replaces every secret Scrub finds.

@@ -7,11 +7,11 @@ import (
 	"errors"
 	"testing"
 
-	"github.com/belay-dev/belay/internal/config"
-	"github.com/belay-dev/belay/internal/graph"
-	"github.com/belay-dev/belay/internal/state"
-	"github.com/belay-dev/belay/pkg/belay"
-	"github.com/belay-dev/belay/pkg/belay/belaytest"
+	"github.com/dhaam-ai/belay/internal/config"
+	"github.com/dhaam-ai/belay/internal/graph"
+	"github.com/dhaam-ai/belay/internal/state"
+	"github.com/dhaam-ai/belay/pkg/belay"
+	"github.com/dhaam-ai/belay/pkg/belay/belaytest"
 )
 
 // TestLoop_GiveUpBoundsAReviewOnlyLoop documents a real defect found

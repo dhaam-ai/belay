@@ -8,8 +8,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/belay-dev/belay/internal/nodes/code"
-	"github.com/belay-dev/belay/pkg/belay"
+	"github.com/dhaam-ai/belay/internal/nodes/code"
+	"github.com/dhaam-ai/belay/pkg/belay"
 	"github.com/google/go-cmp/cmp"
 )
 

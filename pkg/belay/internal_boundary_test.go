@@ -17,7 +17,7 @@ import (
 //
 // Go's own internal-package visibility rule does not catch this on its
 // own: it only stops packages OUTSIDE this module from importing
-// internal/. Anything inside github.com/belay-dev/belay — including
+// internal/. Anything inside github.com/dhaam-ai/belay — including
 // pkg/belay itself — is freely allowed by the compiler to import
 // internal/, precisely because they share a module. This test is what
 // actually enforces the boundary, by inspecting the real build graph with

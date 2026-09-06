@@ -15,7 +15,7 @@ utility in Go. `GOAL.md` is the exact prompt belay feeds the agent.
 must satisfy. Everything else here supports those two files.
 
 `fixtures/wc/go.mod` makes this its own Go module
-(`belay.dev/fixtures/wc`), separate from the `github.com/belay-dev/belay`
+(`belay.dev/fixtures/wc`), separate from the `github.com/dhaam-ai/belay`
 root module. That is deliberate: `go build ./...` and `go test ./...` run
 from the repo root skip nested modules automatically, so this fixture
 (and the tokens spent solving it) never leaks into the root module's own

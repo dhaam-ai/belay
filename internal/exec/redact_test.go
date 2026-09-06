@@ -122,8 +122,8 @@ func TestRedactPatterns(t *testing.T) {
 		},
 		{
 			name: "clean output untouched",
-			in:   "ok  github.com/belay-dev/belay/internal/exec  0.412s",
-			want: "ok  github.com/belay-dev/belay/internal/exec  0.412s",
+			in:   "ok  github.com/dhaam-ai/belay/internal/exec  0.412s",
+			want: "ok  github.com/dhaam-ai/belay/internal/exec  0.412s",
 		},
 		{
 			name: "version strings untouched",
@@ -240,7 +240,7 @@ func TestRedactStreamingEveryChunkBoundary(t *testing.T) {
 // was not seeded at all, not replace every byte boundary with a marker.
 func TestRedactEmptySecretDoesNotCorruptOutput(t *testing.T) {
 	t.Parallel()
-	const clean = "ok  github.com/belay-dev/belay/internal/journal  0.118s"
+	const clean = "ok  github.com/dhaam-ai/belay/internal/journal  0.118s"
 	tests := []struct {
 		name  string
 		value string

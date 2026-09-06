@@ -9,8 +9,8 @@ import (
 
 	"github.com/google/go-cmp/cmp"
 
-	"github.com/belay-dev/belay/internal/agent/replay"
-	"github.com/belay-dev/belay/pkg/belay"
+	"github.com/dhaam-ai/belay/internal/agent/replay"
+	"github.com/dhaam-ai/belay/pkg/belay"
 )
 
 // timeCmp lets cmp.Diff compare time.Time by instant, since time.Time

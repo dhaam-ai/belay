@@ -37,8 +37,8 @@ mkdir -p Formula
 cat > Formula/belay.rb << 'EOF'
 class Belay < Formula
   desc "Durable, resumable orchestrator for autonomous coding agents"
-  homepage "https://github.com/belay-dev/belay"
-  url "https://github.com/belay-dev/belay/releases/download/v0.0.1/belay_0.0.1_darwin_amd64.tar.gz"
+  homepage "https://github.com/dhaam-ai/belay"
+  url "https://github.com/dhaam-ai/belay/releases/download/v0.0.1/belay_0.0.1_darwin_amd64.tar.gz"
   sha256 "0000000000000000000000000000000000000000000000000000000000000000"
 
   def install
@@ -67,7 +67,7 @@ The workflow is pre-configured to use `GITHUB_TOKEN`, which is sufficient.
 
 ### 4. Update GoReleaser Configuration
 
-If you renamed the module from `github.com/belay-dev/belay` using `make rename-module OWNER=<handle>`:
+If you renamed the module from `github.com/dhaam-ai/belay` using `make rename-module OWNER=<handle>`:
 
 1. Update `.goreleaser.yaml`:
    - Change `ldflags` paths (all three: Version, Commit, BuildDate)
@@ -131,7 +131,7 @@ The workflow is triggered automatically when you push a semver tag:
 
 ```bash
 # Monitor the workflow in GitHub:
-# https://github.com/belay-dev/belay/actions/workflows/release.yml
+# https://github.com/dhaam-ai/belay/actions/workflows/release.yml
 ```
 
 The workflow runs in this order:
@@ -149,7 +149,7 @@ Once the workflow completes, verify the artifacts:
 
 ```bash
 # Check GitHub Releases
-# https://github.com/belay-dev/belay/releases/tag/v0.3.0
+# https://github.com/dhaam-ai/belay/releases/tag/v0.3.0
 
 # Should contain:
 # - belay_0.3.0_darwin_amd64.tar.gz
@@ -160,15 +160,15 @@ Once the workflow completes, verify the artifacts:
 
 # Verify the checksums:
 cd /tmp
-curl -L https://github.com/belay-dev/belay/releases/download/v0.3.0/checksums.txt | head -10
-curl -L https://github.com/belay-dev/belay/releases/download/v0.3.0/belay_0.3.0_linux_amd64.tar.gz | sha256sum
+curl -L https://github.com/dhaam-ai/belay/releases/download/v0.3.0/checksums.txt | head -10
+curl -L https://github.com/dhaam-ai/belay/releases/download/v0.3.0/belay_0.3.0_linux_amd64.tar.gz | sha256sum
 
 # Check Homebrew formula was updated
 curl https://raw.githubusercontent.com/belay-dev/homebrew-belay/main/Formula/belay.rb | grep -A 5 "version"
 
 # Check Docker image was published
-docker pull ghcr.io/belay-dev/belay:v0.3.0
-docker run ghcr.io/belay-dev/belay:v0.3.0 belay version
+docker pull ghcr.io/dhaam-ai/belay:v0.3.0
+docker run ghcr.io/dhaam-ai/belay:v0.3.0 belay version
 ```
 
 ## Testing a Release Locally
@@ -203,10 +203,10 @@ cd /tmp
 RELEASE_VERSION="v0.3.0"
 
 # Download checksums
-curl -L https://github.com/belay-dev/belay/releases/download/$RELEASE_VERSION/checksums.txt -o checksums.txt
+curl -L https://github.com/dhaam-ai/belay/releases/download/$RELEASE_VERSION/checksums.txt -o checksums.txt
 
 # Download one binary
-curl -L https://github.com/belay-dev/belay/releases/download/$RELEASE_VERSION/belay_${RELEASE_VERSION#v}_linux_amd64.tar.gz -o belay.tar.gz
+curl -L https://github.com/dhaam-ai/belay/releases/download/$RELEASE_VERSION/belay_${RELEASE_VERSION#v}_linux_amd64.tar.gz -o belay.tar.gz
 
 # Verify
 sha256sum -c checksums.txt | grep belay_${RELEASE_VERSION#v}_linux_amd64
@@ -226,13 +226,13 @@ tar xzf belay.tar.gz
 
 ```bash
 # Pull the image
-docker pull ghcr.io/belay-dev/belay:v0.3.0
+docker pull ghcr.io/dhaam-ai/belay:v0.3.0
 
 # Verify the version
-docker run ghcr.io/belay-dev/belay:v0.3.0 belay version
+docker run ghcr.io/dhaam-ai/belay:v0.3.0 belay version
 
 # List the architectures
-docker manifest inspect ghcr.io/belay-dev/belay:v0.3.0 | jq '.manifests[].platform'
+docker manifest inspect ghcr.io/dhaam-ai/belay:v0.3.0 | jq '.manifests[].platform'
 # Should show: linux/amd64, linux/arm64
 ```
 
@@ -328,11 +328,11 @@ If belay is running as a Docker container:
 
 ```bash
 # Update to a known-good version
-docker pull ghcr.io/belay-dev/belay:v0.3.1
+docker pull ghcr.io/dhaam-ai/belay:v0.3.1
 
 # Restart the container
 docker stop <container-id>
-docker run ghcr.io/belay-dev/belay:v0.3.1 ...
+docker run ghcr.io/dhaam-ai/belay:v0.3.1 ...
 ```
 
 If belay is installed via Homebrew:
@@ -359,7 +359,7 @@ If you need to publish to a private Homebrew tap or a private Docker registry:
 
 ### .goreleaser.yaml Considerations
 
-If you rename the module from `github.com/belay-dev/belay`:
+If you rename the module from `github.com/dhaam-ai/belay`:
 
 1. Update `ldflags` in `.goreleaser.yaml` to match the new module path
 2. Update `release.github.owner` to your GitHub handle
@@ -482,13 +482,13 @@ Example usage:
 
 ```bash
 # Basic usage
-docker run ghcr.io/belay-dev/belay:latest belay version
+docker run ghcr.io/dhaam-ai/belay:latest belay version
 
 # With volume mount for source code
-docker run -v /path/to/repo:/work ghcr.io/belay-dev/belay:latest belay run /work/config.yaml
+docker run -v /path/to/repo:/work ghcr.io/dhaam-ai/belay:latest belay run /work/config.yaml
 
 # With Docker-in-Docker for containerized tests
-docker run -v /var/run/docker.sock:/var/run/docker.sock ghcr.io/belay-dev/belay:latest belay run /work/config.yaml
+docker run -v /var/run/docker.sock:/var/run/docker.sock ghcr.io/dhaam-ai/belay:latest belay run /work/config.yaml
 ```
 
 ## Monitoring After Release

@@ -11,9 +11,9 @@ import (
 
 	"github.com/google/go-cmp/cmp"
 
-	"github.com/belay-dev/belay/internal/sonar/mcp"
-	"github.com/belay-dev/belay/internal/sonar/scanner"
-	"github.com/belay-dev/belay/pkg/belay"
+	"github.com/dhaam-ai/belay/internal/sonar/mcp"
+	"github.com/dhaam-ai/belay/internal/sonar/scanner"
+	"github.com/dhaam-ai/belay/pkg/belay"
 )
 
 // issue is a compact belay.Issue for the tables below.

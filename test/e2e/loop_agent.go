@@ -6,7 +6,7 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/belay-dev/belay/pkg/belay"
+	"github.com/dhaam-ai/belay/pkg/belay"
 )
 
 // loopChangedFilesBlock renders the fenced "changed-files" block the code

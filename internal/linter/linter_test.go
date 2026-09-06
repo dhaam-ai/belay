@@ -15,8 +15,8 @@ import (
 
 	"github.com/google/go-cmp/cmp"
 
-	"github.com/belay-dev/belay/internal/exec"
-	"github.com/belay-dev/belay/pkg/belay"
+	"github.com/dhaam-ai/belay/internal/exec"
+	"github.com/dhaam-ai/belay/pkg/belay"
 )
 
 // issuesAt builds one issue per given severity, so a gate test reads as the

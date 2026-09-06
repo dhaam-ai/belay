@@ -12,9 +12,9 @@ import (
 
 	"github.com/google/go-cmp/cmp"
 
-	"github.com/belay-dev/belay/internal/config"
-	"github.com/belay-dev/belay/internal/sonar/mcp"
-	"github.com/belay-dev/belay/pkg/belay"
+	"github.com/dhaam-ai/belay/internal/config"
+	"github.com/dhaam-ai/belay/internal/sonar/mcp"
+	"github.com/dhaam-ai/belay/pkg/belay"
 )
 
 // newReviewer builds a Reviewer over a scripted fake transport, dialing a

@@ -12,8 +12,8 @@ import (
 	"sync"
 	"testing"
 
-	"github.com/belay-dev/belay/internal/exec"
-	"github.com/belay-dev/belay/pkg/belay"
+	"github.com/dhaam-ai/belay/internal/exec"
+	"github.com/dhaam-ai/belay/pkg/belay"
 )
 
 // No test in this package runs the real `claude` binary.

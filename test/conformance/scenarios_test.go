@@ -7,12 +7,12 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/belay-dev/belay/internal/config"
-	"github.com/belay-dev/belay/internal/exec"
-	"github.com/belay-dev/belay/internal/nodes/aireview"
-	"github.com/belay-dev/belay/internal/sonar/mcp"
-	"github.com/belay-dev/belay/internal/sonar/scanner"
-	"github.com/belay-dev/belay/pkg/belay"
+	"github.com/dhaam-ai/belay/internal/config"
+	"github.com/dhaam-ai/belay/internal/exec"
+	"github.com/dhaam-ai/belay/internal/nodes/aireview"
+	"github.com/dhaam-ai/belay/internal/sonar/mcp"
+	"github.com/dhaam-ai/belay/internal/sonar/scanner"
+	"github.com/dhaam-ai/belay/pkg/belay"
 )
 
 // errFixtureExecutableNotFound stands in for the *exec.Error a real

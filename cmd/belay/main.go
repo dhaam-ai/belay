@@ -4,7 +4,7 @@ package main
 import (
 	"log"
 
-	"github.com/belay-dev/belay/internal/cli"
+	"github.com/dhaam-ai/belay/internal/cli"
 )
 
 func main() {

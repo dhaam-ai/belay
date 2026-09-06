@@ -1,10 +1,10 @@
 # GoReleaser configuration for belay
 # This file handles multi-architecture binary builds, checksums, and changelog generation.
 #
-# IMPORTANT: The module path (github.com/belay-dev/belay) is a PLACEHOLDER.
+# IMPORTANT: The module path (github.com/dhaam-ai/belay) is a PLACEHOLDER.
 # If you rename the module using `make rename-module OWNER=<handle>`, you MUST
 # update the ldflags paths below in the build section to match the new module path.
-# Search for "github.com/belay-dev/belay/internal/cli" and update all three occurrences:
+# Search for "github.com/dhaam-ai/belay/internal/cli" and update all three occurrences:
 # - Version path
 # - Commit path
 # - BuildDate path
@@ -43,9 +43,9 @@ builds:
     # These paths MUST match internal/cli package.
     # If you rename the module, update these three paths:
     ldflags:
-      - -X github.com/belay-dev/belay/internal/cli.Version={{.Version}}
-      - -X github.com/belay-dev/belay/internal/cli.Commit={{.Commit}}
-      - -X github.com/belay-dev/belay/internal/cli.BuildDate={{.CommitDate}}
+      - -X github.com/dhaam-ai/belay/internal/cli.Version={{.Version}}
+      - -X github.com/dhaam-ai/belay/internal/cli.Commit={{.Commit}}
+      - -X github.com/dhaam-ai/belay/internal/cli.BuildDate={{.CommitDate}}
 
     # Reproducible builds: use module timestamp for deterministic builds
     mod_timestamp: "{{ .CommitTimestamp }}"

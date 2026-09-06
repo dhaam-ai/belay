@@ -69,10 +69,10 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/belay-dev/belay/internal/graph"
-	"github.com/belay-dev/belay/internal/journal"
-	"github.com/belay-dev/belay/internal/state"
-	"github.com/belay-dev/belay/pkg/belay"
+	"github.com/dhaam-ai/belay/internal/graph"
+	"github.com/dhaam-ai/belay/internal/journal"
+	"github.com/dhaam-ai/belay/internal/state"
+	"github.com/dhaam-ai/belay/pkg/belay"
 )
 
 // Errors returned by this package. Every one of them reports a condition a

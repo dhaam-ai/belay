@@ -9,9 +9,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/belay-dev/belay/internal/agent/replay"
-	"github.com/belay-dev/belay/pkg/belay"
-	"github.com/belay-dev/belay/pkg/belay/belaytest"
+	"github.com/dhaam-ai/belay/internal/agent/replay"
+	"github.com/dhaam-ai/belay/pkg/belay"
+	"github.com/dhaam-ai/belay/pkg/belay/belaytest"
 )
 
 // TestScrub_TableDriven pins exactly which secret shapes Scrub recognizes

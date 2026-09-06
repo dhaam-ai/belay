@@ -12,8 +12,8 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/belay-dev/belay/internal/exec"
-	"github.com/belay-dev/belay/pkg/belay"
+	"github.com/dhaam-ai/belay/internal/exec"
+	"github.com/dhaam-ai/belay/pkg/belay"
 )
 
 // gateStatusRe matches the one line the scanner prints naming the server's

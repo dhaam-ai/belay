@@ -8,8 +8,8 @@ import (
 	"strings"
 	"testing"
 
-	bexec "github.com/belay-dev/belay/internal/exec"
-	"github.com/belay-dev/belay/pkg/belay"
+	bexec "github.com/dhaam-ai/belay/internal/exec"
+	"github.com/dhaam-ai/belay/pkg/belay"
 )
 
 func TestCustomName(t *testing.T) {

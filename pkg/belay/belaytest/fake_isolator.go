@@ -4,7 +4,7 @@ import (
 	"context"
 	"sync"
 
-	"github.com/belay-dev/belay/pkg/belay"
+	"github.com/dhaam-ai/belay/pkg/belay"
 )
 
 // CreateCall records one belay.Isolator.Create call a FakeIsolator

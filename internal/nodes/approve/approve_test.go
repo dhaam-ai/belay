@@ -11,12 +11,12 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/belay-dev/belay/internal/config"
-	"github.com/belay-dev/belay/internal/graph"
-	"github.com/belay-dev/belay/internal/journal"
-	"github.com/belay-dev/belay/internal/nodes/approve"
-	"github.com/belay-dev/belay/internal/state"
-	"github.com/belay-dev/belay/pkg/belay"
+	"github.com/dhaam-ai/belay/internal/config"
+	"github.com/dhaam-ai/belay/internal/graph"
+	"github.com/dhaam-ai/belay/internal/journal"
+	"github.com/dhaam-ai/belay/internal/nodes/approve"
+	"github.com/dhaam-ai/belay/internal/state"
+	"github.com/dhaam-ai/belay/pkg/belay"
 )
 
 // testRunID is fixed so assertions can name the exact resume command a human

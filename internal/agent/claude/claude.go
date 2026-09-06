@@ -52,8 +52,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/belay-dev/belay/internal/exec"
-	"github.com/belay-dev/belay/pkg/belay"
+	"github.com/dhaam-ai/belay/internal/exec"
+	"github.com/dhaam-ai/belay/pkg/belay"
 )
 
 // BackendName is the stable identifier this backend reports from Name.

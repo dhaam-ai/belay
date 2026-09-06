@@ -4,8 +4,8 @@ import (
 	"errors"
 	"testing"
 
-	"github.com/belay-dev/belay/internal/config"
-	"github.com/belay-dev/belay/pkg/belay"
+	"github.com/dhaam-ai/belay/internal/config"
+	"github.com/dhaam-ai/belay/pkg/belay"
 )
 
 // spentLedger builds a Ledger whose Total() reports the given usage, via a

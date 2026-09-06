@@ -6,7 +6,7 @@ import (
 	"errors"
 	"testing"
 
-	"github.com/belay-dev/belay/pkg/belay"
+	"github.com/dhaam-ai/belay/pkg/belay"
 )
 
 // TestCostScenarios is the acceptance test for ADR-0007's degradation rule:

@@ -8,7 +8,7 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/belay-dev/belay/pkg/belay"
+	"github.com/dhaam-ai/belay/pkg/belay"
 )
 
 // This file provides typed wrappers for the five SonarQube MCP tools this

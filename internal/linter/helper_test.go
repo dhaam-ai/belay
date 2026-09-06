@@ -12,7 +12,7 @@ import (
 	"sync"
 	"testing"
 
-	"github.com/belay-dev/belay/internal/exec"
+	"github.com/dhaam-ai/belay/internal/exec"
 )
 
 // stubRunner is the CommandRunner every test in this package uses. It records

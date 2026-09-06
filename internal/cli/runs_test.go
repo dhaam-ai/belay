@@ -13,7 +13,7 @@ import (
 
 	"github.com/spf13/cobra"
 
-	"github.com/belay-dev/belay/internal/state"
+	"github.com/dhaam-ai/belay/internal/state"
 	"github.com/google/go-cmp/cmp"
 )
 

@@ -8,8 +8,8 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/belay-dev/belay/internal/sonar/mcp"
-	"github.com/belay-dev/belay/pkg/belay"
+	"github.com/dhaam-ai/belay/internal/sonar/mcp"
+	"github.com/dhaam-ai/belay/pkg/belay"
 )
 
 // Source is the belay.QualityReport.Source every report this package

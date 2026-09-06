@@ -13,7 +13,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/belay-dev/belay/pkg/belay"
+	"github.com/dhaam-ai/belay/pkg/belay"
 )
 
 // FormatVersion is the only cassette schema version this package writes,

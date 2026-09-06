@@ -8,8 +8,8 @@ import (
 	"log/slog"
 	"sync"
 
-	"github.com/belay-dev/belay/internal/exec"
-	"github.com/belay-dev/belay/internal/sonar/mcp"
+	"github.com/dhaam-ai/belay/internal/exec"
+	"github.com/dhaam-ai/belay/internal/sonar/mcp"
 )
 
 // quietLogger discards everything, so a failing assertion's own output is

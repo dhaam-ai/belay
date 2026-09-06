@@ -85,7 +85,7 @@ import (
 	"log/slog"
 	"sync"
 
-	"github.com/belay-dev/belay/pkg/belay"
+	"github.com/dhaam-ai/belay/pkg/belay"
 )
 
 // Mode selects how a Backend drives its inner belay.AgentBackend.

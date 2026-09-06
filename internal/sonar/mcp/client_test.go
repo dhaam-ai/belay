@@ -12,7 +12,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/belay-dev/belay/pkg/belay"
+	"github.com/dhaam-ai/belay/pkg/belay"
 )
 
 // TestClient_FullFlow drives the complete, intended sequence — initialize,

@@ -22,7 +22,7 @@ import (
 
 	"github.com/spf13/cobra"
 
-	"github.com/belay-dev/belay/internal/graph"
+	"github.com/dhaam-ai/belay/internal/graph"
 )
 
 // Version information, injected via ldflags during build.

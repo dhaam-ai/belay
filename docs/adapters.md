@@ -174,7 +174,7 @@ package gemini
 import (
 	"context"
 	"fmt"
-	"github.com/belay-dev/belay/pkg/belay"
+	"github.com/dhaam-ai/belay/pkg/belay"
 )
 
 // Adapter wraps the Gemini API.
@@ -263,7 +263,7 @@ package property
 
 import (
 	"context"
-	"github.com/belay-dev/belay/pkg/belay"
+	"github.com/dhaam-ai/belay/pkg/belay"
 )
 
 // Runner executes property-based tests.
@@ -363,7 +363,7 @@ Every adapter interface has a corresponding fake in `pkg/belay/belaytest/`:
 
 Example test using a fake:
 ```go
-import "github.com/belay-dev/belay/pkg/belay/belaytest"
+import "github.com/dhaam-ai/belay/pkg/belay/belaytest"
 
 func TestMyNode(t *testing.T) {
 	runner := &belaytest.FakeRunner{

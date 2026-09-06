@@ -63,9 +63,9 @@ import (
 	"strings"
 	"time"
 
-	"github.com/belay-dev/belay/internal/detect"
-	"github.com/belay-dev/belay/internal/exec"
-	"github.com/belay-dev/belay/pkg/belay"
+	"github.com/dhaam-ai/belay/internal/detect"
+	"github.com/dhaam-ai/belay/internal/exec"
+	"github.com/dhaam-ai/belay/pkg/belay"
 )
 
 // Defaults applied when an Option leaves a setting unset.

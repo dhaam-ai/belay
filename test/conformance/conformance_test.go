@@ -10,10 +10,10 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/belay-dev/belay/internal/nodes/aireview"
-	"github.com/belay-dev/belay/internal/sonar/scanner"
-	"github.com/belay-dev/belay/internal/state"
-	"github.com/belay-dev/belay/pkg/belay"
+	"github.com/dhaam-ai/belay/internal/nodes/aireview"
+	"github.com/dhaam-ai/belay/internal/sonar/scanner"
+	"github.com/dhaam-ai/belay/internal/state"
+	"github.com/dhaam-ai/belay/pkg/belay"
 )
 
 // --- JSON shape helpers ---

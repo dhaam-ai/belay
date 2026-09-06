@@ -9,8 +9,8 @@ import (
 	"strconv"
 	"strings"
 
-	bexec "github.com/belay-dev/belay/internal/exec"
-	"github.com/belay-dev/belay/pkg/belay"
+	bexec "github.com/dhaam-ai/belay/internal/exec"
+	"github.com/dhaam-ai/belay/pkg/belay"
 )
 
 // CustomName is the [belay.TestRunner.Name] of the custom runner.

@@ -82,9 +82,9 @@ import (
 	"fmt"
 	"log/slog"
 
-	"github.com/belay-dev/belay/internal/graph"
-	"github.com/belay-dev/belay/internal/journal"
-	"github.com/belay-dev/belay/internal/state"
+	"github.com/dhaam-ai/belay/internal/graph"
+	"github.com/dhaam-ai/belay/internal/journal"
+	"github.com/dhaam-ai/belay/internal/state"
 )
 
 // Node is the join graph node. It holds no state: everything it needs

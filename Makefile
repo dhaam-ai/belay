@@ -11,7 +11,7 @@ BIN_DIR=./bin
 VERSION?=dev
 COMMIT?=$(shell git rev-parse --short HEAD 2>/dev/null || echo "none")
 BUILD_DATE?=$(shell date -u +'%Y-%m-%dT%H:%M:%SZ' 2>/dev/null || echo "unknown")
-LD_FLAGS=-ldflags "-X github.com/belay-dev/belay/internal/cli.Version=$(VERSION) -X github.com/belay-dev/belay/internal/cli.Commit=$(COMMIT) -X github.com/belay-dev/belay/internal/cli.BuildDate=$(BUILD_DATE)"
+LD_FLAGS=-ldflags "-X github.com/dhaam-ai/belay/internal/cli.Version=$(VERSION) -X github.com/dhaam-ai/belay/internal/cli.Commit=$(COMMIT) -X github.com/dhaam-ai/belay/internal/cli.BuildDate=$(BUILD_DATE)"
 
 # Default target
 help:
@@ -82,9 +82,20 @@ rename-module:
 		exit 1; \
 	fi
 	@OLD_MODULE=$$(grep '^module ' go.mod | awk '{print $$2}'); \
-	echo "Renaming module from $$OLD_MODULE to github.com/$(OWNER)/belay..."; \
-	$(GO) mod edit -module github.com/$(OWNER)/belay; \
-	find . -name "*.go" -type f -exec sed -i '' "s|$$OLD_MODULE|github.com/$(OWNER)/belay|g" {} +; \
-	echo "Verifying build after rename..."; \
+	NEW_MODULE=github.com/$(OWNER)/belay; \
+	OLD_OWNER=$$(echo $$OLD_MODULE | cut -d/ -f2); \
+	echo "Renaming module from $$OLD_MODULE to $$NEW_MODULE..."; \
+	$(GO) mod edit -module $$NEW_MODULE; \
+	find . -name "*.go" -type f -exec sed -i '' "s|$$OLD_MODULE|$$NEW_MODULE|g" {} +; \
+	echo "Rewriting the module path outside Go files..."; \
+	for f in Makefile .goreleaser.yaml README.md docs/releasing.md docs/adapters.md \
+	         docs/architecture.md docs/troubleshooting.md .github/dependabot.yml \
+	         .github/workflows/ci.yml .github/workflows/release.yml; do \
+		[ -f "$$f" ] && sed -i '' "s|$$OLD_MODULE|$$NEW_MODULE|g; s|$$OLD_OWNER/belay|$(OWNER)/belay|g" "$$f" || true; \
+	done; \
+	echo "Verifying build and version stamping after rename..."; \
 	$(GO) build ./...; \
-	echo "Module successfully renamed to github.com/$(OWNER)/belay"
+	$(MAKE) --no-print-directory build >/dev/null; \
+	./bin/belay version | grep -qv "version dev " || { \
+		echo "ERROR: belay version still reports 'dev' -- the ldflags path did not follow the rename"; exit 1; }; \
+	echo "Module successfully renamed to $$NEW_MODULE"

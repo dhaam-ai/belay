@@ -8,7 +8,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/belay-dev/belay/internal/config"
+	"github.com/dhaam-ai/belay/internal/config"
 )
 
 // docsPath is docs/config.md relative to this package.

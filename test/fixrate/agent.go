@@ -13,8 +13,8 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/belay-dev/belay/pkg/belay"
-	"github.com/belay-dev/belay/pkg/belay/belaytest"
+	"github.com/dhaam-ai/belay/pkg/belay"
+	"github.com/dhaam-ai/belay/pkg/belay/belaytest"
 )
 
 // Strategy is how the scripted demonstration agent (NewScriptedAgent)

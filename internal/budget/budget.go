@@ -55,8 +55,8 @@ package budget
 import (
 	"log/slog"
 
-	"github.com/belay-dev/belay/internal/config"
-	"github.com/belay-dev/belay/pkg/belay"
+	"github.com/dhaam-ai/belay/internal/config"
+	"github.com/dhaam-ai/belay/pkg/belay"
 )
 
 // Check reports whether l's cumulative total has crossed cfg's ceiling,

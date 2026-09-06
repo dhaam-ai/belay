@@ -11,17 +11,17 @@ package nodes
 import (
 	"fmt"
 
-	"github.com/belay-dev/belay/internal/config"
-	"github.com/belay-dev/belay/internal/graph"
-	"github.com/belay-dev/belay/internal/nodes/approve"
-	"github.com/belay-dev/belay/internal/nodes/code"
-	"github.com/belay-dev/belay/internal/nodes/fanout"
-	"github.com/belay-dev/belay/internal/nodes/fix"
-	"github.com/belay-dev/belay/internal/nodes/join"
-	"github.com/belay-dev/belay/internal/nodes/plan"
-	"github.com/belay-dev/belay/internal/nodes/review"
-	"github.com/belay-dev/belay/internal/nodes/test"
-	"github.com/belay-dev/belay/internal/nodes/write"
+	"github.com/dhaam-ai/belay/internal/config"
+	"github.com/dhaam-ai/belay/internal/graph"
+	"github.com/dhaam-ai/belay/internal/nodes/approve"
+	"github.com/dhaam-ai/belay/internal/nodes/code"
+	"github.com/dhaam-ai/belay/internal/nodes/fanout"
+	"github.com/dhaam-ai/belay/internal/nodes/fix"
+	"github.com/dhaam-ai/belay/internal/nodes/join"
+	"github.com/dhaam-ai/belay/internal/nodes/plan"
+	"github.com/dhaam-ai/belay/internal/nodes/review"
+	"github.com/dhaam-ai/belay/internal/nodes/test"
+	"github.com/dhaam-ai/belay/internal/nodes/write"
 )
 
 // Default returns the registry for a standard belay run:

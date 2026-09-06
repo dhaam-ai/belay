@@ -21,8 +21,8 @@ import (
 	"testing"
 	"time"
 
-	belayexec "github.com/belay-dev/belay/internal/exec"
-	"github.com/belay-dev/belay/pkg/belay"
+	belayexec "github.com/dhaam-ai/belay/internal/exec"
+	"github.com/dhaam-ai/belay/pkg/belay"
 )
 
 // requireDocker skips unless the docker binary is resolvable.

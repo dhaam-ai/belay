@@ -12,8 +12,8 @@ import (
 	"testing"
 	"time"
 
-	bexec "github.com/belay-dev/belay/internal/exec"
-	"github.com/belay-dev/belay/pkg/belay"
+	bexec "github.com/dhaam-ai/belay/internal/exec"
+	"github.com/dhaam-ai/belay/pkg/belay"
 )
 
 // TestMain empties PATH for the whole test binary.

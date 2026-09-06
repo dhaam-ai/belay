@@ -12,7 +12,7 @@ import (
 	"sync"
 	"testing"
 
-	"github.com/belay-dev/belay/pkg/belay"
+	"github.com/dhaam-ai/belay/pkg/belay"
 )
 
 // TestIsAncestorOf pins the prefix-confusion rule that the whole containment

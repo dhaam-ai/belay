@@ -9,9 +9,9 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/belay-dev/belay/internal/detect"
-	bexec "github.com/belay-dev/belay/internal/exec"
-	"github.com/belay-dev/belay/pkg/belay"
+	"github.com/dhaam-ai/belay/internal/detect"
+	bexec "github.com/dhaam-ai/belay/internal/exec"
+	"github.com/dhaam-ai/belay/pkg/belay"
 )
 
 // PytestName is the [belay.TestRunner.Name] of the Python runner.

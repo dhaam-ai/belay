@@ -14,8 +14,8 @@ import (
 	"sync"
 	"testing"
 
-	"github.com/belay-dev/belay/internal/sonar/mcp"
-	"github.com/belay-dev/belay/pkg/belay"
+	"github.com/dhaam-ai/belay/internal/sonar/mcp"
+	"github.com/dhaam-ai/belay/pkg/belay"
 )
 
 // No test in this package contacts a SonarQube server, starts Docker, opens

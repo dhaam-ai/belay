@@ -6,9 +6,9 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/belay-dev/belay/internal/graph"
-	"github.com/belay-dev/belay/internal/journal"
-	"github.com/belay-dev/belay/internal/nodes/approve"
+	"github.com/dhaam-ai/belay/internal/graph"
+	"github.com/dhaam-ai/belay/internal/journal"
+	"github.com/dhaam-ai/belay/internal/nodes/approve"
 )
 
 // approvedRC returns a gate-ready RunContext whose plan is already approved

@@ -6,9 +6,9 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/belay-dev/belay/internal/config"
-	"github.com/belay-dev/belay/internal/nodes/join"
-	"github.com/belay-dev/belay/internal/state"
+	"github.com/dhaam-ai/belay/internal/config"
+	"github.com/dhaam-ai/belay/internal/nodes/join"
+	"github.com/dhaam-ai/belay/internal/state"
 )
 
 // cand is a terse candidate constructor: id, whether it passed, and its

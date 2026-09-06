@@ -4,7 +4,7 @@ import (
 	"math"
 	"sync"
 
-	"github.com/belay-dev/belay/pkg/belay"
+	"github.com/dhaam-ai/belay/pkg/belay"
 )
 
 // microsPerUSD is the scale factor between a US dollar and the integer

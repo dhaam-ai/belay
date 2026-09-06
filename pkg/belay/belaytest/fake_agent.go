@@ -4,7 +4,7 @@ import (
 	"context"
 	"sync"
 
-	"github.com/belay-dev/belay/pkg/belay"
+	"github.com/dhaam-ai/belay/pkg/belay"
 )
 
 // FakeAgent is a scriptable belay.AgentBackend for tests.

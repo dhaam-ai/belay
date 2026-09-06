@@ -9,9 +9,9 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/belay-dev/belay/internal/nodes/code"
-	"github.com/belay-dev/belay/internal/state"
-	"github.com/belay-dev/belay/pkg/belay"
+	"github.com/dhaam-ai/belay/internal/nodes/code"
+	"github.com/dhaam-ai/belay/internal/state"
+	"github.com/dhaam-ai/belay/pkg/belay"
 )
 
 // A backend whose Raw bytes are not JSON must not take the whole node down

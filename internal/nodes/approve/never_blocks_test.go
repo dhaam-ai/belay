@@ -11,9 +11,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/belay-dev/belay/internal/graph"
-	"github.com/belay-dev/belay/internal/journal"
-	"github.com/belay-dev/belay/internal/nodes/approve"
+	"github.com/dhaam-ai/belay/internal/graph"
+	"github.com/dhaam-ai/belay/internal/journal"
+	"github.com/dhaam-ai/belay/internal/nodes/approve"
 )
 
 // runTimeout is generous on purpose. The failure this guards against is an

@@ -4,7 +4,7 @@ import (
 	"context"
 	"fmt"
 
-	"github.com/belay-dev/belay/pkg/belay"
+	"github.com/dhaam-ai/belay/pkg/belay"
 )
 
 // echoBackend is a minimal third-party belay.AgentBackend. It does no real

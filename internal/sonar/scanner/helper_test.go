@@ -13,7 +13,7 @@ import (
 	"sync"
 	"testing"
 
-	"github.com/belay-dev/belay/internal/exec"
+	"github.com/dhaam-ai/belay/internal/exec"
 )
 
 // testToken is the SONAR_TOKEN value every test injects.

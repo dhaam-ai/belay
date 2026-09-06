@@ -19,8 +19,8 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/belay-dev/belay/internal/exec"
-	"github.com/belay-dev/belay/pkg/belay"
+	"github.com/dhaam-ai/belay/internal/exec"
+	"github.com/dhaam-ai/belay/pkg/belay"
 )
 
 // SecretEnvName is the environment variable SONAR_TOKEN is read from and,

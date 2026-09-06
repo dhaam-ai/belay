@@ -3,9 +3,9 @@ package nodes_test
 import (
 	"testing"
 
-	"github.com/belay-dev/belay/internal/config"
-	"github.com/belay-dev/belay/internal/graph"
-	"github.com/belay-dev/belay/internal/nodes"
+	"github.com/dhaam-ai/belay/internal/config"
+	"github.com/dhaam-ai/belay/internal/graph"
+	"github.com/dhaam-ai/belay/internal/nodes"
 )
 
 // Every name a node can route to must be registered. The dispatcher resolves

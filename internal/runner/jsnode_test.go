@@ -8,8 +8,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/belay-dev/belay/internal/detect"
-	"github.com/belay-dev/belay/pkg/belay"
+	"github.com/dhaam-ai/belay/internal/detect"
+	"github.com/dhaam-ai/belay/pkg/belay"
 )
 
 func TestNodeName(t *testing.T) {

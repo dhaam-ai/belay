@@ -17,8 +17,8 @@ import (
 	"time"
 	"unicode"
 
-	"github.com/belay-dev/belay/internal/config"
-	"github.com/belay-dev/belay/pkg/belay"
+	"github.com/dhaam-ai/belay/internal/config"
+	"github.com/dhaam-ai/belay/pkg/belay"
 )
 
 // ManifestSchemaVersion is the schema version SaveManifest writes and the

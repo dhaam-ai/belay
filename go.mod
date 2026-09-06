@@ -1,4 +1,4 @@
-module github.com/belay-dev/belay
+module github.com/dhaam-ai/belay
 
 go 1.26.3
 

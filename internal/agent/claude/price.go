@@ -7,7 +7,7 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/belay-dev/belay/pkg/belay"
+	"github.com/dhaam-ai/belay/pkg/belay"
 )
 
 // ErrUnknownModel reports that a cost had to be estimated but no price entry

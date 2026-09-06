@@ -9,9 +9,9 @@ import (
 
 	"github.com/google/go-cmp/cmp"
 
-	"github.com/belay-dev/belay/internal/agent/replay"
-	"github.com/belay-dev/belay/pkg/belay"
-	"github.com/belay-dev/belay/pkg/belay/belaytest"
+	"github.com/dhaam-ai/belay/internal/agent/replay"
+	"github.com/dhaam-ai/belay/pkg/belay"
+	"github.com/dhaam-ai/belay/pkg/belay/belaytest"
 )
 
 func req(prompt string) belay.AgentRequest {

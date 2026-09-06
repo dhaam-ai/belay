@@ -44,7 +44,7 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/belay-dev/belay/pkg/belay"
+	"github.com/dhaam-ai/belay/pkg/belay"
 )
 
 // cloneSlice returns an independent copy of s, preserving nil versus
