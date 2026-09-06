@@ -110,3 +110,42 @@ archives:
     files:
       - LICENSE
       - README.md
+
+# Homebrew tap.
+#
+# The tap repository must already exist and be public before the first release:
+# goreleaser pushes a formula into it, it does not create it. See
+# docs/releasing.md. A release that publishes binaries and then fails to update
+# the tap leaves users a version they cannot install, which is worse than a
+# release that refuses to start.
+brews:
+  - name: belay
+    repository:
+      owner: dhaam-ai
+      name: homebrew-belay
+      token: "{{ .Env.HOMEBREW_TAP_GITHUB_TOKEN }}"
+    directory: Formula
+    homepage: "https://github.com/dhaam-ai/belay"
+    description: "Durable, resumable orchestrator for autonomous coding agents"
+    license: "Apache-2.0"
+    # belay drives whatever toolchain the target repository uses, so it cannot
+    # declare those as dependencies -- a Go user should not be made to install
+    # node. The one thing it always needs is an agent CLI, which Homebrew does
+    # not package; the caveat says so rather than letting the first run fail
+    # with a missing-toolchain error the user has no context for.
+    dependencies: []
+    caveats: |
+      belay needs an agent CLI to do any work. Install Claude Code and sign in:
+
+        https://claude.com/product/claude-code
+
+      Then, in a repository you want it to work on:
+
+        belay --dry-run run "add tests for the config parser"
+
+      The dry run creates nothing and spends nothing. Drop --dry-run to start.
+      belay stops at the plan for you to read before it writes any code.
+    test: |
+      assert_match "belay version", shell_output("#{bin}/belay version")
+    # skip_upload keeps a snapshot build from pushing to the tap.
+    skip_upload: auto

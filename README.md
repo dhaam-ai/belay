@@ -17,16 +17,56 @@ belay timeline
 
 ## Install
 
-### From Source (requires Go 1.21+)
+### macOS — Homebrew
+
+```bash
+brew tap dhaam-ai/belay
+brew install belay
+belay version
+```
+
+Requires the tap to be published; until then use one of the options below.
+
+### Go 1.26+
+
+```bash
+go install github.com/dhaam-ai/belay/cmd/belay@latest
+```
+
+### A release binary
+
+Download the archive for your platform from the
+[releases page](https://github.com/dhaam-ai/belay/releases), verify it, and put
+it on your PATH:
+
+```bash
+tar -xzf belay_0.1.0_darwin_arm64.tar.gz
+shasum -a 256 -c checksums.txt --ignore-missing
+sudo mv belay /usr/local/bin/
+```
+
+### From source
 
 ```bash
 git clone https://github.com/dhaam-ai/belay.git
 cd belay
-make build
-./bin/belay --help
+make build          # -> ./bin/belay
 ```
 
-**Note on Module Path**: The path `github.com/dhaam-ai/belay` is a placeholder. The real repo details will change before v1.0; stay tuned for updates.
+belay is **Unix only** — macOS and Linux, amd64 and arm64. There is no Windows
+build: `internal/exec`, `internal/runner` and `internal/linter` are all
+`//go:build unix`.
+
+### You also need an agent CLI
+
+belay orchestrates an agent; it is not one. Install
+[Claude Code](https://claude.com/product/claude-code) and sign in. belay
+inherits that login — you do not need to set `ANTHROPIC_API_KEY`, though it is
+honoured if present.
+
+```bash
+claude --version     # belay shells out to this
+```
 
 ## Five-Minute Quickstart
 

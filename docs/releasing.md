@@ -20,6 +20,9 @@ The release workflow requires a `GITHUB_TOKEN` to publish artifacts. This is pro
 
 ### 2. Homebrew Tap Repository
 
+> The full runbook, including how to test a formula locally before publishing,
+> is in [homebrew-tap.md](homebrew-tap.md).
+
 The Homebrew tap must exist **before your first release**. A release that half-succeeds (binaries published, tap update fails) is worse than one that refuses to start.
 
 **To create the Homebrew tap:**
