@@ -51,3 +51,45 @@ The test suite records cassettes of MCP and Claude API calls. CI replays cassett
 - internal/agent/replay/ (T46)
 - testdata/cassettes/ (T46: cassette storage)
 - CONTRIBUTING.md: cassette recording process (T46)
+
+---
+
+## Amendment (2026-09-06): a cassette replays the conversation, not the workspace
+
+Recording and replaying a real run showed this decision was written with an
+assumption that does not hold: that replaying an agent's responses reproduces
+an agent's run.
+
+It does not. The shipped backend edits files in place (ADR 0005). A cassette
+stores what the agent *said*, so replay serves the response text while the
+workspace stays exactly as it was. The recorded run's `code` step edited
+`main.go`; on replay that edit never happens, the real test runner then fails
+against the untouched stub, and the graph routes to `fix` — a node the
+recording never visited, so there is no interaction to serve and replay
+correctly refuses.
+
+What replay is therefore good for, and what it is not:
+
+- **It does drive belay's own graph deterministically and free.** Every agent
+  call is served from disk with no network and no credentials, which is what
+  lets a contributor without an API key run the suite.
+- **It does not reproduce a full end-to-end run against real tools.** Any node
+  that reads the workspace — the test runner, the linter, the review gate —
+  sees a workspace the replayed agent never modified, so the route diverges
+  from the recording as soon as one of them disagrees.
+
+The consequence for testing is that `test/e2e` fakes the runner and linter as
+well as the agent, which is what it already does. A cassette is not a
+substitute for that; it is the piece that makes the *agent* free, and the fakes
+are what make the *workspace* deterministic.
+
+Reproducing side effects would mean recording a filesystem diff per
+interaction and replaying it as part of serving the response. That is a real
+feature, not a patch, and it is deliberately not in v0.1.
+
+### Revisit if
+
+- Cassette-driven runs are wanted as a fix-rate measurement path, which needs
+  the workspace to evolve exactly as it did during recording.
+- A future backend proposes changes rather than applying them, in which case
+  the diff is already in the response and replay could apply it.
