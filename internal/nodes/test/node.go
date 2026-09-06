@@ -158,14 +158,21 @@ func (*Node) Run(ctx context.Context, rc *graph.RunContext) (graph.Result, error
 	}
 	if report.OK() {
 		res.Next = graph.NodeReview
-		// Clear the fix budget on green. The fix node cannot do this
-		// itself -- it only runs while something is failing, so it never
-		// observes the passing run that earns the reset. Without this, a
-		// run that breaks, gets repaired, and breaks again later inherits
-		// a nearly-exhausted budget and gives up almost immediately on an
-		// unrelated failure. Resetting is not cap enforcement, so the fix
-		// node remains the sole owner of give_up itself.
-		res.Patch.Fix = &state.Fix{Attempts: 0, GiveUp: false}
+		// Deliberately no reset of State.Fix here.
+		//
+		// An earlier version cleared the budget on every green suite, so
+		// that a run which broke, was repaired, and broke again later did
+		// not inherit an exhausted one. That is unsound: the graph always
+		// runs test before review and fix always routes back to test, so a
+		// run whose tests pass while the quality gate keeps failing walks
+		// test(green, reset) -> review(fail) -> fix -> test(green, reset)
+		// forever. give_up never fires and only max_steps stops it, tens of
+		// agent calls later, reporting the wrong reason.
+		//
+		// give_up is therefore a per-run repair budget: how many times
+		// belay may attempt a repair before handing the problem back,
+		// counted across the whole run rather than per consecutive streak.
+		// That is the only reading that terminates.
 	}
 
 	log.Info("tests finished",

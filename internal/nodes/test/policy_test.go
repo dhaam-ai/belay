@@ -11,7 +11,6 @@ import (
 	"github.com/belay-dev/belay/internal/config"
 	"github.com/belay-dev/belay/internal/graph"
 	"github.com/belay-dev/belay/internal/journal"
-	"github.com/belay-dev/belay/internal/state"
 	"github.com/belay-dev/belay/pkg/belay"
 	"github.com/belay-dev/belay/pkg/belay/belaytest"
 )
@@ -208,14 +207,16 @@ func TestConfigIsNotConsultedForRouting(t *testing.T) {
 	}
 }
 
-// A passing suite must clear the fix budget. The fix node only runs while
-// something is failing, so it can never see the green run that earns the
-// reset; if this node does not do it, nothing does, and a run that recovers
-// and later breaks again gives up almost immediately on an unrelated failure.
-func TestPassingSuiteResetsTheFixBudget(t *testing.T) {
+// A passing suite must NOT clear the fix budget.
+//
+// Clearing it looks kind and is unsound: the graph runs test before review and
+// fix routes back to test, so a run whose tests pass while the gate keeps
+// failing would reset on every lap and loop until max_steps. give_up is a
+// per-run repair budget, counted across the whole run.
+func TestPassingSuiteLeavesTheFixBudgetAlone(t *testing.T) {
 	t.Parallel()
 
-	t.Run("green clears attempts and the give-up flag", func(t *testing.T) {
+	t.Run("green leaves the counter alone", func(t *testing.T) {
 		t.Parallel()
 
 		runner := &belaytest.FakeRunner{
@@ -231,11 +232,9 @@ func TestPassingSuiteResetsTheFixBudget(t *testing.T) {
 		if res.Next != graph.NodeReview {
 			t.Fatalf("Next = %q, want %q", res.Next, graph.NodeReview)
 		}
-		if res.Patch.Fix == nil {
-			t.Fatal("Patch.Fix is nil; a passing suite must reset the fix budget")
-		}
-		if got := *res.Patch.Fix; got != (state.Fix{Attempts: 0, GiveUp: false}) {
-			t.Fatalf("Patch.Fix = %+v, want {Attempts:0 GiveUp:false}", got)
+		if res.Patch.Fix != nil {
+			t.Fatalf("Patch.Fix = %+v on a green suite; resetting here makes a "+
+				"review-only fix loop unbounded", *res.Patch.Fix)
 		}
 	})
 
