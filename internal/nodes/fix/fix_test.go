@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 
@@ -705,5 +706,45 @@ func TestUnwritableNodeDirFailsBeforeSpending(t *testing.T) {
 	}
 	if n := h.agent.CallCount(); n != 0 {
 		t.Errorf("agent called %d times; the prompt is written before the call, not after", n)
+	}
+}
+
+// The fix node must ask for edit tools explicitly.
+//
+// An empty AllowedTools means "the backend's default", and a headless agent's
+// default is to ask permission before editing -- permission nobody can grant,
+// because no one is at the other end. The agent then describes the repair
+// instead of performing it, and the loop burns its whole give_up budget
+// without changing a line. The first live run did exactly that: three
+// attempts, a dollar spent, the same three findings at the end.
+//
+// Every unit test in this package passes with AllowedTools empty, because the
+// fake agent has no permission model. Only this assertion stands between that
+// bug and another live run.
+func TestFixRequestsEditTools(t *testing.T) {
+	t.Parallel()
+
+	h := newHarness(t, failingState(0))
+	if _, err := fix.New().Run(context.Background(), h.rc); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	call, ok := h.agent.LastCall()
+	if !ok {
+		t.Fatal("the agent was never called")
+	}
+	if len(call.AllowedTools) == 0 {
+		t.Fatal("AllowedTools is empty: the backend default requires interactive " +
+			"approval, so the fix loop cannot edit anything and give_up expires silently")
+	}
+	for _, want := range []string{"Edit", "Write"} {
+		if !slices.Contains(call.AllowedTools, want) {
+			t.Errorf("AllowedTools = %v, missing %q: a repair that cannot write is not a repair",
+				call.AllowedTools, want)
+		}
+	}
+	// A repair needs to read and search, but not to run commands: the test
+	// node runs the suite, and a shell is where an agent reaches the network.
+	if slices.Contains(call.AllowedTools, "Bash") {
+		t.Errorf("AllowedTools = %v: Bash is deliberately withheld from a repair", call.AllowedTools)
 	}
 }

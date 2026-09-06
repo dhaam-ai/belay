@@ -193,6 +193,7 @@ func (n *Node) Run(ctx context.Context, rc *graph.RunContext) (graph.Result, err
 		Prompt:       prompt,
 		SystemPrompt: systemPrompt,
 		WorkDir:      dir,
+		AllowedTools: editTools(),
 		MaxTurns:     rc.Config.Agent.MaxTurns,
 		Model:        rc.Config.Agent.Model,
 		// Resuming the code node's session is what makes this a fix
@@ -316,3 +317,20 @@ func logger(rc *graph.RunContext) *slog.Logger {
 	}
 	return rc.Logger
 }
+
+// editTools is the tool allow-list this node sends.
+//
+// It must be set explicitly. An empty AllowedTools means "the backend's
+// default", and a headless agent's default is to ask permission before
+// editing — permission nobody can grant, because there is no one at the other
+// end of the session. The agent then describes the repair instead of making
+// it, and the loop runs its whole give_up budget without changing a line.
+//
+// That is not hypothetical: it is what the first live run did. Three fix
+// attempts, a dollar spent, and the same three lint findings at the end.
+//
+// Bash is deliberately withheld. The test node runs the suite and the write
+// node records the change; a repair does not need a shell, and a shell is
+// where an agent reaches the network and the commit history. The spellings
+// are Claude Code's, the only backend v0.1 ships (ADR 0005).
+func editTools() []string { return []string{"Read", "Grep", "Glob", "Edit", "Write"} }
