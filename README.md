@@ -53,9 +53,36 @@ cd belay
 make build          # -> ./bin/belay
 ```
 
-belay is **Unix only** — macOS and Linux, amd64 and arm64. There is no Windows
-build: `internal/exec`, `internal/runner` and `internal/linter` are all
-`//go:build unix`.
+### Windows — use WSL2
+
+belay does not run natively on Windows and no Windows binary is published.
+`internal/exec`, `internal/runner` and `internal/linter` are `//go:build unix`,
+because the two controls that make belay safe to point at a repository — the
+process-group kill that stops a runaway agent, and the `os.Root` containment
+that stops it writing outside the workspace — have no direct Windows
+equivalent. Shipping a build without them would be shipping something weaker
+while calling it the same tool.
+
+Inside WSL2 belay is simply a Linux program, and everything works:
+
+```powershell
+wsl --install                      # once, then reboot
+```
+
+```bash
+# inside the WSL2 shell
+sudo apt update && sudo apt install -y golang-go git
+git clone https://github.com/dhaam-ai/belay.git
+cd belay && make build && ./bin/belay --help
+```
+
+Install Claude Code inside WSL too, and keep your repositories on the Linux
+filesystem (`~/code/...`) rather than under `/mnt/c/`. Windows-mounted paths go
+through a translation layer that is slow enough to change how a test-and-fix
+loop feels, and their permission model does not match what belay's containment
+checks expect.
+
+belay runs natively on **macOS and Linux**, amd64 and arm64.
 
 ### You also need an agent CLI
 
@@ -67,6 +94,26 @@ honoured if present.
 ```bash
 claude --version     # belay shells out to this
 ```
+
+belay does not replace Claude Code — it drives it. The relationship is worth
+being precise about, because it decides when you would reach for which:
+
+| | Claude Code | belay |
+|---|---|---|
+| You are | at the keyboard | not at the keyboard |
+| Failure | you see it and redirect | routed back to a repair step, up to `give_up` |
+| Cost | you notice | capped, and printed before it spends |
+| Interruption | the session is gone | the run is on disk; `belay resume` continues |
+| Quality bar | your judgement | a gate that must pass before the run can end |
+
+Use Claude Code for work you want to steer. Use belay for work you want to
+hand over and check later — and for anything you want a record of, since every
+run leaves a journal, a plan, a diff, and a per-step cost you can read back
+with `belay timeline`.
+
+belay uses whatever Claude Code login you already have, and the same model
+selection: `agent.model` in `belay.yaml` is passed straight through as
+`--model`.
 
 ## Five-Minute Quickstart
 
