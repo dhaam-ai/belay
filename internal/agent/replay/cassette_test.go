@@ -392,3 +392,40 @@ func TestDetectDrift(t *testing.T) {
 		})
 	}
 }
+
+// A cassette must replay somewhere other than where it was recorded.
+//
+// Normalizing AgentRequest.WorkDir is not enough on its own: nodes name the
+// repository inside the prose they send -- the plan node writes "the
+// repository at <abs path>" -- so hashing the prompt verbatim binds the
+// fingerprint to one directory. The first recorded cassette failed to replay
+// for exactly this reason, which defeats the point of having one, since CI
+// checks out to a path nobody can predict.
+func TestFingerprintIgnoresTheWorkspacePathInsideThePrompt(t *testing.T) {
+	t.Parallel()
+
+	build := func(dir string) belay.AgentRequest {
+		return belay.AgentRequest{
+			Prompt: "# Goal\n\nAdd tests.\n\n# Repository\n\n" +
+				"You are planning a change to the repository at " + dir + ". Read it first.",
+			SystemPrompt: "You are planning against " + dir + ".",
+			WorkDir:      dir,
+			Model:        "sonnet",
+		}
+	}
+
+	a := replay.Fingerprint(build("/tmp/record-here"))
+	b := replay.Fingerprint(build("/home/ci/runner/work/checkout"))
+	if a != b {
+		t.Fatalf("fingerprints differ across workspaces:\n  %s\n  %s\n"+
+			"a cassette that only replays in its recording directory is useless in CI", a, b)
+	}
+
+	// The substitution must not flatten genuinely different requests.
+	c := replay.Fingerprint(belay.AgentRequest{
+		Prompt: "# Goal\n\nSomething else entirely.", WorkDir: "/tmp/record-here", Model: "sonnet",
+	})
+	if c == a {
+		t.Error("two different prompts share a fingerprint; normalization is too aggressive")
+	}
+}

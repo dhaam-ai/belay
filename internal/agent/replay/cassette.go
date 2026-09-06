@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strings"
 	"time"
 
 	"github.com/belay-dev/belay/pkg/belay"
@@ -340,9 +341,17 @@ func Normalize(req belay.AgentRequest) NormalizedRequest {
 	if req.SessionID != "" {
 		sessionID = sessionIDPlaceholder
 	}
+	// The workspace path is normalized out of the prompt bodies too, not
+	// only out of WorkDir. Nodes legitimately name the repository inside the
+	// prose they send -- the plan node writes "the repository at <abs path>"
+	// -- so hashing the prompt verbatim binds the fingerprint to the exact
+	// directory the recording was made in. A cassette recorded in
+	// /tmp/run-a then replays nowhere else, least of all in CI, which checks
+	// out to a path nobody can predict. That is the whole purpose of the
+	// cassette, so this substitution is load-bearing rather than cosmetic.
 	return NormalizedRequest{
-		Prompt:       req.Prompt,
-		SystemPrompt: req.SystemPrompt,
+		Prompt:       replaceWorkDir(req.Prompt, req.WorkDir),
+		SystemPrompt: replaceWorkDir(req.SystemPrompt, req.WorkDir),
 		WorkDir:      workDirPlaceholder,
 		AllowedTools: append([]string(nil), req.AllowedTools...),
 		MaxTurns:     req.MaxTurns,
@@ -350,6 +359,25 @@ func Normalize(req belay.AgentRequest) NormalizedRequest {
 		SessionID:    sessionID,
 		MCPConfig:    canonicalJSON(req.MCPConfig),
 	}
+}
+
+// replaceWorkDir substitutes every mention of the run's workspace directory
+// in text with the same placeholder Normalize uses for WorkDir itself.
+//
+// An empty workDir leaves text untouched: replacing the empty string would
+// splice a placeholder between every character.
+func replaceWorkDir(text, workDir string) string {
+	if workDir == "" || text == "" {
+		return text
+	}
+	out := strings.ReplaceAll(text, workDir, workDirPlaceholder)
+	// A symlinked workspace reaches a node by one path and appears in tool
+	// output by its resolved one; normalize both so the two record and
+	// replay identically.
+	if resolved, err := filepath.EvalSymlinks(workDir); err == nil && resolved != workDir {
+		out = strings.ReplaceAll(out, resolved, workDirPlaceholder)
+	}
+	return out
 }
 
 // canonicalJSON returns raw re-encoded with map keys sorted and
