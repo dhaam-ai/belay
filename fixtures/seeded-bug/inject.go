@@ -397,7 +397,7 @@ type testEvent struct {
 // prevented from starting, since a panic aborts the whole test binary.
 // That is deliberate: it lets callers distinguish "this test failed" from
 // "this test never got a chance to," rather than conflating them.
-func runGoTestJSON(ctx context.Context, dir string) (map[string]string, error) {
+func runGoTestJSON(ctx context.Context, dir string) (map[string]string, bool, error) {
 	ctx, cancel := context.WithTimeout(ctx, testTimeout)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, "go", "test", "-race", "-json", "./...")
@@ -423,15 +423,31 @@ func runGoTestJSON(ctx context.Context, dir string) (map[string]string, error) {
 		}
 	}
 
+	// A defect can be severe enough to kill the test binary outright --
+	// "fatal error: concurrent map writes" is the canonical example, and it
+	// is exactly what a dropped mutex produces. The process dies before any
+	// test can report, so test2json emits no fail event and the catalogued
+	// tests simply go missing. Read literally that looks identical to "the
+	// defect did nothing", which is the opposite of the truth: crashing the
+	// suite is a stronger detection than failing one test in it.
+	//
+	// Detect it from the runtime's own markers rather than from a bare
+	// non-zero exit, which ordinary test failures also produce.
+	crashed := false
 	if runErr != nil {
 		var exitErr *exec.ExitError
 		if !errors.As(runErr, &exitErr) {
-			return results, fmt.Errorf("running go test: %w (stderr: %s)", runErr, stderr.String())
+			return results, false, fmt.Errorf("running go test: %w (stderr: %s)", runErr, stderr.String())
 		}
-		// A non-zero exit from failing tests (or a panic) is expected
-		// and already reflected in results; nothing more to do.
+		combined := stdout.String() + stderr.String()
+		for _, marker := range []string{"fatal error:", "panic:", "DATA RACE"} {
+			if strings.Contains(combined, marker) {
+				crashed = true
+				break
+			}
+		}
 	}
-	return results, nil
+	return results, crashed, nil
 }
 
 // leafResults returns the subset of results whose test name is not a
@@ -490,6 +506,8 @@ type verifyReport struct {
 	ExpectedFail   []string
 	ActualFail     []string
 	MissingFail    []string // catalogued to fail, but didn't: the catalogue is wrong
+	CrashedProcess bool     // the defect killed the test binary outright
+	CrashedOutFail []string // catalogued to fail, and never got to run because the binary died
 	UnexpectedFail []string // failed, but no defect claimed it would: collateral damage
 	LintAvailable  bool
 	LintOutput     string
@@ -526,11 +544,12 @@ func verify(ctx context.Context, dir string, defects []bugs.Defect) (verifyRepor
 		return report, fmt.Errorf("go build failed in %s (a defect that breaks the build is a bad defect):\n%s", dir, buildOut)
 	}
 
-	results, err := runGoTestJSON(ctx, dir)
+	results, crashed, err := runGoTestJSON(ctx, dir)
 	if err != nil {
 		return report, err
 	}
 	report.TestResults = results
+	report.CrashedProcess = crashed
 
 	expected := make(map[string]bool)
 	for _, d := range defects {
@@ -544,9 +563,17 @@ func verify(ctx context.Context, dir string, defects []bugs.Defect) (verifyRepor
 	sort.Strings(report.ExpectedFail)
 
 	for _, t := range report.ExpectedFail {
-		if results[t] != "fail" {
-			report.MissingFail = append(report.MissingFail, t)
+		if results[t] == "fail" {
+			continue
 		}
+		// Absent because the binary died is detection, not a silent
+		// catalogue error -- see runGoTestJSON. Absent with a clean exit
+		// means the catalogue really is wrong about this defect.
+		if crashed && results[t] == "" {
+			report.CrashedOutFail = append(report.CrashedOutFail, t)
+			continue
+		}
+		report.MissingFail = append(report.MissingFail, t)
 	}
 	// go test reports a "fail" action for a container test (e.g.
 	// "TestFoo") whenever any of its subtests fail, purely because that
