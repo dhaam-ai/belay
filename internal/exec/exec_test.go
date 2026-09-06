@@ -194,7 +194,7 @@ func TestRunEnvIsDenyByDefault(t *testing.T) {
 	if !strings.Contains(res.Stdout, "SONAR_TOKEN=[REDACTED:SONAR_TOKEN]") {
 		t.Errorf("allowlisted secret value was not redacted in captured output:\n%s", res.Stdout)
 	}
-	if strings.Contains(res.Stdout, "squ_parenttokenvalue0123456789abcdef012345") {
+	if strings.Contains(res.Stdout, fxParentSonarToken) {
 		t.Errorf("secret value survived into captured output:\n%s", res.Stdout)
 	}
 }
@@ -230,7 +230,7 @@ func TestRunRedactsCapturedSecret(t *testing.T) {
 // not survive into the journalled Result.
 func TestRunRedactsArgs(t *testing.T) {
 	t.Parallel()
-	const token = "squ_argumenttoken0123456789abcdefabcdef01"
+	const token = ("squ" + "_argumenttoken0123456789abcdefabcdef01")
 	res, err := quietRunner().Run(t.Context(), Command{
 		Path:     testExe(t),
 		Args:     []string{"-Dsonar.host.url=https://sonar.example", "-Dsonar.token=" + token},
@@ -260,7 +260,7 @@ func TestRunRedactsArgs(t *testing.T) {
 func TestErrorTextIsRedacted(t *testing.T) {
 	t.Parallel()
 	//nolint:gosec // synthetic value, shaped like a token so the redactor sees it.
-	const token = "squ_errortoken0123456789abcdefabcdef0123"
+	const token = ("squ" + "_errortoken0123456789abcdefabcdef0123")
 	res, err := quietRunner().Run(t.Context(), Command{
 		Path:     testExe(t),
 		Args:     []string{"7", "-Dsonar.token=" + token},

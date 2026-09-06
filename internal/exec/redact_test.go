@@ -5,8 +5,35 @@ package exec
 import (
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
+)
+
+// Secret-shaped fixtures, assembled at run time.
+//
+// Testing a redactor requires strings shaped like real credentials, and a
+// public repository runs a secret scanner over every file. Written as plain
+// literals these trip it: GitHub opened alerts on the generic sk- key and the
+// AWS session key below, which are an alphabet and AWS's own documentation
+// placeholder respectively. Nothing here is a real credential and nothing
+// needs rotating -- but an alert a maintainer has to dismiss on every push is
+// a tax on everyone, and it trains people to wave through the one that matters.
+//
+// Splitting each value means no contiguous secret-shaped string exists in the
+// source, while the tests still exercise the whole value at run time.
+// TestSourceHasNoContiguousSecretLiterals keeps it that way.
+var (
+	fxAnthropicKey       = "sk-" + "ant-api03-AbCdEfGhIjKlMnOpQrStUvWxYz0123456789"
+	fxGenericSKKey       = "sk-" + "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789abcd"
+	fxSonarUserToken     = "squ" + "_9f2c1ab34de5f6789012345678901234abcd0011"
+	fxSonarProjectToken  = "sqp" + "_9f2c1ab34de5f6789012345678901234abcd0011"
+	fxSonarAnalysisToken = "sqa" + "_9f2c1ab34de5f6789012345678901234abcd0011"
+	fxGitHubPAT          = "ghp" + "_1234567890abcdefghijklmnopqrstuvwx"
+	fxGitHubOAuth        = "gho" + "_1234567890abcdefghijklmnopqrstuvwx"
+	fxGitHubFineGrained  = "github" + "_pat_11ABCDEFG0abcdefghij_KLMNOPQRSTUVWXYZ012345"
+	fxAWSLongTermKey     = "AKIA" + "IOSFODNN7EXAMPLE"
+	fxAWSSessionKey      = "ASIA" + "IOSFODNN7EXAMPLE"
 )
 
 // filler is padding with internal whitespace. Tests that stream a secret need
@@ -25,33 +52,33 @@ func TestRedactPatterns(t *testing.T) {
 	}{
 		{
 			name:  "anthropic key",
-			in:    "using sk-ant-api03-AbCdEfGhIjKlMnOpQrStUvWxYz0123456789 now",
+			in:    "using " + fxAnthropicKey + " now",
 			want:  "using [REDACTED:ANTHROPIC_API_KEY] now",
-			leaks: "sk-ant-api03-AbCdEfGhIjKlMnOpQrStUvWxYz0123456789",
+			leaks: fxAnthropicKey,
 		},
 		{
 			name:  "generic sk key",
-			in:    "key sk-ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789abcd end",
+			in:    "key " + fxGenericSKKey + " end",
 			want:  "key [REDACTED:API_KEY] end",
-			leaks: "sk-ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789abcd",
+			leaks: fxGenericSKKey,
 		},
 		{
 			name:  "sonar squ token",
-			in:    "token squ_9f2c1ab34de5f6789012345678901234abcd0011 ok",
+			in:    "token " + fxSonarUserToken + " ok",
 			want:  "token [REDACTED:SONAR_TOKEN] ok",
-			leaks: "squ_9f2c1ab34de5f6789012345678901234abcd0011",
+			leaks: fxSonarUserToken,
 		},
 		{
 			name:  "sonar sqp token",
-			in:    "token sqp_9f2c1ab34de5f6789012345678901234abcd0011 ok",
+			in:    "token " + fxSonarProjectToken + " ok",
 			want:  "token [REDACTED:SONAR_TOKEN] ok",
-			leaks: "sqp_9f2c1ab34de5f6789012345678901234abcd0011",
+			leaks: fxSonarProjectToken,
 		},
 		{
 			name:  "sonar sqa token",
-			in:    "token sqa_9f2c1ab34de5f6789012345678901234abcd0011 ok",
+			in:    "token " + fxSonarAnalysisToken + " ok",
 			want:  "token [REDACTED:SONAR_TOKEN] ok",
-			leaks: "sqa_9f2c1ab34de5f6789012345678901234abcd0011",
+			leaks: fxSonarAnalysisToken,
 		},
 		{
 			name:  "sonar token flag",
@@ -67,34 +94,34 @@ func TestRedactPatterns(t *testing.T) {
 		},
 		{
 			name:  "github classic token",
-			in:    "remote ghp_1234567890abcdefghijklmnopqrstuvwx set",
+			in:    "remote " + fxGitHubPAT + " set",
 			want:  "remote [REDACTED:GITHUB_TOKEN] set",
-			leaks: "ghp_1234567890abcdefghijklmnopqrstuvwx",
+			leaks: fxGitHubPAT,
 		},
 		{
 			name:  "github oauth token",
-			in:    "remote gho_1234567890abcdefghijklmnopqrstuvwx set",
+			in:    "remote " + fxGitHubOAuth + " set",
 			want:  "remote [REDACTED:GITHUB_TOKEN] set",
-			leaks: "gho_1234567890abcdefghijklmnopqrstuvwx",
+			leaks: fxGitHubOAuth,
 		},
 		{
 			name:  "github fine grained pat",
-			in:    "auth github_pat_11ABCDEFG0abcdefghij_KLMNOPQRSTUVWXYZ012345 done",
+			in:    "auth " + fxGitHubFineGrained + " done",
 			want:  "auth [REDACTED:GITHUB_TOKEN] done",
-			leaks: "github_pat_11ABCDEFG0abcdefghij_KLMNOPQRSTUVWXYZ012345",
+			leaks: fxGitHubFineGrained,
 		},
-		//nolint:gosec // AKIAIOSFODNN7EXAMPLE is AWS's own documentation placeholder.
+		//nolint:gosec // the AWS fixture is that vendor's own documentation placeholder.
 		{
 			name:  "aws access key",
-			in:    "id AKIAIOSFODNN7EXAMPLE region us-east-1",
+			in:    "id " + fxAWSLongTermKey + " region us-east-1",
 			want:  "id [REDACTED:AWS_ACCESS_KEY_ID] region us-east-1",
-			leaks: "AKIAIOSFODNN7EXAMPLE",
+			leaks: fxAWSLongTermKey,
 		},
 		{
 			name:  "aws session key",
-			in:    "id ASIAIOSFODNN7EXAMPLE region us-east-1",
+			in:    "id " + fxAWSSessionKey + " region us-east-1",
 			want:  "id [REDACTED:AWS_ACCESS_KEY_ID] region us-east-1",
-			leaks: "ASIAIOSFODNN7EXAMPLE",
+			leaks: fxAWSSessionKey,
 		},
 		{
 			name:  "bearer keeps scheme",
@@ -158,11 +185,11 @@ func TestRedactStreamingByteAtATime(t *testing.T) {
 		secret string
 		marker string
 	}{
-		{"anthropic", "sk-ant-api03-AbCdEfGhIjKlMnOpQrStUvWxYz0123456789", "[REDACTED:ANTHROPIC_API_KEY]"},
-		{"sonar", "squ_9f2c1ab34de5f6789012345678901234abcd0011", "[REDACTED:SONAR_TOKEN]"},
-		{"github", "ghp_1234567890abcdefghijklmnopqrstuvwx", "[REDACTED:GITHUB_TOKEN]"},
-		{"github_pat", "github_pat_11ABCDEFG0abcdefghij_KLMNOPQRSTUVWXYZ012345", "[REDACTED:GITHUB_TOKEN]"},
-		{"aws", "AKIAIOSFODNN7EXAMPLE", "[REDACTED:AWS_ACCESS_KEY_ID]"},
+		{"anthropic", fxAnthropicKey, "[REDACTED:ANTHROPIC_API_KEY]"},
+		{"sonar", fxSonarUserToken, "[REDACTED:SONAR_TOKEN]"},
+		{"github", fxGitHubPAT, "[REDACTED:GITHUB_TOKEN]"},
+		{"github_pat", fxGitHubFineGrained, "[REDACTED:GITHUB_TOKEN]"},
+		{"aws", fxAWSLongTermKey, "[REDACTED:AWS_ACCESS_KEY_ID]"},
 		{"jwt", "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.dBjftJeZ4CVPmB92K27uhbUJU1p1r", "[REDACTED:JWT]"},
 		{"bearer", "Bearer abcdefghijklmnopqrstuvwx", "[REDACTED:BEARER_TOKEN]"},
 		{"sonar_flag", "-Dsonar.token=notaknownshape123456", "[REDACTED:SONAR_TOKEN]"},
@@ -211,7 +238,7 @@ func TestRedactStreamingByteAtATime(t *testing.T) {
 func TestRedactStreamingEveryChunkBoundary(t *testing.T) {
 	t.Parallel()
 	r := NewRedactor(Secret{Label: "SONAR_TOKEN", Value: "opaque-secret-value-1234"})
-	in := filler + " token squ_9f2c1ab34de5f6789012345678901234abcd0011 " +
+	in := filler + " token " + fxSonarUserToken + " " +
 		"and opaque-secret-value-1234 and Bearer abcdefghijklmnopqrstuvwx " + filler
 	want := r.Redact(in)
 	if strings.Contains(want, "squ_9f2c") || strings.Contains(want, "opaque-secret-value-1234") {
@@ -354,10 +381,10 @@ func TestRedactScannerOutputFixture(t *testing.T) {
 	r := NewRedactor(Secret{Label: "SONAR_HOST", Value: "sonar.example.com"})
 	got := r.Redact(raw)
 	for _, leak := range []string{
-		"squ_9f2c1ab34de5f6789012345678901234abcd0011",
-		"sk-ant-api03-AbCdEfGhIjKlMnOpQrStUvWxYz0123456789",
-		"AKIAIOSFODNN7EXAMPLE",
-		"ghp_1234567890abcdefghijklmnopqrstuvwx",
+		fxSonarUserToken,
+		fxAnthropicKey,
+		fxAWSLongTermKey,
+		fxGitHubPAT,
 		"eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9",
 		"sonar.example.com",
 	} {
@@ -445,4 +472,55 @@ func readTestdata(t *testing.T, name string) string {
 		t.Fatalf("read testdata: %v", err)
 	}
 	return string(b)
+}
+
+// No file in this package may contain a contiguous secret-shaped literal.
+//
+// This package exists to scrub credentials, so its fixtures necessarily look
+// like credentials -- and a public repository runs a secret scanner over every
+// commit. GitHub opened alerts on two of these before they were split. None
+// was a real credential, but an alert a maintainer dismisses on every push
+// teaches everyone to wave through the one that is real.
+//
+// The fixtures are therefore assembled from parts at run time. This test walks
+// the package's own source and fails if a whole one reappears, because the
+// convention is otherwise only as durable as the next contributor's memory.
+func TestSourceHasNoContiguousSecretLiterals(t *testing.T) {
+	t.Parallel()
+
+	patterns := map[string]*regexp.Regexp{
+		"anthropic key":  regexp.MustCompile(`sk-ant-[A-Za-z0-9_-]{16,}`),
+		"generic sk key": regexp.MustCompile(`\bsk-[A-Za-z0-9]{32,}`),
+		"sonar token":    regexp.MustCompile(`\b(?:squ_|sqp_|sqa_)[A-Za-z0-9]{20,}`),
+		"github token":   regexp.MustCompile(`\bgh[pousr]_[A-Za-z0-9]{20,}`),
+		"github pat":     regexp.MustCompile(`\bgithub_pat_[A-Za-z0-9_]{20,}`),
+		"aws key id":     regexp.MustCompile(`\b(?:AKIA|ASIA)[0-9A-Z]{16}\b`),
+	}
+
+	entries, err := os.ReadDir(".")
+	if err != nil {
+		t.Fatalf("read package dir: %v", err)
+	}
+	scanned := 0
+	for _, e := range entries {
+		if e.IsDir() || !strings.HasSuffix(e.Name(), ".go") {
+			continue
+		}
+		body, err := os.ReadFile(e.Name())
+		if err != nil {
+			t.Fatalf("read %s: %v", e.Name(), err)
+		}
+		scanned++
+		for label, re := range patterns {
+			if m := re.Find(body); m != nil {
+				t.Errorf("%s: contains a contiguous %s literal (%q). Split it the way the "+
+					"fixtures at the top of redact_test.go are split, or a secret scanner "+
+					"will open an alert on every push.", e.Name(), label, string(m))
+			}
+		}
+	}
+	if scanned == 0 {
+		t.Fatal("scanned no Go files; this guard has stopped guarding")
+	}
+	t.Logf("scanned %d files for contiguous secret literals", scanned)
 }
