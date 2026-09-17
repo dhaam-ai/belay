@@ -185,11 +185,40 @@ func (g *GolangCI) Detect(dir string) bool {
 
 // Lint implements belay.Linter.
 //
-// It runs golangci-lint over every package under dir. Findings are a
-// successful call: golangci-lint exits 1 when it has any, and that returns a
-// GateFail report with a nil error. Only a golangci-lint that could not run at
-// all — missing, timed out, or refusing its own configuration, which it
-// signals with exit 3 and an empty stdout — produces an error.
+// It runs golangci-lint over every package under dir, and reports only the
+// findings on lines that differ from the git HEAD, which is where a run's
+// uncommitted edits are. Findings are a successful call: golangci-lint exits 1
+// when it has any, and that returns a GateFail report with a nil error. Only a
+// golangci-lint that could not run at all — missing, timed out, or refusing
+// its own configuration, which it signals with exit 3 and an empty stdout —
+// produces an error.
+//
+// # Why only changed lines
+//
+// The gate decides whether a run's change can leave the fix loop. Findings
+// that were already committed say nothing about that change. Counting them
+// would fail every run in a repository with existing debt, whatever the run
+// did, and send the fix node to repair code the run never touched.
+//
+// --new-from-rev=HEAD is golangci-lint's own way to scope a run: it diffs the
+// working tree against HEAD with git, counting a new untracked file as
+// changed. belay never commits, and it gives the agent no shell to commit
+// with, so HEAD is still the commit the run started from when the gate runs.
+// The report is not exactly the findings in the run's change in four cases:
+//
+//   - A compile error is always reported, changed line or not, so committed
+//     code that does not compile still fails the gate.
+//   - Where dir has no git HEAD — no repository, a repository with no
+//     commits, a fanout candidate copied without .git, or git missing from
+//     PATH — golangci-lint logs a warning to stderr and reports every
+//     finding.
+//   - Uncommitted edits the user made before the run count as part of the
+//     run's change.
+//   - golangci-lint's cache is keyed by file content but stores absolute
+//     paths (golangci/golangci-lint#3502). If another directory holding
+//     byte-identical changed code was linted with the same cache, this run
+//     is handed that directory's findings, and the diff drops them because
+//     their paths are not in it.
 func (g *GolangCI) Lint(ctx context.Context, dir string) (belay.QualityReport, error) {
 	cmd := exec.Command{
 		Path: golangciName,
@@ -197,7 +226,7 @@ func (g *GolangCI) Lint(ctx context.Context, dir string) (belay.QualityReport, e
 		// No --timeout: exec already bounds the run and kills the whole
 		// process group, and two competing deadlines only make the
 		// failure harder to read.
-		Args:      []string{"run", "--output.json.path=stdout", "./..."},
+		Args:      []string{"run", "--output.json.path=stdout", "--new-from-rev=HEAD", "./..."},
 		Dir:       dir,
 		EnvAllow:  golangciEnv,
 		Timeout:   g.timeout,

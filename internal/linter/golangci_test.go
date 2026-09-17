@@ -455,9 +455,11 @@ func TestGolangCILintGateThresholds(t *testing.T) {
 	}
 }
 
-// TestGolangCICommand pins the command line, and with it the v1-versus-v2 flag
-// decision: v2.12.2 has no --out-format flag, so passing the v1 spelling would
-// fail every invocation rather than degrade.
+// TestGolangCICommand pins the command line, and with it two decisions: the
+// v1-versus-v2 flag spelling (v2.12.2 has no --out-format flag, so passing the
+// v1 spelling would fail every invocation rather than degrade), and scoping
+// findings to the lines that differ from HEAD. test/lintgate checks what that
+// scoping does with the real tool.
 func TestGolangCICommand(t *testing.T) {
 	t.Parallel()
 
@@ -473,7 +475,7 @@ func TestGolangCICommand(t *testing.T) {
 	if cmd.Path != "golangci-lint" {
 		t.Errorf("Path = %q, want %q", cmd.Path, "golangci-lint")
 	}
-	wantArgs := []string{"run", "--output.json.path=stdout", "./..."}
+	wantArgs := []string{"run", "--output.json.path=stdout", "--new-from-rev=HEAD", "./..."}
 	if diff := cmp.Diff(wantArgs, cmd.Args); diff != "" {
 		t.Errorf("Args mismatch (-want +got):\n%s", diff)
 	}
