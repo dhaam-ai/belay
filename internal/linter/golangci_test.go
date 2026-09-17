@@ -3,8 +3,10 @@
 package linter
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
+	"log/slog"
 	"path/filepath"
 	"slices"
 	"strings"
@@ -13,6 +15,7 @@ import (
 
 	"github.com/google/go-cmp/cmp"
 
+	"github.com/dhaam-ai/belay/internal/exec"
 	"github.com/dhaam-ai/belay/pkg/belay"
 )
 
@@ -455,6 +458,23 @@ func TestGolangCILintGateThresholds(t *testing.T) {
 	}
 }
 
+// scopedArgs is the golangci-lint command line when findings are scoped to the
+// lines that differ from HEAD. Every issues.new* and whole-files setting is
+// pinned, so a repository's .golangci.yml cannot widen or narrow the scope.
+var scopedArgs = []string{
+	"run", "--output.json.path=stdout",
+	"--new=false", "--new-from-rev=HEAD", "--new-from-merge-base=", "--new-from-patch=", "--whole-files=false",
+	"./...",
+}
+
+// unscopedArgs is the command line when git cannot scope findings: the same
+// pins, with --new-from-rev cleared, so every finding counts.
+var unscopedArgs = []string{
+	"run", "--output.json.path=stdout",
+	"--new=false", "--new-from-rev=", "--new-from-merge-base=", "--new-from-patch=", "--whole-files=false",
+	"./...",
+}
+
 // TestGolangCICommand pins the command line, and with it two decisions: the
 // v1-versus-v2 flag spelling (v2.12.2 has no --out-format flag, so passing the
 // v1 spelling would fail every invocation rather than degrade), and scoping
@@ -471,12 +491,26 @@ func TestGolangCICommand(t *testing.T) {
 		t.Fatalf("Lint: %v", err)
 	}
 
+	probes := runner.callsTo("git")
+	if len(probes) != 1 {
+		t.Fatalf("ran git %d times, want 1", len(probes))
+	}
+	probe := probes[0]
+	if diff := cmp.Diff([]string{"ls-tree", "--name-only", "HEAD"}, probe.Args); diff != "" {
+		t.Errorf("git Args mismatch (-want +got):\n%s", diff)
+	}
+	if probe.Dir != dir {
+		t.Errorf("git Dir = %q, want %q", probe.Dir, dir)
+	}
+	if len(probe.EnvAllow) != 0 || len(probe.SecretEnv) != 0 || len(probe.ExtraEnv) != 0 {
+		t.Errorf("git gets more than the base environment: %+v", probe)
+	}
+
 	cmd := runner.lastCall(t)
 	if cmd.Path != "golangci-lint" {
 		t.Errorf("Path = %q, want %q", cmd.Path, "golangci-lint")
 	}
-	wantArgs := []string{"run", "--output.json.path=stdout", "--new-from-rev=HEAD", "./..."}
-	if diff := cmp.Diff(wantArgs, cmd.Args); diff != "" {
+	if diff := cmp.Diff(scopedArgs, cmd.Args); diff != "" {
 		t.Errorf("Args mismatch (-want +got):\n%s", diff)
 	}
 	if cmd.Dir != dir {
@@ -495,6 +529,89 @@ func TestGolangCICommand(t *testing.T) {
 	}
 	if slices.Contains(cmd.Args, "--out-format") {
 		t.Error("the v1 --out-format flag was removed in golangci-lint v2")
+	}
+}
+
+// TestGolangCIScopeFollowsGit covers what the git check can report. Scoping
+// needs a HEAD that holds the linted directory. Every other answer must lint
+// the whole tree, which fails safe, and log a warning. Passing
+// --new-from-rev=HEAD anyway would hide every finding in a directory the
+// repository ignores, and in the other cases would rely on golangci-lint
+// quietly ignoring a revision it cannot read.
+func TestGolangCIScopeFollowsGit(t *testing.T) {
+	t.Parallel()
+
+	notFound := errors.New(`exec: "git": executable file not found in $PATH`)
+	tests := []struct {
+		name     string
+		git      scripted
+		wantArgs []string
+		wantWarn bool
+	}{
+		{
+			name:     "HEAD holds the directory",
+			git:      scripted{stdout: "go.mod\nmain.go\n"},
+			wantArgs: scopedArgs,
+		},
+		{
+			name:     "not a repository",
+			git:      scripted{exitCode: 128, stderr: "fatal: not a git repository (or any of the parent directories): .git"},
+			wantArgs: unscopedArgs,
+			wantWarn: true,
+		},
+		{
+			name:     "no commits yet",
+			git:      scripted{exitCode: 128, stderr: "fatal: Not a valid object name HEAD"},
+			wantArgs: unscopedArgs,
+			wantWarn: true,
+		},
+		{
+			// An ignored or untracked directory, such as a fanout
+			// candidate under .belay: git runs, and lists nothing.
+			name:     "HEAD does not hold the directory",
+			git:      scripted{},
+			wantArgs: unscopedArgs,
+			wantWarn: true,
+		},
+		{
+			name:     "git not installed",
+			git:      scripted{exitCode: -1, err: &exec.ToolchainError{Tool: "git", Err: notFound, Detail: notFound.Error()}},
+			wantArgs: unscopedArgs,
+			wantWarn: true,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			git := tt.git
+			runner := &stubRunner{stdout: readFixture(t, "golangci-clean.json"), git: &git}
+			var logs bytes.Buffer
+			dir := t.TempDir()
+			linter := NewGolangCI(WithRunner(runner), WithLogger(slog.New(slog.NewTextHandler(&logs, nil))))
+
+			report, err := linter.Lint(t.Context(), dir)
+			if err != nil {
+				t.Fatalf("Lint: %v", err)
+			}
+			if report.Gate != belay.GatePass {
+				t.Errorf("Gate = %s, want %s", report.Gate, belay.GatePass)
+			}
+			if diff := cmp.Diff(tt.wantArgs, runner.lastCall(t).Args); diff != "" {
+				t.Errorf("Args mismatch (-want +got):\n%s", diff)
+			}
+			warned := strings.Contains(logs.String(), "level=WARN msg=\"belay/linter: cannot scope golangci-lint") &&
+				strings.Contains(logs.String(), dir)
+			if warned != tt.wantWarn {
+				t.Errorf("warned = %v, want %v; logs:\n%s", warned, tt.wantWarn, logs.String())
+			}
+			// The warning is only on screen with --verbose. The summary
+			// also reaches state.json, the report artifact and the fix
+			// prompt.
+			if said := strings.Contains(report.Summary, "not scoped"); said != tt.wantWarn {
+				t.Errorf("Summary %q mentions scoping: %v, want %v", report.Summary, said, tt.wantWarn)
+			}
+		})
 	}
 }
 

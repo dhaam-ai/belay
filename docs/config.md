@@ -156,7 +156,7 @@ Configuration for code quality review gates (phases 6 and 7).
 **Valid values**: `"lint"`, `"sonar"`, `"ai"`
 
 The review strategy:
-- `"lint"`: Run local linters (golangci-lint, eslint, etc.). Fast, zero setup, no cost. golangci-lint counts only findings on lines that differ from the git `HEAD`, so existing findings do not fail a run; ESLint and Ruff count every finding. See [Troubleshooting](troubleshooting.md#quality-gate-fails-on-code-the-run-did-not-touch).
+- `"lint"`: Run local linters (golangci-lint, eslint, etc.). Fast, zero setup, no cost. In a git repository, golangci-lint counts only findings on lines that differ from `HEAD`, so findings committed before the run don't fail it. Where git can't tell, every finding counts. ESLint and Ruff always count every finding. For the limits, see [Troubleshooting](troubleshooting.md#quality-gate-fails-on-code-the-run-did-not-touch).
 - `"sonar"`: Query SonarQube server for code quality. Requires infrastructure setup.
 - `"ai"`: Run Claude Code as a reviewer (catches semantic bugs, style issues). Costs tokens.
 

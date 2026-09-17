@@ -185,23 +185,47 @@ This document covers common failure modes, their symptoms, and remedies.
 
 **Symptom**: With `review.mode: lint`, every run fails the gate whatever it changed, and the fix node asks the agent to repair findings in files the run never edited.
 
-**Cause**: The gate is counting findings that were already in the repository. From 0.1.2, belay runs `golangci-lint run --new-from-rev=HEAD ./...`, which reports only findings on lines that differ from the last commit. That needs git on `PATH` and a repository with at least one commit. Without them, golangci-lint prints a warning and reports every finding. belay 0.1.1 and earlier always reported every finding, and ESLint and Ruff still do.
+**Cause**: The gate is counting findings that were already in the repository. From 0.1.2, golangci-lint reports only findings on lines that differ from the last commit. That needs `git` on `PATH` and a commit that holds the workspace. From 0.1.3, belay checks for both first. If either is missing, every finding counts. belay then logs `cannot scope golangci-lint to the run's change; every finding counts` with the reason, and the gate's summary ends `not scoped to the run's change`. This happens outside a repository, in a repository with no commits, and in a directory the repository ignores or hasn't committed yet. belay 0.1.1 and earlier always counted every finding, and ESLint and Ruff still do.
 
 **Diagnosis**:
 1. Run `belay version`. On 0.1.1 or earlier, every existing finding counts.
-2. In the workspace, run `git rev-parse --verify HEAD`. It fails outside a git repository and in a repository with no commits.
-3. Reproduce what the gate sees:
+2. Look for the warning above in the output of `belay run --verbose`. Or look for `not scoped to the run's change` in the run's review report, `.belay/runs/<run-id>/artifacts/review-<step>.json`.
+3. In the workspace, run the check belay makes:
    ```bash
-   golangci-lint run --new-from-rev=HEAD ./...
+   git ls-tree --name-only HEAD
    ```
-   If the output includes a warning containing `Can't process results by diff processor`, golangci-lint reported every finding.
+   If it fails or prints nothing, belay can't scope the findings.
+4. Reproduce what the gate sees:
+   ```bash
+   golangci-lint run --new=false --new-from-rev=HEAD --new-from-merge-base= --new-from-patch= --whole-files=false ./...
+   ```
 
 **Remedy**:
-- Upgrade to belay 0.1.2 or later
-- Run belay in a git repository with at least one commit, with `git` on `PATH`
+- Upgrade to belay 0.1.3 or later. 0.1.2 scopes findings, but lets a repository's `.golangci.yml` `issues` settings change the scope
+- Run belay in a git repository with `git` on `PATH`, and commit the workspace first. If the workspace is in a directory the repository ignores, run belay from a repository that tracks it
 - Commit or stash unrelated edits before the run: uncommitted changes count as part of the run's change
 - If a finding comes from `typecheck`, fix the build first. A package that does not compile fails the gate whether or not the run changed it
 - For ESLint and Ruff, fix or exclude the existing findings in the tool's own configuration, or raise `review.fail_on`, for example to `critical`
+
+## Quality Gate Passes Although golangci-lint Reports Findings
+
+**Symptom**: `golangci-lint run ./...` reports findings in the workspace, but the run's lint gate passed.
+
+**Cause**: From 0.1.2, the gate counts only findings on lines that differ from HEAD. That leaves out findings committed before the run, which is deliberate, and four kinds it misses:
+- A finding the change causes on a line it didn't touch, such as an unchecked error where a function that now returns one is called. Compile errors are the exception: they always count
+- A finding in a file git ignores
+- A change committed while the run was in progress
+- A finding golangci-lint's cache took from another checkout holding identical code. The cache stores the other checkout's paths, and the scoping drops them ([golangci/golangci-lint#3502](https://github.com/golangci/golangci-lint/issues/3502))
+
+**Diagnosis**:
+1. Run the command from step 4 in the section above, and compare its findings with `golangci-lint run ./...`
+2. Check whether the finding's file is ignored: `git check-ignore -v <file>`
+3. Check for commits made since the run started: `git log`
+
+**Remedy**:
+- Fix a finding the gate missed by hand, or start a run whose goal names it
+- If you suspect the cache, run `golangci-lint cache clean`, then check again
+- Don't commit while a run is in progress
 
 ## Node Timeout
 
