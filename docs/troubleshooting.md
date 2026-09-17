@@ -185,19 +185,31 @@ This document covers common failure modes, their symptoms, and remedies.
 
 **Symptom**: With `review.mode: lint`, every run fails the gate whatever it changed, and the fix node asks the agent to repair findings in files the run never edited.
 
-**Cause**: The gate is counting findings that were already in the repository. From 0.1.2, golangci-lint reports only findings on lines that differ from the last commit. That needs `git` on `PATH` and a commit that holds the workspace. From 0.1.3, belay checks for both first. If either is missing, every finding counts. belay then logs `cannot scope golangci-lint to the run's change; every finding counts` with the reason, and the gate's summary ends `not scoped to the run's change`. This happens outside a repository, in a repository with no commits, and in a directory the repository ignores or hasn't committed yet. belay 0.1.1 and earlier always counted every finding, and ESLint and Ruff still do.
+**Cause**: The gate is counting findings that were already in the repository. From 0.1.2, golangci-lint reports only findings on lines that differ from the last commit. That needs `git` on `PATH`, a commit that holds the workspace, and a workspace whose new files git doesn't ignore. belay checks all three first: from 0.1.3 the first two, and from 0.1.4 the third. If any is missing, every finding counts. belay then logs `cannot scope golangci-lint to the run's change; every finding counts` with the reason, and the gate's summary contains `not scoped to the run's change`.
+
+This happens:
+- outside a repository;
+- in a repository with no commits;
+- in a directory the repository ignores or hasn't committed yet.
+
+belay 0.1.1 and earlier always counted every finding, and ESLint and Ruff still do.
 
 **Diagnosis**:
 1. Run `belay version`. On 0.1.1 or earlier, every existing finding counts.
 2. Look for the warning above in the output of `belay run --verbose`. Or look for `not scoped to the run's change` in the run's review report, `.belay/runs/<run-id>/artifacts/review-<step>.json`.
-3. In the workspace, run the check belay makes:
+3. In the workspace, run the checks belay makes:
    ```bash
-   git ls-tree --name-only HEAD
+   git ls-tree --name-only HEAD                                   # must list files
+   git check-ignore --no-index -v -- belay-scope-check.go         # must print nothing
    ```
-   If it fails or prints nothing, belay can't scope the findings.
-4. Reproduce what the gate sees:
+   If the first fails or prints nothing, or the second prints the rule that ignores new files, belay can't scope the findings.
+4. Reproduce what the gate sees. When belay can scope the findings:
    ```bash
    golangci-lint run --new=false --new-from-rev=HEAD --new-from-merge-base= --new-from-patch= --whole-files=false ./...
+   ```
+   When it can't, it counts everything:
+   ```bash
+   golangci-lint run --new=false --new-from-rev= --new-from-merge-base= --new-from-patch= --whole-files=false ./...
    ```
 
 **Remedy**:
@@ -211,16 +223,18 @@ This document covers common failure modes, their symptoms, and remedies.
 
 **Symptom**: `golangci-lint run ./...` reports findings in the workspace, but the run's lint gate passed.
 
-**Cause**: From 0.1.2, the gate counts only findings on lines that differ from HEAD. That leaves out findings committed before the run, which is deliberate, and four kinds it misses:
+**Cause**: From 0.1.2, the gate counts only findings on lines that differ from HEAD. That leaves out findings committed before the run, which is deliberate, and five kinds it misses:
 - A finding the change causes on a line it didn't touch, such as an unchecked error where a function that now returns one is called. Compile errors are the exception: they always count
-- A finding in a file git ignores
+- A finding in a file in a subdirectory git ignores
+- A change inside a nested repository or submodule whose files are part of the module's packages. The enclosing repository's git never lists those files
 - A change committed while the run was in progress
 - A finding golangci-lint's cache took from another checkout holding identical code. The cache stores the other checkout's paths, and the scoping drops them ([golangci/golangci-lint#3502](https://github.com/golangci/golangci-lint/issues/3502))
 
 **Diagnosis**:
-1. Run the command from step 4 in the section above, and compare its findings with `golangci-lint run ./...`
+1. Run both commands from step 4 in the section above, and compare their findings. A repository's own `.golangci.yml` can scope a plain `golangci-lint run ./...`, so use the second command, not that one
 2. Check whether the finding's file is ignored: `git check-ignore -v <file>`
-3. Check for commits made since the run started: `git log`
+3. Check whether the file is inside a nested repository: `git -C <its directory> rev-parse --show-toplevel` prints a different directory than it does in the workspace
+4. Check for commits made since the run started: `git log`
 
 **Remedy**:
 - Fix a finding the gate missed by hand, or start a run whose goal names it

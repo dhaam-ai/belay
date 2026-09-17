@@ -158,14 +158,32 @@ func TestGolangCIScopesToChangedLines(t *testing.T) {
 
 		check(t, lint(t, goEnv, dir), belay.GatePass, []string{}, false)
 	})
+
+	// lib is a repository of its own but a package of the module, so
+	// golangci-lint lints it and the enclosing repository's git never
+	// lists its files.
+	t.Run("a change inside a nested repository does not count", func(t *testing.T) {
+		dir := t.TempDir()
+		lib := filepath.Join(dir, "lib")
+		writeFiles(t, lib, map[string]string{"lib.go": "package lib\n\n// Lib does nothing.\nfunc Lib() {}\n"})
+		commitAll(t, lib)
+		writeModule(t, dir, map[string]string{"debt.go": scopeDebt})
+		commitAll(t, dir)
+		writeFiles(t, lib, map[string]string{
+			"added.go": strings.Replace(scopeAdded, "package scoped", "package lib", 1),
+		})
+
+		check(t, lint(t, goEnv, dir), belay.GatePass, []string{}, false)
+	})
 }
 
 // TestGolangCIIgnoresRepositoryScopeSettings checks that a repository's own
-// issues.* settings cannot change what the gate counts. Left alone, some
-// would count findings committed before the run and one would hide the run's
-// own findings.
+// issues.* settings cannot change what the gate counts, scoped or not. Left
+// alone, some would count findings committed before the run, and others would
+// hide findings that should count.
 func TestGolangCIIgnoresRepositoryScopeSettings(t *testing.T) {
 	goEnv := requireTools(t)
+	change := map[string]string{"debt.go": scopeDebt + scopeEdit, "added.go": scopeAdded}
 
 	for _, setting := range []string{
 		"new: true",
@@ -174,17 +192,35 @@ func TestGolangCIIgnoresRepositoryScopeSettings(t *testing.T) {
 		"new-from-patch: empty.patch",
 		"whole-files: true",
 	} {
+		config := scopeConfig + "issues:\n  " + setting + "\n"
 		t.Run(setting, func(t *testing.T) {
-			dir := t.TempDir()
-			writeModule(t, dir, map[string]string{"debt.go": scopeDebt, "empty.patch": ""})
-			writeFiles(t, dir, map[string]string{".golangci.yml": scopeConfig + "issues:\n  " + setting + "\n"})
-			commitAll(t, dir)
-			runGit(t, dir, "checkout", "--quiet", "-b", "feature")
-			writeFiles(t, dir, map[string]string{"branch.go": scopeBranch})
-			commitAll(t, dir)
-			writeFiles(t, dir, map[string]string{"debt.go": scopeDebt + scopeEdit, "added.go": scopeAdded})
+			t.Run("scoped", func(t *testing.T) {
+				dir := t.TempDir()
+				writeModule(t, dir, map[string]string{"debt.go": scopeDebt, "empty.patch": "", ".golangci.yml": config})
+				commitAll(t, dir)
+				runGit(t, dir, "checkout", "--quiet", "-b", "feature")
+				writeFiles(t, dir, map[string]string{"branch.go": scopeBranch})
+				commitAll(t, dir)
+				writeFiles(t, dir, change)
 
-			check(t, lint(t, goEnv, dir), belay.GateFail, changed, false)
+				check(t, lint(t, goEnv, dir), belay.GateFail, changed, false)
+			})
+
+			// An ignored workspace in a repository with two commits on a
+			// branch, so every setting has history to act on.
+			t.Run("unscoped", func(t *testing.T) {
+				root := t.TempDir()
+				writeFiles(t, root, map[string]string{".gitignore": "ws/\n", "one.txt": "one\n"})
+				commitAll(t, root)
+				runGit(t, root, "checkout", "--quiet", "-b", "feature")
+				writeFiles(t, root, map[string]string{"two.txt": "two\n"})
+				commitAll(t, root)
+				dir := filepath.Join(root, "ws")
+				writeModule(t, dir, map[string]string{"debt.go": scopeDebt, "empty.patch": "", ".golangci.yml": config})
+				writeFiles(t, dir, change)
+
+				check(t, lint(t, goEnv, dir), belay.GateFail, all, true)
+			})
 		})
 	}
 }
@@ -218,6 +254,20 @@ func TestGolangCICountsEverythingGitCannotScope(t *testing.T) {
 	t.Run("in a directory the enclosing repository ignores", func(t *testing.T) {
 		root := t.TempDir()
 		writeFiles(t, root, map[string]string{".gitignore": "ws/\n"})
+		commitAll(t, root)
+		dir := filepath.Join(root, "ws")
+		writeModule(t, dir, base)
+		writeFiles(t, dir, change)
+
+		check(t, lint(t, goEnv, dir), belay.GateFail, all, true)
+	})
+
+	// A negated rule keeps one file in HEAD, so HEAD is not empty here, but
+	// git ignores every file the run adds.
+	t.Run("in an ignored directory that holds a committed file", func(t *testing.T) {
+		root := t.TempDir()
+		writeFiles(t, root, map[string]string{".gitignore": "ws/*\n!ws/.gitkeep\n"})
+		writeFiles(t, filepath.Join(root, "ws"), map[string]string{".gitkeep": ""})
 		commitAll(t, root)
 		dir := filepath.Join(root, "ws")
 		writeModule(t, dir, base)
