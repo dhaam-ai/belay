@@ -544,11 +544,12 @@ func agentModeLine(mode config.AgentMode, cassette string) string {
 	}
 }
 
-// credentialsLine reports whether the two credentials belay reads are set. It
-// never reports their values.
+// credentialsLine reports whether each credential belay reads is set. It never
+// reports their values.
 func credentialsLine() string {
-	parts := make([]string, 0, 2)
-	for _, name := range []string{anthropicKeyEnv, sonarTokenEnv} {
+	names := []string{anthropicKeyEnv, claudeOAuthTokenEnv, sonarTokenEnv}
+	parts := make([]string, 0, len(names))
+	for _, name := range names {
 		if os.Getenv(name) == "" {
 			parts = append(parts, name+" is not set")
 			continue

@@ -477,10 +477,10 @@ func TestInvokeOmitsMCPConfigWhenEmpty(t *testing.T) {
 	}
 }
 
-// TestAPIKeyIsRequestedAsASecret pins how the credential reaches the child:
-// through SecretEnv, which both allowlists it and registers it for redaction,
-// and never through argv.
-func TestAPIKeyIsRequestedAsASecret(t *testing.T) {
+// TestCredentialsAreRequestedAsSecrets pins how each credential reaches the
+// child: through SecretEnv, which both allowlists it and registers it for
+// redaction, and never through argv.
+func TestCredentialsAreRequestedAsSecrets(t *testing.T) {
 	t.Parallel()
 
 	fake := &fakeRunner{Result: okResult(fixture(t, "success_with_cost.json"))}
@@ -492,20 +492,70 @@ func TestAPIKeyIsRequestedAsASecret(t *testing.T) {
 	}
 
 	cmd := fake.LastCall(t)
-	if !slices.Contains(cmd.SecretEnv, apiKeyEnv) {
-		t.Errorf("SecretEnv = %v, want it to carry %s", cmd.SecretEnv, apiKeyEnv)
-	}
 	if !slices.Contains(cmd.EnvAllow, "ANTHROPIC_BASE_URL") {
 		t.Errorf("EnvAllow = %v, want the backend's own passthrough", cmd.EnvAllow)
 	}
-	// A credential on argv would land in the journal and in ps output.
-	for _, a := range cmd.Args {
-		if strings.Contains(a, apiKeyEnv) {
-			t.Errorf("argv mentions the credential variable: %q", a)
+	for _, name := range []string{apiKeyEnv, oauthTokenEnv} {
+		if !slices.Contains(cmd.SecretEnv, name) {
+			t.Errorf("SecretEnv = %v, want it to carry %s", cmd.SecretEnv, name)
+		}
+		// A credential on argv would land in the journal and in ps output.
+		for _, a := range cmd.Args {
+			if strings.Contains(a, name) {
+				t.Errorf("argv mentions the credential variable: %q", a)
+			}
+		}
+		if cmd.ExtraEnv[name] != "" {
+			t.Errorf("%s must be passed through by name, never by value", name)
 		}
 	}
-	if cmd.ExtraEnv[apiKeyEnv] != "" {
-		t.Error("the credential must be passed through by name, never by value")
+}
+
+// TestOAuthTokenReachesChildRedacted is the regression test for signing in
+// with a Claude subscription. `claude setup-token` gives a subscriber a
+// long-lived token that the CLI reads from CLAUDE_CODE_OAUTH_TOKEN. While
+// exec's deny-by-default filter dropped it, the CLI started with no credential
+// and exited 1 in about a second, at no cost and with nothing on stderr.
+//
+// The child prints the token it received, so the redaction marker proves two
+// things at once: the token arrived, and its value cannot leave.
+func TestOAuthTokenReachesChildRedacted(t *testing.T) {
+	t.Parallel()
+
+	const oauth = "belay-test-oauth-credential-5e1f0c9a7d3b"
+	runner := &exec.Runner{
+		Logger: quietLogger(),
+		// No ANTHROPIC_API_KEY: a subscription user has only the token.
+		Environ: func() []string {
+			return []string{
+				oauthTokenEnv + "=" + oauth,
+				helperModeEnv + "=leak",
+				"PATH=" + os.Getenv("PATH"),
+				"HOME=" + os.Getenv("HOME"),
+			}
+		},
+	}
+	b := &Backend{Runner: runner, Logger: quietLogger(), Path: testExe(t),
+		EnvAllow: []string{helperModeEnv}}
+
+	req := validRequest()
+	req.WorkDir = t.TempDir()
+
+	got, err := b.Invoke(t.Context(), req)
+	if err != nil {
+		t.Fatalf("Invoke: %v", err)
+	}
+	if want := "the token is [REDACTED:" + oauthTokenEnv + "]"; !strings.Contains(got.Text, want) {
+		t.Errorf("Text = %q, want it to contain %q", got.Text, want)
+	}
+	surfaces := map[string]string{
+		"AgentResponse.Text": got.Text,
+		"AgentResponse.Raw":  string(got.Raw),
+	}
+	for name, s := range surfaces {
+		if strings.Contains(s, oauth) {
+			t.Errorf("%s leaked the token", name)
+		}
 	}
 }
 

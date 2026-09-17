@@ -6,6 +6,21 @@ All notable changes to belay are recorded here. The format follows
 that only `pkg/belay` carries a compatibility promise. Everything under
 `internal/` may change in any release.
 
+## v0.1.1 — 2026-09-17
+
+### Fixed
+
+- **Claude subscription tokens now reach Claude Code.** belay passed
+  `ANTHROPIC_API_KEY` to the `claude` child process but dropped
+  `CLAUDE_CODE_OAUTH_TOKEN`, the token `claude setup-token` issues to a Claude
+  Pro, Max, Team or Enterprise subscription. A user signed in that way saw
+  every run fail at the plan step: `claude` exited 1 in about a second, at no
+  cost and with no error text. belay now passes the token and redacts its
+  value from the journal, logs and recorded cassettes, as it already did for
+  the API key.
+- A dry run reports whether `CLAUDE_CODE_OAUTH_TOKEN` is set, and the
+  "not signed in" warning no longer appears when it is.
+
 ## v0.1.0 — 2026-09-06
 
 First release. belay runs an autonomous coding agent as a state-machine graph
