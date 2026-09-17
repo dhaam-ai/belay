@@ -16,8 +16,9 @@ that only `pkg/belay` carries a compatibility promise. Everything under
   git ignores every file a run adds there. Their findings were hidden and the
   gate passed. belay now also asks git whether a new file in the workspace
   would be ignored, and counts every finding if so.
-- The docs now also list changes inside a nested repository or submodule as
-  something scoping by line misses. The troubleshooting steps now show both
+- The docs now also list what else scoping by line misses: changes inside a
+  nested repository or submodule, and new files git ignores by name, such as
+  under a `*_gen.go` rule. The troubleshooting steps now show both
   golangci-lint commands belay can run.
 
 ### Security
@@ -28,8 +29,12 @@ that only `pkg/belay` carries a compatibility promise. Everything under
   Claude Code's own settings could approve it: `defaultMode: acceptEdits`,
   for example, approves edits. So the plan step, meant to be read-only,
   could edit files, and the code and fix steps could run shell commands.
-  belay now also passes `--tools`, which removes every other built-in tool.
-  This needs Claude Code 2.1.186 or later.
+  MCP servers from the user's or the repository's Claude Code configuration
+  also added their tools. belay now also passes `--tools`, which removes
+  every other built-in tool. It also passes `--strict-mcp-config`, which
+  loads no MCP servers except the ones belay configures itself. The code and
+  fix steps therefore no longer run commands such as `go test` themselves;
+  belay's test step runs the tests. This needs Claude Code 2.1.186 or later.
 
 ## v0.1.3 — 2026-09-17
 

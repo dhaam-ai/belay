@@ -60,7 +60,9 @@ func TestInvokeBuildsArgv(t *testing.T) {
 		},
 		{
 			// --allowedTools only pre-approves: every other built-in tool
-			// stays available. --tools is what removes them.
+			// stays available. --tools removes them, and
+			// --strict-mcp-config drops the MCP servers Claude Code's own
+			// configuration would add.
 			name: "allowed tools are approved and are the only tools",
 			req: belay.AgentRequest{
 				Prompt: "fix", WorkDir: "/repo",
@@ -70,6 +72,50 @@ func TestInvokeBuildsArgv(t *testing.T) {
 				"-p", "fix", "--output-format", "json",
 				"--allowedTools", "Read,Edit,Bash",
 				"--tools", "Read,Edit,Bash",
+				"--strict-mcp-config",
+			},
+		},
+		{
+			// "default" is how --tools spells every built-in tool, so it
+			// must never reach --tools as a name.
+			name: "default is never passed as a tool name",
+			req: belay.AgentRequest{
+				Prompt: "fix", WorkDir: "/repo",
+				AllowedTools: []string{"Read", "default", "Default"},
+			},
+			want: []string{
+				"-p", "fix", "--output-format", "json",
+				"--allowedTools", "Read,default,Default",
+				"--tools", "Read",
+				"--strict-mcp-config",
+			},
+		},
+		{
+			// --tools "" removes every tool: a request that asked for a
+			// restriction and named nothing usable gets no tools at all.
+			name: "a list with no usable names removes every tool",
+			req: belay.AgentRequest{
+				Prompt: "fix", WorkDir: "/repo",
+				AllowedTools: []string{"(git diff *)", " ", "default"},
+			},
+			want: []string{
+				"-p", "fix", "--output-format", "json",
+				"--allowedTools", "(git diff *), ,default",
+				"--tools", "",
+				"--strict-mcp-config",
+			},
+		},
+		{
+			name: "tool names are trimmed",
+			req: belay.AgentRequest{
+				Prompt: "fix", WorkDir: "/repo",
+				AllowedTools: []string{" Read ", "Grep\t"},
+			},
+			want: []string{
+				"-p", "fix", "--output-format", "json",
+				"--allowedTools", " Read ,Grep\t",
+				"--tools", "Read,Grep",
+				"--strict-mcp-config",
 			},
 		},
 		{
@@ -85,6 +131,7 @@ func TestInvokeBuildsArgv(t *testing.T) {
 				"-p", "fix", "--output-format", "json",
 				"--allowedTools", "Bash(git diff *),Bash(git log *),Read",
 				"--tools", "Bash,Read",
+				"--strict-mcp-config",
 			},
 		},
 		{
@@ -139,6 +186,7 @@ func TestInvokeBuildsArgv(t *testing.T) {
 				"--model", "sonnet", "--max-turns", "5",
 				"--allowedTools", "Read,Write",
 				"--tools", "Read,Write",
+				"--strict-mcp-config",
 				"--append-system-prompt", "Be terse.",
 				"--resume", "s-1",
 				"--permission-mode", "dontAsk",

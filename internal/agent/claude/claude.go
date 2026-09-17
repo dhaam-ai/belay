@@ -382,7 +382,8 @@ func cliMessage(res exec.Result) string {
 // without their permission patterns: "Bash(git diff *)" names Bash.
 //
 // --tools needs bare names. Claude Code 2.1.274 drops a tool named with a
-// pattern from --tools altogether, and ignores a name it does not know. A
+// pattern from --tools altogether, and ignores a name it does not know.
+// "default" is left out, because --tools reads it as every built-in tool. A
 // list that yields no names becomes --tools "", which removes every tool:
 // the restrictive answer for a request that asked for a restriction.
 func toolNames(rules []string) []string {
@@ -390,7 +391,7 @@ func toolNames(rules []string) []string {
 	for _, rule := range rules {
 		name, _, _ := strings.Cut(rule, "(")
 		name = strings.TrimSpace(name)
-		if name != "" && !slices.Contains(names, name) {
+		if name != "" && !strings.EqualFold(name, "default") && !slices.Contains(names, name) {
 			names = append(names, name)
 		}
 	}
@@ -423,8 +424,14 @@ func (b *Backend) command(req belay.AgentRequest, mcpPath string) exec.Command {
 		// Read,Glob,Grep the session still offers Bash, Edit and Write).
 		// belay.AgentRequest.AllowedTools promises a restriction, and the
 		// plan node relies on it to stay read-only, so --tools makes the
-		// named tools the only ones.
+		// named tools the only built-in ones.
 		args = append(args, "--tools", strings.Join(toolNames(req.AllowedTools), ","))
+		// --tools leaves MCP tools alone, so a server in the user's
+		// ~/.claude.json, or in a repository's .mcp.json that its settings
+		// enable, would still hand the agent its tools. --strict-mcp-config
+		// loads only the servers belay passes with --mcp-config below, and
+		// those keep every tool they offer.
+		args = append(args, "--strict-mcp-config")
 	}
 	if req.SystemPrompt != "" {
 		// --append-system-prompt, not --system-prompt: the latter replaces

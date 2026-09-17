@@ -159,6 +159,15 @@ func TestGolangCIScopesToChangedLines(t *testing.T) {
 		check(t, lint(t, goEnv, dir), belay.GatePass, []string{}, false)
 	})
 
+	t.Run("a new file whose name git ignores does not count", func(t *testing.T) {
+		dir := t.TempDir()
+		writeModule(t, dir, map[string]string{"debt.go": scopeDebt, ".gitignore": "*_gen.go\n"})
+		commitAll(t, dir)
+		writeFiles(t, dir, map[string]string{"added_gen.go": scopeAdded})
+
+		check(t, lint(t, goEnv, dir), belay.GatePass, []string{}, false)
+	})
+
 	// lib is a repository of its own but a package of the module, so
 	// golangci-lint lints it and the enclosing repository's git never
 	// lists its files.

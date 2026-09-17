@@ -241,7 +241,9 @@ const gitCheckIgnoreName = "belay-scope-check.go"
 //     unchecked error where a function that now returns one is called. A
 //     compile error is the exception: golangci-lint always reports those, so
 //     committed code that does not compile fails the gate too.
-//   - A file in a subdirectory git ignores, which never counts as changed.
+//   - A new file git ignores, by its directory or by its name, such as a
+//     *_gen.go rule. committed only asks whether a new file directly in dir,
+//     under a name nobody ignores, would be ignored.
 //   - A change inside a nested repository or submodule that the module's
 //     packages include. The enclosing repository's git never lists its files.
 //   - A commit made during the run. HEAD is read when the gate runs, and
