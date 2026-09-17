@@ -20,6 +20,17 @@ that only `pkg/belay` carries a compatibility promise. Everything under
   something scoping by line misses. The troubleshooting steps now show both
   golangci-lint commands belay can run.
 
+### Security
+
+- **Each step's agent now gets only the tools belay allows it.** belay passed
+  a step's tool list to Claude Code as `--allowedTools`, which only
+  pre-approves those tools. Every other built-in tool stayed available, and
+  Claude Code's own settings could approve it: `defaultMode: acceptEdits`,
+  for example, approves edits. So the plan step, meant to be read-only,
+  could edit files, and the code and fix steps could run shell commands.
+  belay now also passes `--tools`, which removes every other built-in tool.
+  This needs Claude Code 2.1.186 or later.
+
 ## v0.1.3 — 2026-09-17
 
 ### Fixed

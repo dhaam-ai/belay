@@ -59,7 +59,9 @@ func TestInvokeBuildsArgv(t *testing.T) {
 			},
 		},
 		{
-			name: "allowed tools are one comma-joined argument",
+			// --allowedTools only pre-approves: every other built-in tool
+			// stays available. --tools is what removes them.
+			name: "allowed tools are approved and are the only tools",
 			req: belay.AgentRequest{
 				Prompt: "fix", WorkDir: "/repo",
 				AllowedTools: []string{"Read", "Edit", "Bash"},
@@ -67,17 +69,22 @@ func TestInvokeBuildsArgv(t *testing.T) {
 			want: []string{
 				"-p", "fix", "--output-format", "json",
 				"--allowedTools", "Read,Edit,Bash",
+				"--tools", "Read,Edit,Bash",
 			},
 		},
 		{
-			name: "a tool pattern containing a space stays one argument",
+			// Claude Code 2.1.274 drops a tool named with a pattern from
+			// --tools entirely, so --tools gets the bare name and the
+			// pattern stays in --allowedTools, where it limits approval.
+			name: "a tool pattern is approved as written and made available by name",
 			req: belay.AgentRequest{
 				Prompt: "fix", WorkDir: "/repo",
-				AllowedTools: []string{"Bash(git diff *)", "Read"},
+				AllowedTools: []string{"Bash(git diff *)", "Bash(git log *)", "Read"},
 			},
 			want: []string{
 				"-p", "fix", "--output-format", "json",
-				"--allowedTools", "Bash(git diff *),Read",
+				"--allowedTools", "Bash(git diff *),Bash(git log *),Read",
+				"--tools", "Bash,Read",
 			},
 		},
 		{
@@ -131,6 +138,7 @@ func TestInvokeBuildsArgv(t *testing.T) {
 				"-p", "implement Login", "--output-format", "json",
 				"--model", "sonnet", "--max-turns", "5",
 				"--allowedTools", "Read,Write",
+				"--tools", "Read,Write",
 				"--append-system-prompt", "Be terse.",
 				"--resume", "s-1",
 				"--permission-mode", "dontAsk",
