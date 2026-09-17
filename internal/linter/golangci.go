@@ -204,7 +204,7 @@ func (g *GolangCI) Detect(dir string) bool {
 // working tree against HEAD with git, counting a new untracked file as
 // changed. belay never commits, and it gives the agent no shell to commit
 // with, so HEAD is still the commit the run started from when the gate runs.
-// The diff is not exactly the run's change in three cases:
+// The report is not exactly the findings in the run's change in four cases:
 //
 //   - A compile error is always reported, changed line or not, so committed
 //     code that does not compile still fails the gate.
@@ -214,6 +214,11 @@ func (g *GolangCI) Detect(dir string) bool {
 //     finding.
 //   - Uncommitted edits the user made before the run count as part of the
 //     run's change.
+//   - golangci-lint's cache is keyed by file content but stores absolute
+//     paths (golangci/golangci-lint#3502). If another directory holding
+//     byte-identical changed code was linted with the same cache, this run
+//     is handed that directory's findings, and the diff drops them because
+//     their paths are not in it.
 func (g *GolangCI) Lint(ctx context.Context, dir string) (belay.QualityReport, error) {
 	cmd := exec.Command{
 		Path: golangciName,
