@@ -54,6 +54,14 @@ func helperMain(mode string) {
 			`"result":"the key is %s and the token is %s","session_id":"leak-session","num_turns":1,`+
 			`"total_cost_usd":0.02,"usage":{"input_tokens":10,"output_tokens":5}}`+"\n", key, token)
 		fmt.Fprintf(os.Stderr, "debug: %s=%s %s=%s\n", apiKeyEnv, key, oauthTokenEnv, token)
+	case "reject":
+		// Behave like a CLI refusing its credential: the explanation goes
+		// to stdout as an is_error result, quoting the key, and the exit
+		// status is 1.
+		fmt.Printf(`{"type":"result","subtype":"success","is_error":true,`+
+			`"result":"Invalid API key %s","session_id":"reject-session","num_turns":1,`+
+			`"total_cost_usd":0,"usage":{"input_tokens":0,"output_tokens":0}}`+"\n", os.Getenv(apiKeyEnv))
+		os.Exit(1)
 	case "fail":
 		fmt.Fprintln(os.Stderr, "error: unknown option '--allowedTool'")
 		os.Exit(2)

@@ -127,6 +127,10 @@ type InvokeError struct {
 	ExitCode int
 	// Stderr is the redacted tail of the child's standard error.
 	Stderr string
+	// Message is the CLI's own explanation of a non-zero exit: the result
+	// text of the is_error object it printed on stdout, or empty when it
+	// printed none. Like Stderr, it has passed through the redactor.
+	Message string
 	// TimedOut reports that the deadline elapsed.
 	TimedOut bool
 	// Err is the underlying cause, if any.
@@ -142,9 +146,12 @@ func (e *InvokeError) Error() string {
 	} else {
 		fmt.Fprintf(&b, " failed with exit code %d", e.ExitCode)
 	}
-	if s := strings.TrimSpace(e.Stderr); s != "" {
+	switch s := strings.TrimSpace(e.Stderr); {
+	case e.Message != "":
+		fmt.Fprintf(&b, ": %s", e.Message)
+	case s != "":
 		fmt.Fprintf(&b, ": %s", lastLines(s, 3))
-	} else if e.Err != nil {
+	case e.Err != nil:
 		fmt.Fprintf(&b, ": %v", e.Err)
 	}
 	return b.String()
@@ -309,10 +316,10 @@ func (b *Backend) respond(ctx context.Context, req belay.AgentRequest, res exec.
 		slog.Bool("estimated", out.Usage.Estimated),
 		slog.Duration("duration", res.Duration))
 
-	// The CLI exits zero but sets is_error when the failure happened inside
-	// the run — a missing credential, for example, which it prints as the
-	// result rather than on stderr. The response is still returned, because
-	// the contract lets a failed call carry output a caller may want.
+	// The CLI can exit zero but set is_error when the failure happened inside
+	// the run. The response is still returned, because the contract lets a
+	// failed call carry output a caller may want. A failure the CLI exits
+	// non-zero for never reaches here; translate reports it (see cliMessage).
 	if parsed.IsError {
 		return out, &InvokeError{
 			Args:     res.Args,
@@ -350,8 +357,24 @@ func (b *Backend) translate(ctx context.Context, res exec.Result, err error) err
 
 	default:
 		return &InvokeError{Args: res.Args, ExitCode: res.ExitCode,
-			Stderr: res.Stderr, Err: err}
+			Stderr: res.Stderr, Message: cliMessage(res), Err: err}
 	}
+}
+
+// cliMessage returns the CLI's own explanation of a non-zero exit, or "".
+//
+// The CLI reports a failure that stops the run before any model call, such as
+// being signed out or holding a rejected credential, as the result of an
+// is_error object on stdout. It writes nothing to stderr and exits 1, so
+// without this the only thing a person sees is the exit code. A result that is
+// not flagged as an error is the agent's answer, not an explanation, and is
+// ignored. res.Stdout has already passed through the redactor.
+func cliMessage(res exec.Result) string {
+	parsed, _, err := parseResult(res.Stdout, res.Truncated)
+	if err != nil || !parsed.IsError {
+		return ""
+	}
+	return firstLine(string(parsed.Result))
 }
 
 // command builds the argv and environment for one invocation.

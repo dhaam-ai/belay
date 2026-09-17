@@ -78,7 +78,7 @@ This document covers common failure modes, their symptoms, and remedies.
 
 ## Claude Exits Immediately
 
-**Symptom**: The plan node fails with `claude failed with exit code 1` about a second after starting. The run cost $0.00 and there is no error text. Running `claude` yourself works.
+**Symptom**: The plan node fails with `claude failed with exit code 1` about a second after starting, and the run cost $0.00. From 0.1.1, belay adds the CLI's own reason, such as `Not logged in · Please run /login` or `Failed to authenticate. API Error: 401 Invalid bearer token`. On 0.1.0 there is no reason, only the command line. Running `claude` yourself works.
 
 **Cause**: `claude` started without a credential. belay starts it with a deny-by-default environment: `HOME`, `LANG`, `PATH`, `TERM`, `TMPDIR` and `USER`, plus `ANTHROPIC_API_KEY` and `CLAUDE_CODE_OAUTH_TOKEN`. Your shell passes everything, so a credential that lives in any other variable works there and not under belay. belay 0.1.0 also dropped `CLAUDE_CODE_OAUTH_TOKEN`.
 

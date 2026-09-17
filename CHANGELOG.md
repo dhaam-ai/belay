@@ -18,6 +18,12 @@ that only `pkg/belay` carries a compatibility promise. Everything under
   cost and with no error text. belay now passes the token and redacts its
   value from the journal, logs and recorded cassettes, as it already did for
   the API key.
+- **A failed `claude` run now says why.** When the CLI cannot start a run, for
+  example because it is signed out or its credential was rejected, it prints
+  the reason as an `is_error` result on stdout, writes nothing to stderr, and
+  exits 1. belay reported only the exit code and the command line. It now
+  reports the CLI's reason, such as `Not logged in · Please run /login`,
+  redacted like everything else it records.
 - A dry run reports whether `CLAUDE_CODE_OAUTH_TOKEN` is set, and the
   "not signed in" warning no longer appears when it is.
 
