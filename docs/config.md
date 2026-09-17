@@ -316,7 +316,7 @@ The following environment variables are used by belay and are never read from `b
 
 ### `ANTHROPIC_API_KEY` or `CLAUDE_CODE_OAUTH_TOKEN` (Claude backend)
 
-The credential Claude Code authenticates with. Set one of them, or neither if Claude Code is already signed in on this machine. Both must be set in the shell; never include either in belay.yaml.
+The credential Claude Code authenticates with. Set one of them, or neither if Claude Code is already signed in on this machine. Whichever you set belongs in the shell; never include either in belay.yaml.
 
 - `ANTHROPIC_API_KEY` is an Anthropic API key, billed per call. Claude Code prefers it when both are set.
 - `CLAUDE_CODE_OAUTH_TOKEN` is the long-lived token `claude setup-token` issues to a Claude Pro, Max, Team or Enterprise subscription. Requires belay 0.1.1 or later.

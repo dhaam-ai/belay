@@ -86,9 +86,10 @@ This document covers common failure modes, their symptoms, and remedies.
 1. Run `belay version`. On 0.1.0, a subscription token is never passed.
 2. Reproduce what belay's child sees. This makes one short call if it succeeds:
    ```bash
-   env -i HOME="$HOME" PATH="$PATH" USER="$USER" TERM="$TERM" \
-     ANTHROPIC_API_KEY="$ANTHROPIC_API_KEY" CLAUDE_CODE_OAUTH_TOKEN="$CLAUDE_CODE_OAUTH_TOKEN" \
-     claude -p "reply ok" --output-format json
+   env -i HOME="$HOME" LANG="$LANG" PATH="$PATH" TERM="$TERM" TMPDIR="$TMPDIR" USER="$USER" \
+     ${ANTHROPIC_API_KEY:+ANTHROPIC_API_KEY="$ANTHROPIC_API_KEY"} \
+     ${CLAUDE_CODE_OAUTH_TOKEN:+CLAUDE_CODE_OAUTH_TOKEN="$CLAUDE_CODE_OAUTH_TOKEN"} \
+     claude -p "reply ok" --output-format json < /dev/null
    ```
    If this fails and plain `claude -p "reply ok"` works, the credential is in a variable belay does not pass.
 
