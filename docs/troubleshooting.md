@@ -181,6 +181,28 @@ This document covers common failure modes, their symptoms, and remedies.
 - If the gate threshold is wrong, edit review.fail_on in belay.yaml and retry
 - If the underlying tool (golangci-lint, sonar-scanner) is misconfigured, update .golangci.yml or sonarqube configuration and retry
 
+## Quality Gate Fails on Code the Run Did Not Touch
+
+**Symptom**: With `review.mode: lint`, every run fails the gate whatever it changed, and the fix node asks the agent to repair findings in files the run never edited.
+
+**Cause**: The gate is counting findings that were already in the repository. From 0.1.2, belay runs `golangci-lint run --new-from-rev=HEAD ./...`, which reports only findings on lines that differ from the last commit. That needs git on `PATH` and a repository with at least one commit. Without them, golangci-lint prints a warning and reports every finding. belay 0.1.1 and earlier always reported every finding, and ESLint and Ruff still do.
+
+**Diagnosis**:
+1. Run `belay version`. On 0.1.1 or earlier, every existing finding counts.
+2. In the workspace, run `git rev-parse --verify HEAD`. It fails outside a git repository and in a repository with no commits.
+3. Reproduce what the gate sees:
+   ```bash
+   golangci-lint run --new-from-rev=HEAD ./...
+   ```
+   If the output includes a warning containing `Can't process results by diff processor`, golangci-lint reported every finding.
+
+**Remedy**:
+- Upgrade to belay 0.1.2 or later
+- Run belay in a git repository with at least one commit, with `git` on `PATH`
+- Commit or stash unrelated edits before the run: uncommitted changes count as part of the run's change
+- If a finding comes from `typecheck`, fix the build first. A package that does not compile fails the gate whether or not the run changed it
+- For ESLint and Ruff, fix or exclude the existing findings in the tool's own configuration, or raise `review.fail_on`, for example to `critical`
+
 ## Node Timeout
 
 **Symptom**: Error message: "graph: node timeout exceeded" and run aborts.

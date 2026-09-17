@@ -6,6 +6,25 @@ All notable changes to belay are recorded here. The format follows
 that only `pkg/belay` carries a compatibility promise. Everything under
 `internal/` may change in any release.
 
+## v0.1.2 — 2026-09-17
+
+### Fixed
+
+- **The lint gate now judges the run's change, not the repository's
+  history.** With `review.mode: lint`, belay ran golangci-lint over every
+  package and counted every finding. In a repository with existing lint
+  debt, every run failed the gate whatever it changed, and the fix step then
+  asked the agent to repair findings in files the run never touched. belay
+  now passes `--new-from-rev=HEAD`, golangci-lint's own option for reporting
+  only findings on lines that differ from the last commit. New files count
+  as changed. A package that does not compile still fails the gate, changed
+  or not.
+
+  The scoping needs git on `PATH` and a repository with at least one commit.
+  Without them, golangci-lint prints a warning and reports every finding, as
+  before. Uncommitted edits made before the run count as part of its change.
+  ESLint and Ruff still report every finding.
+
 ## v0.1.1 — 2026-09-17
 
 ### Fixed

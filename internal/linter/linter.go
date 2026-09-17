@@ -46,7 +46,9 @@
 // os/exec — for its deny-by-default environment, output caps, redaction and
 // process-group timeouts. [CommandRunner] is that seam, and it is injectable:
 // the tests in this package drive the parsers with hand-authored JSON
-// fixtures and never invoke a real linter.
+// fixtures and never invoke a real linter. Behaviour that only exists when
+// the real tools run, such as golangci-lint calling git to scope its
+// findings, is tested in test/lintgate.
 package linter
 
 import (
