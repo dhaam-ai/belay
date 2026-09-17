@@ -31,3 +31,15 @@ Injected via ldflags during build.
 ```
 
 For more guidance, see the `.gitmessage` template in the repository root.
+
+## Tests
+
+`make test` runs the whole suite with the race detector. The tests in
+`test/lintgate` run the real golangci-lint and git, and skip when either is
+missing. `go test` only says why with `-v`:
+
+```bash
+go test -v ./test/lintgate
+```
+
+A skipped test's message says what to install.

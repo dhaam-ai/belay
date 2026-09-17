@@ -5,7 +5,9 @@ package linter
 import (
 	"context"
 	"encoding/json"
+	"log/slog"
 	"strings"
+	"time"
 
 	"github.com/dhaam-ai/belay/internal/detect"
 	"github.com/dhaam-ai/belay/internal/exec"
@@ -183,15 +185,31 @@ func (g *GolangCI) Detect(dir string) bool {
 	return false
 }
 
+// golangciScoped and golangciUnscoped are the flags that decide which findings
+// golangci-lint reports. Both pin every issues.new* and whole-files setting,
+// because a repository's .golangci.yml could otherwise count committed
+// findings again, or hide the run's own. They differ only in --new-from-rev.
+var (
+	golangciScoped   = []string{"--new=false", "--new-from-rev=HEAD", "--new-from-merge-base=", "--new-from-patch=", "--whole-files=false"}
+	golangciUnscoped = []string{"--new=false", "--new-from-rev=", "--new-from-merge-base=", "--new-from-patch=", "--whole-files=false"}
+)
+
+// Bounds for the git command committed runs. It lists one directory level,
+// so it is quick and short; the cap only has to leave output non-empty.
+const (
+	gitCheckTimeout         = 30 * time.Second
+	gitCheckMaxOutput int64 = 64 << 10
+)
+
 // Lint implements belay.Linter.
 //
-// It runs golangci-lint over every package under dir, and reports only the
-// findings on lines that differ from the git HEAD, which is where a run's
-// uncommitted edits are. Findings are a successful call: golangci-lint exits 1
-// when it has any, and that returns a GateFail report with a nil error. Only a
-// golangci-lint that could not run at all — missing, timed out, or refusing
-// its own configuration, which it signals with exit 3 and an empty stdout —
-// produces an error.
+// It runs golangci-lint over every package under dir and, where git allows,
+// reports only the findings on lines that differ from HEAD, which is where a
+// run's uncommitted edits are. Findings are a successful call: golangci-lint
+// exits 1 when it has any, and that returns a GateFail report with a nil
+// error. Only a golangci-lint that could not run at all — missing, timed out,
+// or refusing its own configuration, which it signals with exit 3 and an
+// empty stdout — produces an error.
 //
 // # Why only changed lines
 //
@@ -201,38 +219,93 @@ func (g *GolangCI) Detect(dir string) bool {
 // did, and send the fix node to repair code the run never touched.
 //
 // --new-from-rev=HEAD is golangci-lint's own way to scope a run: it diffs the
-// working tree against HEAD with git, counting a new untracked file as
-// changed. belay never commits, and it gives the agent no shell to commit
-// with, so HEAD is still the commit the run started from when the gate runs.
-// The report is not exactly the findings in the run's change in four cases:
+// working tree against HEAD with git, and counts a new file as changed.
+// Scoping needs a HEAD that holds dir, so Lint asks git first (see committed).
+// Without one — no repository, no commit yet, git missing, or a directory the
+// repository ignores, such as a fanout candidate under .belay — Lint clears
+// the scope, so every finding counts, and says so in a warning and in the
+// report's Summary. Passing the scope there would hide every finding in an
+// ignored directory.
 //
-//   - A compile error is always reported, changed line or not, so committed
-//     code that does not compile still fails the gate.
-//   - Where dir has no git HEAD — no repository, a repository with no
-//     commits, a fanout candidate copied without .git, or git missing from
-//     PATH — golangci-lint logs a warning to stderr and reports every
-//     finding.
-//   - Uncommitted edits the user made before the run count as part of the
-//     run's change.
-//   - golangci-lint's cache is keyed by file content but stores absolute
-//     paths (golangci/golangci-lint#3502). If another directory holding
-//     byte-identical changed code was linted with the same cache, this run
-//     is handed that directory's findings, and the diff drops them because
-//     their paths are not in it.
+// # What scoping by line does not see
+//
+//   - A finding the change causes on a line it did not touch, such as an
+//     unchecked error where a function that now returns one is called. A
+//     compile error is the exception: golangci-lint always reports those, so
+//     committed code that does not compile fails the gate too.
+//   - A file git ignores, which never counts as changed.
+//   - A commit made during the run. HEAD is read when the gate runs, and
+//     belay never commits, so it is normally the commit the run started from;
+//     a commit made since hides what it contains. Uncommitted edits made
+//     before the run count as part of it.
+//   - Findings from another directory that holds byte-identical changed
+//     code and was linted with the same cache. golangci-lint keys its cache
+//     by file content but stores absolute paths
+//     (golangci/golangci-lint#3502), so this run is handed that directory's
+//     findings, and the diff drops them because their paths are not in it.
+//
+// Scoping runs git in dir, so repository-local git configuration, such as
+// core.fsmonitor, can run commands during the gate.
+// That adds no trust the run had not already given: the test node has run
+// the repository's code by then.
 func (g *GolangCI) Lint(ctx context.Context, dir string) (belay.QualityReport, error) {
+	scoped := g.committed(ctx, dir)
+	scope := golangciUnscoped
+	if scoped {
+		scope = golangciScoped
+	}
+	args := append([]string{"run", "--output.json.path=stdout"}, scope...)
 	cmd := exec.Command{
 		Path: golangciName,
 		// --output.json.path=stdout replaces the default text format.
 		// No --timeout: exec already bounds the run and kills the whole
 		// process group, and two competing deadlines only make the
 		// failure harder to read.
-		Args:      []string{"run", "--output.json.path=stdout", "--new-from-rev=HEAD", "./..."},
+		Args:      append(args, "./..."),
 		Dir:       dir,
 		EnvAllow:  golangciEnv,
 		Timeout:   g.timeout,
 		MaxOutput: DefaultMaxOutput,
 	}
-	return g.lint(ctx, golangciName, golangciName, cmd, golangciParser(dir))
+	report, err := g.lint(ctx, golangciName, golangciName, cmd, golangciParser(dir))
+	if err == nil && !scoped {
+		// The warning committed logs is on screen only with --verbose.
+		// The summary reaches state.json, the report artifact and the fix
+		// prompt, where it explains findings the run did not cause.
+		report.Summary += "; not scoped to the run's change, so findings committed before it count too"
+	}
+	return report, err
+}
+
+// committed reports whether git's HEAD holds dir, which scoping findings to
+// the lines that differ from HEAD requires. Any other answer is logged,
+// because it means every finding in dir counts toward the gate.
+func (g *GolangCI) committed(ctx context.Context, dir string) bool {
+	res, err := g.runner.Run(ctx, exec.Command{
+		Path: "git",
+		// ls-tree lists dir's entries in HEAD, relative to dir. It prints
+		// nothing for a directory the repository ignores or has not
+		// committed, and fails with no repository or no commit.
+		Args:      []string{"ls-tree", "--name-only", "HEAD"},
+		Dir:       dir,
+		Timeout:   min(gitCheckTimeout, g.timeout),
+		MaxOutput: gitCheckMaxOutput,
+	})
+	var reason string
+	switch {
+	case err != nil:
+		reason = err.Error()
+	case strings.TrimSpace(res.Stdout) == "":
+		reason = "HEAD holds nothing in this directory: git ignores it, or it is not committed yet"
+	default:
+		return true
+	}
+	if ctx.Err() == nil {
+		g.logger.LogAttrs(ctx, slog.LevelWarn, "belay/linter: cannot scope golangci-lint to the run's change; every finding counts",
+			slog.String("dir", dir),
+			slog.String("reason", reason))
+	}
+	return false
 }
 
 // golangciReport is the top-level document golangci-lint's json output emits.

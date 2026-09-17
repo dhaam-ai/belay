@@ -6,6 +6,34 @@ All notable changes to belay are recorded here. The format follows
 that only `pkg/belay` carries a compatibility promise. Everything under
 `internal/` may change in any release.
 
+## v0.1.3 — 2026-09-17
+
+### Fixed
+
+- **The lint gate no longer passes code it cannot scope.** v0.1.2 always
+  passed `--new-from-rev=HEAD`. In a directory the enclosing repository
+  ignores, such as a fanout candidate under `.belay`, that hid every finding
+  and the gate passed. belay now asks git first. If HEAD doesn't hold the
+  directory, or there is no repository, commit or `git`, every finding counts.
+  belay says so in a warning, shown with `--verbose`, and in the gate's
+  summary, which the fix step passes to the agent.
+- **A repository's `.golangci.yml` can no longer change what the gate
+  counts.** belay now overrides the `issues.new`, `new-from-rev`,
+  `new-from-merge-base`, `new-from-patch` and `whole-files` settings. Left in
+  place, `new-from-merge-base` and `whole-files` counted findings committed
+  before the run, and `new-from-patch` could hide the run's own findings.
+- The docs now list what scoping by line misses:
+  - findings a change causes on lines it didn't touch, such as unchecked
+    errors where a function that now returns one is called;
+  - files git ignores;
+  - commits made during a run;
+  - findings golangci-lint's cache takes from another checkout with identical
+    code.
+
+  They also correct two v0.1.2 claims. A fanout candidate is not linted in
+  full. The warning golangci-lint prints when it can't scope never reaches
+  belay's output.
+
 ## v0.1.2 — 2026-09-17
 
 ### Fixed

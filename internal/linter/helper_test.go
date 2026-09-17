@@ -29,8 +29,22 @@ type stubRunner struct {
 	truncated bool
 	err       error
 
+	// git scripts every git command, which GolangCI runs to decide whether
+	// it can scope findings to a run's change. Nil stands for a repository
+	// whose HEAD holds the linted directory, which is what most tests want.
+	git *scripted
+
 	mu    sync.Mutex
 	calls []exec.Command
+}
+
+// scripted is one command's outcome, as stubRunner replays it.
+type scripted struct {
+	stdout    string
+	stderr    string
+	exitCode  int
+	truncated bool
+	err       error
 }
 
 func (s *stubRunner) Run(_ context.Context, c exec.Command) (exec.Result, error) {
@@ -38,21 +52,47 @@ func (s *stubRunner) Run(_ context.Context, c exec.Command) (exec.Result, error)
 	s.calls = append(s.calls, c)
 	s.mu.Unlock()
 
+	if c.Path == "git" {
+		out := scripted{stdout: "go.mod\n"}
+		if s.git != nil {
+			out = *s.git
+		}
+		return out.replay(c)
+	}
+	return scripted{
+		stdout: s.stdout, stderr: s.stderr, exitCode: s.exitCode, truncated: s.truncated, err: s.err,
+	}.replay(c)
+}
+
+func (o scripted) replay(c exec.Command) (exec.Result, error) {
 	res := exec.Result{
 		Args:      append([]string{c.Path}, c.Args...),
-		ExitCode:  s.exitCode,
-		Stdout:    s.stdout,
-		Stderr:    s.stderr,
-		Truncated: s.truncated,
+		ExitCode:  o.exitCode,
+		Stdout:    o.stdout,
+		Stderr:    o.stderr,
+		Truncated: o.truncated,
 	}
 	switch {
-	case s.err != nil:
-		return res, s.err
-	case s.exitCode != 0:
-		return res, &exec.ExitError{Args: res.Args, Code: s.exitCode, Stderr: s.stderr}
+	case o.err != nil:
+		return res, o.err
+	case o.exitCode != 0:
+		return res, &exec.ExitError{Args: res.Args, Code: o.exitCode, Stderr: o.stderr}
 	default:
 		return res, nil
 	}
+}
+
+// callsTo returns every command the stub was asked to run whose Path is path.
+func (s *stubRunner) callsTo(path string) []exec.Command {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	var out []exec.Command
+	for _, c := range s.calls {
+		if c.Path == path {
+			out = append(out, c)
+		}
+	}
+	return out
 }
 
 // lastCall returns the command the stub was most recently asked to run.
