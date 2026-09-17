@@ -29,8 +29,9 @@ import (
 // belay never prints their values: they are here so that the redactor can be
 // seeded with them, and so a plan can report whether they are set.
 const (
-	anthropicKeyEnv = "ANTHROPIC_API_KEY"
-	sonarTokenEnv   = "SONAR_TOKEN"
+	anthropicKeyEnv     = "ANTHROPIC_API_KEY"
+	claudeOAuthTokenEnv = "CLAUDE_CODE_OAUTH_TOKEN" // #nosec G101 -- a variable name, not a credential.
+	sonarTokenEnv       = "SONAR_TOKEN"
 )
 
 // defaultCassetteName is where a recorded conversation lives when --cassette
@@ -231,13 +232,14 @@ func resolveWorkspace(dir string) (string, error) {
 // This is a security requirement, not a nicety. graph.Options.Redact defaults
 // to a no-op, and the dispatcher composes a journal note out of an adapter's
 // own error string — which can quote a command line, and a command line can
-// quote a token. Seeding the redactor with the two credentials belay hands to
-// its adapters means such a value is replaced by a label on its way into a
+// quote a token. Seeding the redactor with the credentials belay hands to its
+// adapters means such a value is replaced by a label on its way into a
 // file that people commit, paste into issues and read over each other's
 // shoulders.
 func newRedactor() *exec.Redactor {
 	return exec.NewRedactor(
 		exec.Secret{Label: anthropicKeyEnv, Value: os.Getenv(anthropicKeyEnv)},
+		exec.Secret{Label: claudeOAuthTokenEnv, Value: os.Getenv(claudeOAuthTokenEnv)},
 		exec.Secret{Label: sonarTokenEnv, Value: os.Getenv(sonarTokenEnv)},
 	)
 }
@@ -426,8 +428,9 @@ func (p *runPlan) resolveAgent() {
 	if mode == replay.ModeRecord {
 		p.recorder = backend
 	}
-	if os.Getenv(anthropicKeyEnv) == "" {
-		p.warn("%s is not set; belay will rely on however the claude command line is already signed in.", anthropicKeyEnv)
+	if os.Getenv(anthropicKeyEnv) == "" && os.Getenv(claudeOAuthTokenEnv) == "" {
+		p.warn("neither %s nor %s is set; belay will rely on however the claude command line is already signed in.",
+			anthropicKeyEnv, claudeOAuthTokenEnv)
 	}
 }
 

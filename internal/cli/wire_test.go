@@ -377,6 +377,68 @@ func TestRedactorIsWiredNotNil(t *testing.T) {
 	}
 }
 
+// TestRedactorCoversOAuthToken covers the subscription credential: a run
+// signed in with CLAUDE_CODE_OAUTH_TOKEN must journal that value no more
+// readily than an API key.
+func TestRedactorCoversOAuthToken(t *testing.T) {
+	secret := notARealKey("belay-test-", "oauth-credential-longenoughtomatter")
+	t.Setenv(claudeOAuthTokenEnv, secret)
+
+	plan, err := resolve(resolveRequest{workspace: goWorkspace(t), logger: quietLogger()})
+	if err != nil {
+		t.Fatalf("resolve: %v", err)
+	}
+	redact := plan.options(state.NewStore(state.Layout{})).Redact
+	want := "claude failed: [REDACTED:" + claudeOAuthTokenEnv + "]"
+	if got := redact("claude failed: " + secret); got != want {
+		t.Errorf("Redact() = %q, want %q", got, want)
+	}
+}
+
+// TestSignInWarning pins when a plan warns that no credential is set. Either
+// credential is enough to stay quiet; with neither, the warning names both so
+// a subscription user learns the variable exists.
+func TestSignInWarning(t *testing.T) {
+	tests := []struct {
+		name     string
+		key      string
+		oauth    string
+		wantWarn bool
+	}{
+		{name: "neither set", wantWarn: true},
+		{name: "API key only", key: "belay-test-api-credential"},
+		{name: "OAuth token only", oauth: "belay-test-oauth-credential"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Setenv(anthropicKeyEnv, tt.key)
+			t.Setenv(claudeOAuthTokenEnv, tt.oauth)
+
+			plan, err := resolve(resolveRequest{workspace: goWorkspace(t), logger: quietLogger()})
+			if err != nil {
+				t.Fatalf("resolve: %v", err)
+			}
+			var warning string
+			for _, w := range plan.warnings {
+				if strings.Contains(w, "signed in") {
+					warning = w
+				}
+			}
+			if !tt.wantWarn {
+				if warning != "" {
+					t.Errorf("unexpected warning: %q", warning)
+				}
+				return
+			}
+			for _, name := range []string{anthropicKeyEnv, claudeOAuthTokenEnv} {
+				if !strings.Contains(warning, name) {
+					t.Errorf("warning = %q, want it to name %s", warning, name)
+				}
+			}
+		})
+	}
+}
+
 // seedRunDir creates the run directory a dispatcher needs. It is the same
 // sequence run.go performs, kept here so wire tests do not depend on the
 // command layer.

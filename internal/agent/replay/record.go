@@ -12,24 +12,25 @@ import (
 // redacted replaces every secret Scrub finds.
 const redacted = "[REDACTED]"
 
-// apiKeyEnv is the credential environment variable a live agent backend
-// authenticates with. Scrub reads its current value (and never stores or
-// logs it) so that if a backend's raw output accidentally echoes the real
-// key back, the literal value never reaches a committed cassette.
+// credentialEnvs are the environment variables a live agent backend
+// authenticates with: an API key, or a subscription's OAuth token. Scrub
+// reads their current values (and never stores or logs them) so that if a
+// backend's raw output accidentally echoes a real credential back, the
+// literal value never reaches a committed cassette.
 //
-// This mirrors internal/agent/claude's own apiKeyEnv constant; it is
+// This mirrors internal/agent/claude's own credential constants; they are
 // re-declared here rather than imported, since internal/agent/claude is a
 // //go:build unix package specific to one backend and this package must
 // stay backend-agnostic and portable.
-// #nosec G101 -- this is the *name* of an environment variable, not a
-// credential. Its value is read once per Scrub call via os.Getenv and
+// #nosec G101 -- these are the *names* of environment variables, not
+// credentials. Their values are read once per Scrub call via os.Getenv and
 // never stored.
-const apiKeyEnv = "ANTHROPIC_API_KEY"
+var credentialEnvs = []string{"ANTHROPIC_API_KEY", "CLAUDE_CODE_OAUTH_TOKEN"}
 
 var (
-	// reAnthropicKey matches an Anthropic API key by its documented
-	// "sk-ant-..." prefix, independent of whether it happens to match the
-	// current ANTHROPIC_API_KEY environment value — a key baked into a
+	// reAnthropicKey matches an Anthropic API key or OAuth token by their
+	// shared "sk-ant-..." prefix, independent of whether it happens to match
+	// a current credential environment value — a key baked into a
 	// test fixture, or one quoted in an agent's own example output, has
 	// no environment counterpart to match against.
 	reAnthropicKey = regexp.MustCompile(`sk-ant-[A-Za-z0-9_-]{8,}`)
@@ -50,8 +51,9 @@ var (
 )
 
 // Scrub redacts every secret shape this package knows how to recognize
-// from s: the live ANTHROPIC_API_KEY value if one is set in the current
-// environment, any "sk-ant-..." key regardless of environment, bearer
+// from s: the live ANTHROPIC_API_KEY and CLAUDE_CODE_OAUTH_TOKEN values if
+// set in the current environment, any "sk-ant-..." key or token regardless
+// of environment, bearer
 // tokens, JWTs, and absolute home-directory paths. Backend applies it to
 // every Interaction before Record appends it to a Cassette, because
 // cassettes are meant to be committed to a public repository (ADR-0009).
@@ -64,8 +66,10 @@ func Scrub(s string) string {
 	if s == "" {
 		return s
 	}
-	if key := os.Getenv(apiKeyEnv); key != "" {
-		s = strings.ReplaceAll(s, key, redacted)
+	for _, name := range credentialEnvs {
+		if v := os.Getenv(name); v != "" {
+			s = strings.ReplaceAll(s, v, redacted)
+		}
 	}
 	s = reAnthropicKey.ReplaceAllString(s, redacted)
 	s = reBearerToken.ReplaceAllString(s, "Bearer "+redacted)

@@ -63,14 +63,18 @@ func TestScrub_TableDriven(t *testing.T) {
 }
 
 // TestScrub_EnvironmentKeyValue proves Scrub also redacts the literal
-// current ANTHROPIC_API_KEY value, independent of whether it happens to
-// look like "sk-ant-...".
+// current value of each credential variable, independent of whether it
+// happens to look like "sk-ant-...".
 func TestScrub_EnvironmentKeyValue(t *testing.T) {
-	t.Setenv("ANTHROPIC_API_KEY", "totally-opaque-secret-value-987")
+	for _, name := range []string{"ANTHROPIC_API_KEY", "CLAUDE_CODE_OAUTH_TOKEN"} {
+		t.Run(name, func(t *testing.T) {
+			t.Setenv(name, "totally-opaque-secret-value-987")
 
-	got := replay.Scrub("the backend printed totally-opaque-secret-value-987 by mistake")
-	if strings.Contains(got, "totally-opaque-secret-value-987") {
-		t.Errorf("Scrub() = %q, still contains the ANTHROPIC_API_KEY value", got)
+			got := replay.Scrub("the backend printed totally-opaque-secret-value-987 by mistake")
+			if strings.Contains(got, "totally-opaque-secret-value-987") {
+				t.Errorf("Scrub() = %q, still contains the %s value", got, name)
+			}
+		})
 	}
 }
 

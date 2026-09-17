@@ -166,6 +166,25 @@ func TestDryRunNeverPrintsCredentialValues(t *testing.T) {
 	}
 }
 
+// TestDryRunReportsOAuthToken shows a subscription user that belay saw their
+// token, without printing it.
+func TestDryRunReportsOAuthToken(t *testing.T) {
+	secret := notARealKey("belay-test-", "oauth-credential-longenoughtomatter")
+	t.Setenv(anthropicKeyEnv, "")
+	t.Setenv(claudeOAuthTokenEnv, secret)
+
+	out, _, err := runCLI(t, "--dry-run", "run", "--workspace", goWorkspace(t), "add tests")
+	if err != nil {
+		t.Fatalf("belay --dry-run run: %v", err)
+	}
+	if strings.Contains(out, secret) {
+		t.Fatal("the dry run printed the OAuth token")
+	}
+	if !strings.Contains(out, claudeOAuthTokenEnv+" is set") {
+		t.Errorf("the dry run should say the token is set; got:\n%s", out)
+	}
+}
+
 // TestRunRefusesMissingWorkspace is acceptance criterion 4.
 func TestRunRefusesMissingWorkspace(t *testing.T) {
 	missing := filepath.Join(t.TempDir(), "no-such-repo")

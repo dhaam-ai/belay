@@ -245,6 +245,16 @@ func TestErrorTranslation(t *testing.T) {
 			wantMsgHas:     "unknown option",
 		},
 		{
+			name: "non-zero exit explained on stdout rather than stderr",
+			res: exec.Result{
+				ExitCode: 1, Args: []string{"claude"},
+				Stdout: fixture(t, "signed_out_exit_1.json"),
+			},
+			err:            &exec.ExitError{Args: []string{"claude"}, Code: 1},
+			wantInvocation: true,
+			wantMsgHas:     "Not logged in · Please run /login",
+		},
+		{
 			name: "timeout is distinguishable from every other failure",
 			res:  exec.Result{ExitCode: 137, Args: []string{"claude"}, TimedOut: true},
 			err: &exec.TimeoutError{
@@ -365,6 +375,78 @@ func TestInvokeReportsCLIFlaggedFailures(t *testing.T) {
 	}
 }
 
+// TestInvokeReportsWhyTheCLIExitedNonZero pins where the explanation for a
+// failed run comes from. A signed-out CLI prints it as the result of an
+// is_error object on stdout, leaves stderr empty, and exits 1. Reporting only
+// the exit code left people with a failure and no cause.
+func TestInvokeReportsWhyTheCLIExitedNonZero(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name        string
+		stdout      string
+		stderr      string
+		wantMessage string
+		wantMsgHas  string
+	}{
+		{
+			name:        "is_error result on stdout",
+			stdout:      fixture(t, "signed_out_exit_1.json"),
+			wantMessage: "Not logged in · Please run /login",
+			wantMsgHas:  "exit code 1: Not logged in · Please run /login",
+		},
+		{
+			name:        "the CLI's explanation outranks stderr",
+			stdout:      fixture(t, "signed_out_exit_1.json"),
+			stderr:      "Warning: something unrelated",
+			wantMessage: "Not logged in · Please run /login",
+			wantMsgHas:  "exit code 1: Not logged in · Please run /login",
+		},
+		{
+			// is_error false means result is the agent's answer, not an
+			// explanation, so stderr still speaks for the failure.
+			name:       "a result not flagged as an error is not an explanation",
+			stdout:     fixture(t, "success_with_cost.json"),
+			stderr:     "error: something broke after the answer",
+			wantMsgHas: "exit code 1: error: something broke after the answer",
+		},
+		{
+			name:       "unparsable stdout falls back to stderr",
+			stdout:     `{"type":"result","is_error":true,"result":"cut off`,
+			stderr:     "error: crashed",
+			wantMsgHas: "exit code 1: error: crashed",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			fake := &fakeRunner{
+				Result: exec.Result{ExitCode: 1, Args: []string{"claude"},
+					Stdout: tt.stdout, Stderr: tt.stderr},
+				Err: &exec.ExitError{Args: []string{"claude"}, Code: 1, Stderr: tt.stderr},
+			}
+			b := newBackend(t, fake)
+
+			_, err := b.Invoke(t.Context(), validRequest())
+			var ie *InvokeError
+			if !errors.As(err, &ie) {
+				t.Fatalf("err = %v, want an *InvokeError", err)
+			}
+			if ie.Message != tt.wantMessage {
+				t.Errorf("Message = %q, want %q", ie.Message, tt.wantMessage)
+			}
+			if !strings.Contains(err.Error(), tt.wantMsgHas) {
+				t.Errorf("error %q, want it to contain %q", err, tt.wantMsgHas)
+			}
+			var ee *exec.ExitError
+			if !errors.As(err, &ee) {
+				t.Error("the underlying *exec.ExitError was dropped from the chain")
+			}
+		})
+	}
+}
+
 func TestInvokeRejectsIncompleteRequests(t *testing.T) {
 	t.Parallel()
 
@@ -477,10 +559,10 @@ func TestInvokeOmitsMCPConfigWhenEmpty(t *testing.T) {
 	}
 }
 
-// TestAPIKeyIsRequestedAsASecret pins how the credential reaches the child:
-// through SecretEnv, which both allowlists it and registers it for redaction,
-// and never through argv.
-func TestAPIKeyIsRequestedAsASecret(t *testing.T) {
+// TestCredentialsAreRequestedAsSecrets pins how each credential reaches the
+// child: through SecretEnv, which both allowlists it and registers it for
+// redaction, and never through argv.
+func TestCredentialsAreRequestedAsSecrets(t *testing.T) {
 	t.Parallel()
 
 	fake := &fakeRunner{Result: okResult(fixture(t, "success_with_cost.json"))}
@@ -492,20 +574,70 @@ func TestAPIKeyIsRequestedAsASecret(t *testing.T) {
 	}
 
 	cmd := fake.LastCall(t)
-	if !slices.Contains(cmd.SecretEnv, apiKeyEnv) {
-		t.Errorf("SecretEnv = %v, want it to carry %s", cmd.SecretEnv, apiKeyEnv)
-	}
 	if !slices.Contains(cmd.EnvAllow, "ANTHROPIC_BASE_URL") {
 		t.Errorf("EnvAllow = %v, want the backend's own passthrough", cmd.EnvAllow)
 	}
-	// A credential on argv would land in the journal and in ps output.
-	for _, a := range cmd.Args {
-		if strings.Contains(a, apiKeyEnv) {
-			t.Errorf("argv mentions the credential variable: %q", a)
+	for _, name := range []string{apiKeyEnv, oauthTokenEnv} {
+		if !slices.Contains(cmd.SecretEnv, name) {
+			t.Errorf("SecretEnv = %v, want it to carry %s", cmd.SecretEnv, name)
+		}
+		// A credential on argv would land in the journal and in ps output.
+		for _, a := range cmd.Args {
+			if strings.Contains(a, name) {
+				t.Errorf("argv mentions the credential variable: %q", a)
+			}
+		}
+		if cmd.ExtraEnv[name] != "" {
+			t.Errorf("%s must be passed through by name, never by value", name)
 		}
 	}
-	if cmd.ExtraEnv[apiKeyEnv] != "" {
-		t.Error("the credential must be passed through by name, never by value")
+}
+
+// TestOAuthTokenReachesChildRedacted is the regression test for signing in
+// with a Claude subscription. `claude setup-token` gives a subscriber a
+// long-lived token that the CLI reads from CLAUDE_CODE_OAUTH_TOKEN. While
+// exec's deny-by-default filter dropped it, the CLI started with no credential
+// and exited 1 in about a second, at no cost and with nothing on stderr.
+//
+// The child prints the token it received, so the redaction marker proves two
+// things at once: the token arrived, and its value cannot leave.
+func TestOAuthTokenReachesChildRedacted(t *testing.T) {
+	t.Parallel()
+
+	const oauth = "belay-test-oauth-credential-5e1f0c9a7d3b"
+	runner := &exec.Runner{
+		Logger: quietLogger(),
+		// No ANTHROPIC_API_KEY: a subscription user has only the token.
+		Environ: func() []string {
+			return []string{
+				oauthTokenEnv + "=" + oauth,
+				helperModeEnv + "=leak",
+				"PATH=" + os.Getenv("PATH"),
+				"HOME=" + os.Getenv("HOME"),
+			}
+		},
+	}
+	b := &Backend{Runner: runner, Logger: quietLogger(), Path: testExe(t),
+		EnvAllow: []string{helperModeEnv}}
+
+	req := validRequest()
+	req.WorkDir = t.TempDir()
+
+	got, err := b.Invoke(t.Context(), req)
+	if err != nil {
+		t.Fatalf("Invoke: %v", err)
+	}
+	if want := "the token is [REDACTED:" + oauthTokenEnv + "]"; !strings.Contains(got.Text, want) {
+		t.Errorf("Text = %q, want it to contain %q", got.Text, want)
+	}
+	surfaces := map[string]string{
+		"AgentResponse.Text": got.Text,
+		"AgentResponse.Raw":  string(got.Raw),
+	}
+	for name, s := range surfaces {
+		if strings.Contains(s, oauth) {
+			t.Errorf("%s leaked the token", name)
+		}
 	}
 }
 
@@ -589,6 +721,43 @@ func TestAPIKeyRedactedByRealRunner(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// TestRejectionMessageIsRedacted covers the one failure path that copies
+// stdout into an error string. A CLI that quotes the credential it rejected
+// must not carry that value into the message a person or a journal sees.
+func TestRejectionMessageIsRedacted(t *testing.T) {
+	t.Parallel()
+
+	const key = "belay-test-credential-7c41e0b9a2d8"
+	runner := &exec.Runner{
+		Logger: quietLogger(),
+		Environ: func() []string {
+			return []string{
+				apiKeyEnv + "=" + key,
+				helperModeEnv + "=reject",
+				"PATH=" + os.Getenv("PATH"),
+				"HOME=" + os.Getenv("HOME"),
+			}
+		},
+	}
+	b := &Backend{Runner: runner, Logger: quietLogger(), Path: testExe(t),
+		EnvAllow: []string{helperModeEnv}}
+
+	req := validRequest()
+	req.WorkDir = t.TempDir()
+
+	_, err := b.Invoke(t.Context(), req)
+	if err == nil {
+		t.Fatal("want the child's exit 1 to surface as an error")
+	}
+	if strings.Contains(err.Error(), key) {
+		t.Fatalf("the error leaked the credential: %q", err)
+	}
+	want := "Invalid API key [REDACTED:" + apiKeyEnv + "]"
+	if !strings.Contains(err.Error(), want) {
+		t.Errorf("error %q, want it to contain %q", err, want)
 	}
 }
 

@@ -74,15 +74,25 @@ const DefaultPath = "claude"
 // rather than a plausible-looking partial parse.
 const DefaultMaxOutput int64 = 8 << 20
 
-// apiKeyEnv is the credential the CLI authenticates with.
+// The credentials the CLI authenticates with: an API key billed per call, or
+// the long-lived OAuth token `claude setup-token` issues to a Claude
+// subscription. Either may be set; the CLI prefers the API key when both are.
 //
-// It is passed through Command.SecretEnv, which both allowlists it into the
-// child and seeds the redactor with its value, so it cannot reach a captured
-// Result, an error string, or a log line. It is never placed on argv.
-// #nosec G101 -- this is the *name* of an environment variable, not a
-// credential. Its value is never held by this package: it is passed to the
-// child by name through Command.SecretEnv.
-const apiKeyEnv = "ANTHROPIC_API_KEY"
+// Both are passed through Command.SecretEnv, which allowlists each into the
+// child and seeds the redactor with its value, so neither can reach a captured
+// Result, an error string, or a log line. Neither is ever placed on argv.
+//
+// A credential missing from this list does not fail loudly. exec drops it, the
+// CLI starts signed out, and it exits 1 within a second at no cost and with
+// nothing on stderr (see TestOAuthTokenReachesChildRedacted).
+//
+// #nosec G101 -- these are the *names* of environment variables, not
+// credentials. Their values are never held by this package: they are passed to
+// the child by name through Command.SecretEnv.
+const (
+	apiKeyEnv     = "ANTHROPIC_API_KEY"
+	oauthTokenEnv = "CLAUDE_CODE_OAUTH_TOKEN"
+)
 
 // Sentinel errors. Match them with errors.Is.
 var (
@@ -117,6 +127,10 @@ type InvokeError struct {
 	ExitCode int
 	// Stderr is the redacted tail of the child's standard error.
 	Stderr string
+	// Message is the CLI's own explanation of a non-zero exit: the result
+	// text of the is_error object it printed on stdout, or empty when it
+	// printed none. Like Stderr, it has passed through the redactor.
+	Message string
 	// TimedOut reports that the deadline elapsed.
 	TimedOut bool
 	// Err is the underlying cause, if any.
@@ -132,9 +146,12 @@ func (e *InvokeError) Error() string {
 	} else {
 		fmt.Fprintf(&b, " failed with exit code %d", e.ExitCode)
 	}
-	if s := strings.TrimSpace(e.Stderr); s != "" {
+	switch s := strings.TrimSpace(e.Stderr); {
+	case e.Message != "":
+		fmt.Fprintf(&b, ": %s", e.Message)
+	case s != "":
 		fmt.Fprintf(&b, ": %s", lastLines(s, 3))
-	} else if e.Err != nil {
+	case e.Err != nil:
 		fmt.Fprintf(&b, ": %v", e.Err)
 	}
 	return b.String()
@@ -185,7 +202,8 @@ type Backend struct {
 	// EnvAllow names additional parent environment variables to pass to the
 	// child. internal/exec is deny-by-default, so a deployment pointing the
 	// CLI at Bedrock, Vertex, or an HTTP proxy must name those variables
-	// here; ANTHROPIC_API_KEY is always passed and never needs listing.
+	// here; ANTHROPIC_API_KEY and CLAUDE_CODE_OAUTH_TOKEN are always passed
+	// and never need listing.
 	EnvAllow []string
 	// Timeout bounds one invocation. Zero uses the Runner's default.
 	Timeout time.Duration
@@ -298,10 +316,10 @@ func (b *Backend) respond(ctx context.Context, req belay.AgentRequest, res exec.
 		slog.Bool("estimated", out.Usage.Estimated),
 		slog.Duration("duration", res.Duration))
 
-	// The CLI exits zero but sets is_error when the failure happened inside
-	// the run — a missing credential, for example, which it prints as the
-	// result rather than on stderr. The response is still returned, because
-	// the contract lets a failed call carry output a caller may want.
+	// The CLI can exit zero but set is_error when the failure happened inside
+	// the run. The response is still returned, because the contract lets a
+	// failed call carry output a caller may want. A failure the CLI exits
+	// non-zero for never reaches here; translate reports it (see cliMessage).
 	if parsed.IsError {
 		return out, &InvokeError{
 			Args:     res.Args,
@@ -339,8 +357,24 @@ func (b *Backend) translate(ctx context.Context, res exec.Result, err error) err
 
 	default:
 		return &InvokeError{Args: res.Args, ExitCode: res.ExitCode,
-			Stderr: res.Stderr, Err: err}
+			Stderr: res.Stderr, Message: cliMessage(res), Err: err}
 	}
+}
+
+// cliMessage returns the CLI's own explanation of a non-zero exit, or "".
+//
+// The CLI reports a failure that stops the run before any model call, such as
+// being signed out or holding a rejected credential, as the result of an
+// is_error object on stdout. It writes nothing to stderr and exits 1, so
+// without this the only thing a person sees is the exit code. A result that is
+// not flagged as an error is the agent's answer, not an explanation, and is
+// ignored. res.Stdout has already passed through the redactor.
+func cliMessage(res exec.Result) string {
+	parsed, _, err := parseResult(res.Stdout, res.Truncated)
+	if err != nil || !parsed.IsError {
+		return ""
+	}
+	return firstLine(string(parsed.Result))
 }
 
 // command builds the argv and environment for one invocation.
@@ -394,11 +428,11 @@ func (b *Backend) command(req belay.AgentRequest, mcpPath string) exec.Command {
 		// directories *beyond* that one, so naming the working directory
 		// there would be a no-op; belay adds no extra roots.
 		Dir: req.WorkDir,
-		// SecretEnv, not EnvAllow: it allowlists the key into the child and
-		// registers its value with the redactor in one step, so the value
-		// cannot survive into Result.Stdout, Result.Stderr, Result.Args, an
-		// error string, or a log line.
-		SecretEnv: []string{apiKeyEnv},
+		// SecretEnv, not EnvAllow: it allowlists each credential into the
+		// child and registers its value with the redactor in one step, so the
+		// value cannot survive into Result.Stdout, Result.Stderr, Result.Args,
+		// an error string, or a log line.
+		SecretEnv: []string{apiKeyEnv, oauthTokenEnv},
 		EnvAllow:  b.EnvAllow,
 		Timeout:   b.Timeout,
 		MaxOutput: maxOut,

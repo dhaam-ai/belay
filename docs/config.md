@@ -314,14 +314,21 @@ How to choose the winning candidate after fanout:
 
 The following environment variables are used by belay and are never read from `belay.yaml`:
 
-### `ANTHROPIC_API_KEY` (required if using Claude backend)
+### `ANTHROPIC_API_KEY` or `CLAUDE_CODE_OAUTH_TOKEN` (Claude backend)
 
-Your Anthropic API key. Required for agent backend `"claude"` and review mode `"ai"`. Must be set in the shell; never include it in belay.yaml.
+The credential Claude Code authenticates with. Set one of them, or neither if Claude Code is already signed in on this machine. Whichever you set belongs in the shell; never include either in belay.yaml.
+
+- `ANTHROPIC_API_KEY` is an Anthropic API key, billed per call. Claude Code prefers it when both are set.
+- `CLAUDE_CODE_OAUTH_TOKEN` is the long-lived token `claude setup-token` issues to a Claude Pro, Max, Team or Enterprise subscription. Requires belay 0.1.1 or later.
+
+belay passes both to the `claude` child process and redacts their values from its journal, logs and cassettes. It passes no other Anthropic, Bedrock, Vertex or proxy variable.
 
 Example:
 ```bash
 export ANTHROPIC_API_KEY="sk-ant-..."
-belay run --plan "fix the bug"
+# or
+export CLAUDE_CODE_OAUTH_TOKEN="<token from claude setup-token>"
+belay run "fix the bug"
 ```
 
 ### `SONAR_TOKEN` (required if using SonarQube server)

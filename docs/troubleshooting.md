@@ -76,6 +76,29 @@ This document covers common failure modes, their symptoms, and remedies.
 
 **Note**: This is distinct from "test failure". A missing toolchain returns an error and refuses to proceed, forcing human intervention. A test failure returns a TestReport and automatically triggers the fix loop. Belay makes this distinction so the remedy is clear: install software vs. edit code.
 
+## Claude Exits Immediately
+
+**Symptom**: The plan node fails with `claude failed with exit code 1` about a second after starting, and the run cost $0.00. From 0.1.1, belay adds the CLI's own reason, such as `Not logged in · Please run /login` or `Failed to authenticate. API Error: 401 Invalid bearer token`. On 0.1.0 there is no reason, only the command line. Running `claude` yourself works.
+
+**Cause**: `claude` started without a credential. belay starts it with a deny-by-default environment: `HOME`, `LANG`, `PATH`, `TERM`, `TMPDIR` and `USER`, plus `ANTHROPIC_API_KEY` and `CLAUDE_CODE_OAUTH_TOKEN`. Your shell passes everything, so a credential that lives in any other variable works there and not under belay. belay 0.1.0 also dropped `CLAUDE_CODE_OAUTH_TOKEN`.
+
+**Diagnosis**:
+1. Run `belay version`. On 0.1.0, a subscription token is never passed.
+2. Reproduce what belay's child sees. This makes one short call if it succeeds:
+   ```bash
+   env -i HOME="$HOME" LANG="$LANG" PATH="$PATH" TERM="$TERM" TMPDIR="$TMPDIR" USER="$USER" \
+     ${ANTHROPIC_API_KEY:+ANTHROPIC_API_KEY="$ANTHROPIC_API_KEY"} \
+     ${CLAUDE_CODE_OAUTH_TOKEN:+CLAUDE_CODE_OAUTH_TOKEN="$CLAUDE_CODE_OAUTH_TOKEN"} \
+     claude -p "reply ok" --output-format json < /dev/null
+   ```
+   If this fails and plain `claude -p "reply ok"` works, the credential is in a variable belay does not pass.
+
+**Remedy**:
+- On a subscription: upgrade to belay 0.1.1 or later, run `claude setup-token`, and export `CLAUDE_CODE_OAUTH_TOKEN`
+- With an API key: export `ANTHROPIC_API_KEY`
+- Or sign in interactively (`claude`, then `/login`) so the login is stored under `HOME` or, on macOS, in the Keychain
+- Bedrock, Vertex, and proxy variables are not passed yet, so those setups do not work under belay
+
 ## Budget Exceeded
 
 **Symptom**: Run aborts with error: "belay: budget exceeded: spent $X of $Y limit"

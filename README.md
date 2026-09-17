@@ -91,6 +91,19 @@ belay orchestrates an agent; it is not one. Install
 inherits that login — you do not need to set `ANTHROPIC_API_KEY`, though it is
 honoured if present.
 
+To run on a Claude Pro, Max, Team or Enterprise subscription without relying
+on that stored login, create a long-lived token and export it. belay passes it
+to Claude Code and redacts it from everything it records, exactly as it does an
+API key:
+
+```bash
+claude setup-token                          # prints the token once
+export CLAUDE_CODE_OAUTH_TOKEN="<that token>"
+```
+
+belay 0.1.0 dropped this variable, so `claude` started signed out and exited 1
+in about a second, having spent nothing. Upgrade to 0.1.1 or later.
+
 ```bash
 claude --version     # belay shells out to this
 ```
@@ -148,13 +161,22 @@ budget:
   on_exceed: "abort"      # Abort if budget is hit
 ```
 
-### 3. Set your API key
+### 3. Set a credential
+
+Pick one. An API key is billed per call:
 
 ```bash
 export ANTHROPIC_API_KEY="sk-ant-..."
 ```
 
-belay calls the Claude Code CLI (`claude` binary), which reads your key from the environment.
+A Claude subscription uses a token from `claude setup-token`:
+
+```bash
+export CLAUDE_CODE_OAUTH_TOKEN="<token from claude setup-token>"
+```
+
+belay calls the Claude Code CLI (`claude` binary) and passes it whichever of
+these is set. With neither, belay relies on the login Claude Code already has.
 
 ### 4. See what belay would do (without spending anything)
 
@@ -191,7 +213,7 @@ settings it would use
   agent        claude-code, model sonnet, calling the agent for real, up to 5 turns per step
   tests        go test -json -count=1 ./... (auto-detected)
   quality gate golangci-lint (auto-detected), failing on major issues or worse
-  credentials  ANTHROPIC_API_KEY is set
+  credentials  ANTHROPIC_API_KEY is set; CLAUDE_CODE_OAUTH_TOKEN is not set; SONAR_TOKEN is not set
 
 the route it would take
   plan → approve → code → write → test → fix → review → done
@@ -375,7 +397,7 @@ belay is **early but real**. Use it for:
 
 6. **SonarQube integration is optional**: The challenge names SonarQube as a quality gate. belay ships with local linters (golangci-lint, eslint, ruff) as the default. SonarQube is available via `review.mode: sonar` if you have Docker or a server. See ADR-0008.
 
-7. **No credentials management**: belay assumes ANTHROPIC_API_KEY is set in your shell. It does not manage secrets, store tokens, or integrate with secret vaults.
+7. **No credentials management**: belay reads ANTHROPIC_API_KEY or CLAUDE_CODE_OAUTH_TOKEN from your shell, or relies on Claude Code's own login. It does not manage secrets, store tokens, or integrate with secret vaults.
 
 ## Contributing
 
