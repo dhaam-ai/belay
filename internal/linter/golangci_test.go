@@ -4,6 +4,7 @@ package linter
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"log/slog"
@@ -491,19 +492,30 @@ func TestGolangCICommand(t *testing.T) {
 		t.Fatalf("Lint: %v", err)
 	}
 
-	probes := runner.callsTo("git")
-	if len(probes) != 1 {
-		t.Fatalf("ran git %d times, want 1", len(probes))
+	var gotArgs [][]string
+	for _, probe := range runner.callsTo("git") {
+		gotArgs = append(gotArgs, probe.Args)
+		if probe.Dir != dir {
+			t.Errorf("git %v: Dir = %q, want %q", probe.Args, probe.Dir, dir)
+		}
+		if len(probe.EnvAllow) != 0 || len(probe.SecretEnv) != 0 || len(probe.ExtraEnv) != 0 {
+			t.Errorf("git %v gets more than the base environment: %+v", probe.Args, probe)
+		}
+		// WithTimeout above is longer than the check's own bound, so the
+		// bound applies.
+		if probe.Timeout != 30*time.Second {
+			t.Errorf("git %v: Timeout = %v, want %v", probe.Args, probe.Timeout, 30*time.Second)
+		}
+		if probe.MaxOutput != 64<<10 {
+			t.Errorf("git %v: MaxOutput = %d, want %d", probe.Args, probe.MaxOutput, 64<<10)
+		}
 	}
-	probe := probes[0]
-	if diff := cmp.Diff([]string{"ls-tree", "--name-only", "HEAD"}, probe.Args); diff != "" {
-		t.Errorf("git Args mismatch (-want +got):\n%s", diff)
+	wantGit := [][]string{
+		{"ls-tree", "--name-only", "HEAD"},
+		{"check-ignore", "--quiet", "--no-index", "--", "belay-scope-check.go"},
 	}
-	if probe.Dir != dir {
-		t.Errorf("git Dir = %q, want %q", probe.Dir, dir)
-	}
-	if len(probe.EnvAllow) != 0 || len(probe.SecretEnv) != 0 || len(probe.ExtraEnv) != 0 {
-		t.Errorf("git gets more than the base environment: %+v", probe)
+	if diff := cmp.Diff(wantGit, gotArgs); diff != "" {
+		t.Errorf("git commands mismatch (-want +got):\n%s", diff)
 	}
 
 	cmd := runner.lastCall(t)
@@ -532,50 +544,74 @@ func TestGolangCICommand(t *testing.T) {
 	}
 }
 
-// TestGolangCIScopeFollowsGit covers what the git check can report. Scoping
-// needs a HEAD that holds the linted directory. Every other answer must lint
-// the whole tree, which fails safe, and log a warning. Passing
-// --new-from-rev=HEAD anyway would hide every finding in a directory the
-// repository ignores, and in the other cases would rely on golangci-lint
-// quietly ignoring a revision it cannot read.
+// TestGolangCIScopeFollowsGit covers what the git checks can report. Scoping
+// needs a HEAD that holds the linted directory, and a directory whose new
+// files git does not ignore. Every other answer must lint the whole tree,
+// which fails safe, and log a warning. Passing --new-from-rev=HEAD anyway
+// would hide the findings git cannot see as changed, and in the error cases
+// would rely on golangci-lint quietly ignoring a revision it cannot read.
 func TestGolangCIScopeFollowsGit(t *testing.T) {
 	t.Parallel()
 
 	notFound := errors.New(`exec: "git": executable file not found in $PATH`)
 	tests := []struct {
 		name     string
-		git      scripted
+		git      map[string]scripted
 		wantArgs []string
 		wantWarn bool
 	}{
 		{
-			name:     "HEAD holds the directory",
-			git:      scripted{stdout: "go.mod\nmain.go\n"},
+			name:     "HEAD holds the directory and new files are not ignored",
+			git:      map[string]scripted{"ls-tree": {stdout: "go.mod\nmain.go\n"}},
+			wantArgs: scopedArgs,
+		},
+		{
+			// The cap cut the listing short, which still proves HEAD
+			// holds something here.
+			name:     "the listing was truncated",
+			git:      map[string]scripted{"ls-tree": {stdout: "a.go\nb", truncated: true}},
 			wantArgs: scopedArgs,
 		},
 		{
 			name:     "not a repository",
-			git:      scripted{exitCode: 128, stderr: "fatal: not a git repository (or any of the parent directories): .git"},
+			git:      map[string]scripted{"ls-tree": {exitCode: 128, stderr: "fatal: not a git repository (or any of the parent directories): .git"}},
 			wantArgs: unscopedArgs,
 			wantWarn: true,
 		},
 		{
 			name:     "no commits yet",
-			git:      scripted{exitCode: 128, stderr: "fatal: Not a valid object name HEAD"},
+			git:      map[string]scripted{"ls-tree": {exitCode: 128, stderr: "fatal: Not a valid object name HEAD"}},
 			wantArgs: unscopedArgs,
 			wantWarn: true,
 		},
 		{
-			// An ignored or untracked directory, such as a fanout
+			// An ignored or uncommitted directory, such as a fanout
 			// candidate under .belay: git runs, and lists nothing.
 			name:     "HEAD does not hold the directory",
-			git:      scripted{},
+			git:      map[string]scripted{"ls-tree": {}},
 			wantArgs: unscopedArgs,
 			wantWarn: true,
 		},
 		{
-			name:     "git not installed",
-			git:      scripted{exitCode: -1, err: &exec.ToolchainError{Tool: "git", Err: notFound, Detail: notFound.Error()}},
+			// "ws/*" with "!ws/.gitkeep": HEAD holds .gitkeep, and git
+			// ignores every file the run adds.
+			name:     "new files in the directory are ignored",
+			git:      map[string]scripted{"check-ignore": {}},
+			wantArgs: unscopedArgs,
+			wantWarn: true,
+		},
+		{
+			name:     "check-ignore fails",
+			git:      map[string]scripted{"check-ignore": {exitCode: 128, stderr: "fatal: unsafe repository"}},
+			wantArgs: unscopedArgs,
+			wantWarn: true,
+		},
+		{
+			name: "git not installed",
+			git: map[string]scripted{"ls-tree": {
+				exitCode: -1,
+				err:      &exec.ToolchainError{Tool: "git", Err: notFound, Detail: notFound.Error()},
+			}},
 			wantArgs: unscopedArgs,
 			wantWarn: true,
 		},
@@ -584,8 +620,7 @@ func TestGolangCIScopeFollowsGit(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 
-			git := tt.git
-			runner := &stubRunner{stdout: readFixture(t, "golangci-clean.json"), git: &git}
+			runner := &stubRunner{stdout: readFixture(t, "golangci-clean.json"), git: tt.git}
 			var logs bytes.Buffer
 			dir := t.TempDir()
 			linter := NewGolangCI(WithRunner(runner), WithLogger(slog.New(slog.NewTextHandler(&logs, nil))))
@@ -600,9 +635,7 @@ func TestGolangCIScopeFollowsGit(t *testing.T) {
 			if diff := cmp.Diff(tt.wantArgs, runner.lastCall(t).Args); diff != "" {
 				t.Errorf("Args mismatch (-want +got):\n%s", diff)
 			}
-			warned := strings.Contains(logs.String(), "level=WARN msg=\"belay/linter: cannot scope golangci-lint") &&
-				strings.Contains(logs.String(), dir)
-			if warned != tt.wantWarn {
+			if warned := scopeWarning(logs.String(), dir); warned != tt.wantWarn {
 				t.Errorf("warned = %v, want %v; logs:\n%s", warned, tt.wantWarn, logs.String())
 			}
 			// The warning is only on screen with --verbose. The summary
@@ -613,6 +646,35 @@ func TestGolangCIScopeFollowsGit(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestGolangCIScopeCheckQuietWhenCancelled checks that a git check cut short
+// by a cancelled context does not warn: the run is stopping, and the warning
+// would blame the repository for it.
+func TestGolangCIScopeCheckQuietWhenCancelled(t *testing.T) {
+	t.Parallel()
+
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+	runner := &stubRunner{
+		stdout: readFixture(t, "golangci-clean.json"),
+		git:    map[string]scripted{"ls-tree": {exitCode: -1, err: context.Canceled}},
+	}
+	var logs bytes.Buffer
+	dir := t.TempDir()
+	linter := NewGolangCI(WithRunner(runner), WithLogger(slog.New(slog.NewTextHandler(&logs, nil))))
+
+	_, _ = linter.Lint(ctx, dir)
+	if scopeWarning(logs.String(), dir) {
+		t.Errorf("warned after cancellation; logs:\n%s", logs.String())
+	}
+}
+
+// scopeWarning reports whether logs hold GolangCI's warning that it could not
+// scope findings in dir.
+func scopeWarning(logs, dir string) bool {
+	return strings.Contains(logs, `level=WARN msg="belay/linter: cannot scope golangci-lint`) &&
+		strings.Contains(logs, dir)
 }
 
 func TestGolangCIDetect(t *testing.T) {

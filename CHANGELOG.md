@@ -6,14 +6,45 @@ All notable changes to belay are recorded here. The format follows
 that only `pkg/belay` carries a compatibility promise. Everything under
 `internal/` may change in any release.
 
+## v0.1.4 — 2026-09-17
+
+### Fixed
+
+- **The lint gate no longer passes code in a directory whose new files git
+  ignores.** v0.1.3 checked only that HEAD holds something in the workspace.
+  With a rule such as `ws/*` plus `!ws/.gitkeep`, HEAD holds `.gitkeep`, but
+  git ignores every file a run adds there. Their findings were hidden and the
+  gate passed. belay now also asks git whether a new file in the workspace
+  would be ignored, and counts every finding if so.
+- The docs now also list what else scoping by line misses: changes inside a
+  nested repository or submodule, and new files git ignores by name, such as
+  under a `*_gen.go` rule. The troubleshooting steps now show both
+  golangci-lint commands belay can run.
+
+### Security
+
+- **Each step's agent now gets only the tools belay allows it.** belay passed
+  a step's tool list to Claude Code as `--allowedTools`, which only
+  pre-approves those tools. Every other built-in tool stayed available, and
+  Claude Code's own settings could approve it: `defaultMode: acceptEdits`,
+  for example, approves edits. So the plan step, meant to be read-only,
+  could edit files, and the code and fix steps could run shell commands.
+  MCP servers from the user's or the repository's Claude Code configuration
+  also added their tools. belay now also passes `--tools`, which removes
+  every other built-in tool. It also passes `--strict-mcp-config`, which
+  loads no MCP servers except the ones belay configures itself. The code and
+  fix steps therefore no longer run commands such as `go test` themselves;
+  belay's test step runs the tests. This needs Claude Code 2.1.186 or later.
+
 ## v0.1.3 — 2026-09-17
 
 ### Fixed
 
 - **The lint gate no longer passes code it cannot scope.** v0.1.2 always
   passed `--new-from-rev=HEAD`. In a directory the enclosing repository
-  ignores, such as a fanout candidate under `.belay`, that hid every finding
-  and the gate passed. belay now asks git first. If HEAD doesn't hold the
+  ignores, that hid every finding and the gate passed. A fanout candidate
+  under `.belay` is such a directory, though belay doesn't lint candidates
+  yet. belay now asks git first. If HEAD doesn't hold the
   directory, or there is no repository, commit or `git`, every finding counts.
   belay says so in a warning, shown with `--verbose`, and in the gate's
   summary, which the fix step passes to the agent.
@@ -30,9 +61,9 @@ that only `pkg/belay` carries a compatibility promise. Everything under
   - findings golangci-lint's cache takes from another checkout with identical
     code.
 
-  They also correct two v0.1.2 claims. A fanout candidate is not linted in
-  full. The warning golangci-lint prints when it can't scope never reaches
-  belay's output.
+  They also correct two v0.1.2 claims: that a fanout candidate would have
+  every finding counted, and that the warning golangci-lint prints when it
+  can't scope reaches belay's output.
 
 ## v0.1.2 — 2026-09-17
 

@@ -59,7 +59,11 @@ func TestInvokeBuildsArgv(t *testing.T) {
 			},
 		},
 		{
-			name: "allowed tools are one comma-joined argument",
+			// --allowedTools only pre-approves: every other built-in tool
+			// stays available. --tools removes them, and
+			// --strict-mcp-config drops the MCP servers Claude Code's own
+			// configuration would add.
+			name: "allowed tools are approved and are the only tools",
 			req: belay.AgentRequest{
 				Prompt: "fix", WorkDir: "/repo",
 				AllowedTools: []string{"Read", "Edit", "Bash"},
@@ -67,17 +71,67 @@ func TestInvokeBuildsArgv(t *testing.T) {
 			want: []string{
 				"-p", "fix", "--output-format", "json",
 				"--allowedTools", "Read,Edit,Bash",
+				"--tools", "Read,Edit,Bash",
+				"--strict-mcp-config",
 			},
 		},
 		{
-			name: "a tool pattern containing a space stays one argument",
+			// "default" is how --tools spells every built-in tool, so it
+			// must never reach --tools as a name.
+			name: "default is never passed as a tool name",
 			req: belay.AgentRequest{
 				Prompt: "fix", WorkDir: "/repo",
-				AllowedTools: []string{"Bash(git diff *)", "Read"},
+				AllowedTools: []string{"Read", "default", "Default"},
 			},
 			want: []string{
 				"-p", "fix", "--output-format", "json",
-				"--allowedTools", "Bash(git diff *),Read",
+				"--allowedTools", "Read,default,Default",
+				"--tools", "Read",
+				"--strict-mcp-config",
+			},
+		},
+		{
+			// --tools "" removes every tool: a request that asked for a
+			// restriction and named nothing usable gets no tools at all.
+			name: "a list with no usable names removes every tool",
+			req: belay.AgentRequest{
+				Prompt: "fix", WorkDir: "/repo",
+				AllowedTools: []string{"(git diff *)", " ", "default"},
+			},
+			want: []string{
+				"-p", "fix", "--output-format", "json",
+				"--allowedTools", "(git diff *), ,default",
+				"--tools", "",
+				"--strict-mcp-config",
+			},
+		},
+		{
+			name: "tool names are trimmed",
+			req: belay.AgentRequest{
+				Prompt: "fix", WorkDir: "/repo",
+				AllowedTools: []string{" Read ", "Grep\t"},
+			},
+			want: []string{
+				"-p", "fix", "--output-format", "json",
+				"--allowedTools", " Read ,Grep\t",
+				"--tools", "Read,Grep",
+				"--strict-mcp-config",
+			},
+		},
+		{
+			// Claude Code 2.1.274 drops a tool named with a pattern from
+			// --tools entirely, so --tools gets the bare name and the
+			// pattern stays in --allowedTools, where it limits approval.
+			name: "a tool pattern is approved as written and made available by name",
+			req: belay.AgentRequest{
+				Prompt: "fix", WorkDir: "/repo",
+				AllowedTools: []string{"Bash(git diff *)", "Bash(git log *)", "Read"},
+			},
+			want: []string{
+				"-p", "fix", "--output-format", "json",
+				"--allowedTools", "Bash(git diff *),Bash(git log *),Read",
+				"--tools", "Bash,Read",
+				"--strict-mcp-config",
 			},
 		},
 		{
@@ -131,6 +185,8 @@ func TestInvokeBuildsArgv(t *testing.T) {
 				"-p", "implement Login", "--output-format", "json",
 				"--model", "sonnet", "--max-turns", "5",
 				"--allowedTools", "Read,Write",
+				"--tools", "Read,Write",
+				"--strict-mcp-config",
 				"--append-system-prompt", "Be terse.",
 				"--resume", "s-1",
 				"--permission-mode", "dontAsk",

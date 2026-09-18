@@ -108,6 +108,11 @@ in about a second, having spent nothing. Upgrade to 0.1.1 or later.
 claude --version     # belay shells out to this
 ```
 
+From 0.1.4, belay needs Claude Code 2.1.186 or later, and is tested with
+2.1.274. It limits each step to its own tools with `--tools` and
+`--strict-mcp-config`. Claude Code fixed how `--tools` handles search tools in
+2.1.162, and feature-gated tools in 2.1.186.
+
 belay does not replace Claude Code — it drives it. The relationship is worth
 being precise about, because it decides when you would reach for which:
 

@@ -29,13 +29,22 @@ type stubRunner struct {
 	truncated bool
 	err       error
 
-	// git scripts every git command, which GolangCI runs to decide whether
-	// it can scope findings to a run's change. Nil stands for a repository
-	// whose HEAD holds the linted directory, which is what most tests want.
-	git *scripted
+	// git scripts the git commands GolangCI runs to decide whether it can
+	// scope findings to a run's change, keyed by subcommand. A missing key
+	// takes gitDefaults: a repository whose HEAD holds the linted directory
+	// and does not ignore new files in it, which is what most tests want.
+	git map[string]scripted
 
 	mu    sync.Mutex
 	calls []exec.Command
+}
+
+// gitDefaults is how stubRunner answers a git subcommand the test did not
+// script: HEAD lists entries, and check-ignore exits 1, which is how it says
+// the path is not ignored.
+var gitDefaults = map[string]scripted{
+	"ls-tree":      {stdout: "go.mod\n"},
+	"check-ignore": {exitCode: 1},
 }
 
 // scripted is one command's outcome, as stubRunner replays it.
@@ -53,9 +62,13 @@ func (s *stubRunner) Run(_ context.Context, c exec.Command) (exec.Result, error)
 	s.mu.Unlock()
 
 	if c.Path == "git" {
-		out := scripted{stdout: "go.mod\n"}
-		if s.git != nil {
-			out = *s.git
+		var sub string
+		if len(c.Args) > 0 {
+			sub = c.Args[0]
+		}
+		out, ok := s.git[sub]
+		if !ok {
+			out = gitDefaults[sub]
 		}
 		return out.replay(c)
 	}
