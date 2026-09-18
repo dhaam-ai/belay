@@ -1,5 +1,12 @@
 # Troubleshooting
 
+<!--
+Insertion markers. Each "slice:NAME" comment below marks where the work in
+flight for that slice adds its text: insert directly above the marker and
+leave the marker in place, so changes built in parallel land on different
+lines. Delete a marker once its slice has merged.
+-->
+
 This document covers common failure modes, their symptoms, and remedies.
 
 ## The Agent Edited Nothing
@@ -320,3 +327,15 @@ belay 0.1.1 and earlier always counted every finding, and ESLint and Ruff still 
 - Check docs/config.md for the schema
 - Fix the YAML syntax or values and retry
 - Common mistakes: wrong agent.backend name, fail_on not in [info, minor, major, critical, blocker], budget.max_usd as a string instead of a number
+
+<!-- slice:output -->
+
+<!-- slice:plan -->
+
+<!-- slice:rerun -->
+
+<!-- slice:queue -->
+
+<!-- slice:policy -->
+
+<!-- slice:backend -->

@@ -1,5 +1,12 @@
 # Belay Configuration
 
+<!--
+Insertion markers. Each "slice:NAME" comment below marks where the work in
+flight for that slice adds its text: insert directly above the marker and
+leave the marker in place, so changes built in parallel land on different
+lines. Delete a marker once its slice has merged.
+-->
+
 Belay is configured by a `belay.yaml` file in the repository it works on. This document describes every field and its effects.
 
 ## File Location
@@ -71,6 +78,8 @@ Whether belay calls the agent, and whether it keeps a recording (a cassette) of 
 - `"record"`: Call the agent for real and save every exchange to the cassette, `<workspace>/.belay/cassette.json` unless `--cassette` names another file.
 - `"replay"`: Answer every agent call from the cassette instead. No agent process is started and nothing is spent, so a recorded run can be repeated in CI for free (see [ADR-0009](adr/0009-record-replay-cassettes.md)). A call the cassette has no answer for is an error.
 
+<!-- slice:routing -->
+
 ## `graph`
 
 Limits on the graph of steps a run moves through.
@@ -125,6 +134,8 @@ wait indefinitely and survive the session that started it.
 With `false`, planning routes straight to coding. That is the right setting for
 an unattended or CI run, and the wrong one for the first time you point belay
 at a repository you care about.
+
+<!-- slice:queue -->
 
 ## `test`
 
@@ -317,6 +328,12 @@ How to choose the winning candidate after fanout:
 - `"first_pass"`: The first candidate that clears the quality gate
 - `"fastest"`: The candidate that finished soonest
 
+<!-- slice:output -->
+
+<!-- slice:plan -->
+
+<!-- slice:policy -->
+
 ## Environment Variables
 
 The following environment variables are used by belay and are never read from `belay.yaml`:
@@ -337,6 +354,8 @@ export ANTHROPIC_API_KEY="sk-ant-..."
 export CLAUDE_CODE_OAUTH_TOKEN="<token from claude setup-token>"
 belay run "fix the bug"
 ```
+
+<!-- slice:backend -->
 
 ### `SONAR_TOKEN` and `SONAR_HOST_URL` (SonarQube)
 
