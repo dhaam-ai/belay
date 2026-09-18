@@ -1,10 +1,16 @@
 # Belay Configuration
 
-Belay is configured via a `belay.yaml` file in the project root. This document describes every field and its effects.
+Belay is configured by a `belay.yaml` file in the repository it works on. This document describes every field and its effects.
 
 ## File Location
 
-Belay looks for `belay.yaml` in the workspace directory (specified by `--workspace`, defaulting to `.`). For example, `belay run --workspace ../other-repo "your goal"` reads `../other-repo/belay.yaml`. You can also specify an alternate path with `belay run --config /path/to/config.yaml`, which overrides the automatic lookup.
+belay builds its configuration from up to three files, merged onto its built-in defaults. Each later file overrides the earlier ones:
+
+1. `$XDG_CONFIG_HOME/belay/config.yaml`, or `~/.config/belay/config.yaml` when `XDG_CONFIG_HOME` is not set: your own settings, for every repository.
+2. `belay.yaml` in the workspace (`--workspace`, `.` by default). For example, `belay run --workspace ../other-repo "your goal"` reads `../other-repo/belay.yaml`.
+3. The file named by `--config`, if you pass one.
+
+Merging is per field, not per file: a file that sets only `budget.max_usd` keeps every other setting from the layers below it, including the other `budget` settings. A file that is missing is skipped, except the one `--config` names, which must exist. With no files at all, belay runs on the defaults this document lists.
 
 ## Top-Level Fields
 
@@ -28,7 +34,7 @@ The schema version of this file, not the belay release version. The only accepte
 
 ## `agent`
 
-Configuration for the LLM backend that generates code, plans, and fixes.
+The coding agent belay drives to write the plan, the code and the fixes.
 
 ### `agent.backend`
 
@@ -67,7 +73,7 @@ Whether belay calls the agent, and whether it keeps a recording (a cassette) of 
 
 ## `graph`
 
-Configuration for the execution graph (DAG phases, ordering, timeouts).
+Limits on the graph of steps a run moves through.
 
 ### `graph.give_up`
 
@@ -122,7 +128,7 @@ at a repository you care about.
 
 ## `test`
 
-Configuration for test execution (phase 5).
+How the test step proves the code works.
 
 ### `test.runner`
 
@@ -147,7 +153,7 @@ The command to run when `test.runner` is `"custom"`, which then requires it. Exi
 
 ## `review`
 
-Configuration for code quality review gates (phases 6 and 7).
+The quality gate the review step applies to the run's change.
 
 ### `review.mode`
 
@@ -272,7 +278,7 @@ What to do when budget is exceeded:
 
 ## `fanout`
 
-Configuration for parallel candidate generation (phase 4).
+Best-of-N: giving one goal several independent candidates at once, so the best can be kept.
 
 ### `fanout.enabled`
 
@@ -332,14 +338,15 @@ export CLAUDE_CODE_OAUTH_TOKEN="<token from claude setup-token>"
 belay run "fix the bug"
 ```
 
-### `SONAR_TOKEN` (required if using SonarQube server)
+### `SONAR_TOKEN` and `SONAR_HOST_URL` (SonarQube)
 
-Your SonarQube authentication token. Required if `review.sonar.runner == "server"`. Must be set in the shell; never include it in belay.yaml.
+`SONAR_TOKEN` is your SonarQube authentication token and `SONAR_HOST_URL` the address of the SonarQube server. A scan under `review.mode: sonar` needs both, whichever `review.sonar.runner` it uses; the `"ai"` reviewer needs the token. Set them in the shell; never include either in belay.yaml.
 
 Example:
 ```bash
 export SONAR_TOKEN="squ_..."
-belay run
+export SONAR_HOST_URL="https://sonarqube.example.com"
+belay run "fix the bug"
 ```
 
 ### `DOCKER_HOST` (optional)
@@ -406,26 +413,23 @@ budget:
 
 ## Validation
 
-Belay validates the configuration on startup:
+belay checks the configuration before a run starts, and reports every problem it finds at once rather than stopping at the first:
 
-- Missing required fields (e.g., `version`) are errors
-- Invalid field types (e.g., `max_turns: "five"` instead of `5`) are errors
-- Unknown fields are warnings (allows forward compatibility)
-- Timeout and duration fields must be valid Go durations (e.g., `"10m"`, `"1h30m"`)
-
-If validation fails, belay exits with a clear error message and suggests fixes.
+- A key that names no setting is an error, not a warning, so a typo cannot be silently ignored. So is a key written twice.
+- A value of the wrong type (e.g., `max_turns: "five"` instead of `5`) is an error naming the file, the line and the setting.
+- A key that looks like a credential, such as `sonar_token` or `api_key`, is rejected wherever it appears. Secrets are read from the environment only.
+- A closed-set setting must hold one of its **Valid values**, and numeric limits must respect their minimums.
+- Durations must be Go durations (e.g., `"15m"`, `"1h30m"`).
+- `version` may be left out, in which case it is `1`; any other value is rejected.
 
 ## Configuration Precedence
 
-1. belay.yaml (file)
-2. Environment variables (override file)
-3. CLI flags (override both)
+Settings come only from the files listed under [File Location](#file-location), in that order, on top of the built-in defaults. No environment variable or command-line flag overrides an individual setting; to change one for a single run, put it in a file and pass that file with `--config`:
 
-Example:
 ```bash
-# belay.yaml says max_usd: 10.0
-# Override via CLI flag:
-belay run --budget-max-usd 5.0
+# belay.yaml says max_usd: 10.0; this run gets 2.5 and keeps everything else
+printf 'budget:\n  max_usd: 2.5\n' > /tmp/cheap.yaml
+belay run --config /tmp/cheap.yaml "fix the bug"
 ```
 
 ## References

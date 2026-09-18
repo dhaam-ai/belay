@@ -20,7 +20,7 @@ This document covers common failure modes, their symptoms, and remedies.
 
 **Remedy**:
 - If the goal is unclear, edit belay.yaml to provide more context or a better prompt
-- If the agent ran out of budget, increase review.budget_limit_usd
+- If the agent ran out of budget, increase budget.max_usd
 - If the working directory or model is wrong, edit belay.yaml and retry with `belay resume`
 
 ## Run is Paused
@@ -52,12 +52,12 @@ This document covers common failure modes, their symptoms, and remedies.
 1. Look at TestReport.Failures in the journal to see what tests failed
 2. Check agent invocation prompts in logs (the Prompt and SystemPrompt fields)
 3. Count how many times the fix node ran (look for attempt numbers in node_finished records)
-4. Check if the run hit the retry limit (ErrMaxSteps, usually 50 node executions)
+4. Check if the run hit the step limit (ErrMaxSteps, graph.max_steps: 60 node executions by default)
 
 **Remedy**:
 - If tests require external services, set them up and retry
 - If the agent needs more context, augment the goal or SystemPrompt in belay.yaml
-- If the loop is infinite, increase graph.give_up (default 10) to allow more fix attempts
+- If the loop is infinite, increase graph.give_up (default 3) to allow more fix attempts
 - If the limit is reached, break the loop by reducing the goal to a smaller, more achievable task
 
 ## Toolchain Missing
@@ -72,7 +72,7 @@ This document covers common failure modes, their symptoms, and remedies.
 
 **Remedy**:
 - Install the toolchain and retry with `belay resume`
-- Or, if using a different test runner or linter, update belay.yaml (runner.name, review.mode)
+- Or, if using a different test runner or linter, update belay.yaml (test.runner, review.mode)
 
 **Note**: This is distinct from "test failure". A missing toolchain returns an error and refuses to proceed, forcing human intervention. A test failure returns a TestReport and automatically triggers the fix loop. Belay makes this distinction so the remedy is clear: install software vs. edit code.
 
@@ -106,12 +106,12 @@ This document covers common failure modes, their symptoms, and remedies.
 **Cause**: Cumulative cost of all agent invocations crossed the configured ceiling.
 
 **Diagnosis**:
-1. Check review.budget_limit_usd in belay.yaml
+1. Check budget.max_usd and budget.max_tokens in belay.yaml
 2. Look at Usage.USD fields in journal records to see which invocations cost the most
 3. Check if Usage.Estimated = true; estimated costs are lower-confidence
 
 **Remedy**:
-- Increase review.budget_limit_usd in belay.yaml (if the project is worth it)
+- Increase budget.max_usd in belay.yaml (if the project is worth it)
 - Use a cheaper model (adjust agent.model in belay.yaml)
 - Scope the goal to fewer changes (smaller diffs cost fewer tokens)
 - If costs are overestimated, they may drop in a future API pricing update
@@ -275,7 +275,7 @@ belay 0.1.1 and earlier always counted every finding, and ESLint and Ruff still 
 
 ## Max Steps Exceeded
 
-**Symptom**: Error message: "graph: max steps exceeded" and run aborts after 50 (or configured) node executions.
+**Symptom**: Error message: "graph: max steps exceeded" and run aborts after 60 (or configured) node executions.
 
 **Cause**: The run performed too many node executions without reaching END. Usually, the fix loop is looping forever.
 
@@ -284,7 +284,7 @@ belay 0.1.1 and earlier always counted every finding, and ESLint and Ruff still 
 2. If the pattern shows fix → test → fix → test repeating, the agent cannot make progress
 
 **Remedy**:
-- Increase graph.max_steps in belay.yaml (default 50)
+- Increase graph.max_steps in belay.yaml (default 60)
 - Or reduce the goal so fewer fixes are needed
 - Or break the work into smaller runs (smaller goals are easier to fix)
 - If fixes are not making progress, the issue may be fundamentally hard and require manual intervention
@@ -319,4 +319,4 @@ belay 0.1.1 and earlier always counted every finding, and ESLint and Ruff still 
 **Remedy**:
 - Check docs/config.md for the schema
 - Fix the YAML syntax or values and retry
-- Common mistakes: wrong agent.backend name, fail_on not in [info, minor, major, critical, blocker], budget_limit_usd as a string instead of a number
+- Common mistakes: wrong agent.backend name, fail_on not in [info, minor, major, critical, blocker], budget.max_usd as a string instead of a number
