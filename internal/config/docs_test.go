@@ -1,12 +1,15 @@
 package config
 
 import (
+	"maps"
 	"os"
 	"path/filepath"
 	"reflect"
 	"slices"
 	"strings"
 	"testing"
+
+	"github.com/google/go-cmp/cmp"
 )
 
 // docsPath is docs/config.md relative to this package.
@@ -86,37 +89,68 @@ func itoa(n int) string {
 }
 
 // documentedTypes maps the words docs/config.md uses in its "**Type**:" lines
-// onto the Go kinds that satisfy them.
-var documentedTypes = map[string][]reflect.Kind{
-	"Boolean":           {reflect.Bool},
-	"Integer":           {reflect.Int, reflect.Int64},
-	"Float":             {reflect.Float64},
-	"Number":            {reflect.Float64},
-	"String":            {reflect.String},
-	"String (duration)": {reflect.Struct}, // Duration
+// onto the Go types that satisfy them.
+var documentedTypes = map[string]func(reflect.Type) bool{
+	"Boolean":           kindIs(reflect.Bool),
+	"Integer":           kindIs(reflect.Int, reflect.Int64),
+	"Float":             kindIs(reflect.Float64),
+	"Number":            kindIs(reflect.Float64),
+	"String":            kindIs(reflect.String),
+	"String (duration)": func(t reflect.Type) bool { return t == reflect.TypeFor[Duration]() },
+	"List of strings":   sliceOf(reflect.String),
+	"List of rules":     sliceOf(reflect.Struct),
 }
 
-// yamlFields walks a struct and returns every leaf field by its dotted yaml
-// path, so a doc heading like `graph.give_up` can be resolved to a real type.
-func yamlFields(t reflect.Type, prefix string, out map[string]reflect.Type) {
-	for i := range t.NumField() {
-		f := t.Field(i)
-		tag, _, _ := strings.Cut(f.Tag.Get("yaml"), ",")
-		if tag == "" || tag == "-" {
-			continue
+// kindIs matches a type whose kind is one of kinds.
+func kindIs(kinds ...reflect.Kind) func(reflect.Type) bool {
+	return func(t reflect.Type) bool { return slices.Contains(kinds, t.Kind()) }
+}
+
+// sliceOf matches a list whose elements are of kind elem.
+func sliceOf(elem reflect.Kind) func(reflect.Type) bool {
+	return func(t reflect.Type) bool { return t.Kind() == reflect.Slice && t.Elem().Kind() == elem }
+}
+
+// configPaths walks Config and returns every leaf setting by its dotted yaml
+// path, with its Go type, and every section (a nested mapping such as
+// review.sonar) by its path. Duration is a leaf even though it is a struct:
+// it is documented as the string a user writes, not as its internals. A list
+// is a leaf too: its elements are described in the prose under its heading.
+func configPaths() (leaves map[string]reflect.Type, sections map[string]bool) {
+	leaves, sections = map[string]reflect.Type{}, map[string]bool{}
+	var walk func(t reflect.Type, prefix string)
+	walk = func(t reflect.Type, prefix string) {
+		for i := range t.NumField() {
+			f := t.Field(i)
+			tag, _, _ := strings.Cut(f.Tag.Get("yaml"), ",")
+			if tag == "" || tag == "-" {
+				continue
+			}
+			path := tag
+			if prefix != "" {
+				path = prefix + "." + tag
+			}
+			if f.Type.Kind() == reflect.Struct && f.Type != reflect.TypeFor[Duration]() {
+				sections[path] = true
+				walk(f.Type, path)
+				continue
+			}
+			leaves[path] = f.Type
 		}
-		path := tag
-		if prefix != "" {
-			path = prefix + "." + tag
-		}
-		// Duration is a leaf even though it is a struct: it is documented as
-		// the string a user writes, not as its internals.
-		if f.Type.Kind() == reflect.Struct && f.Type.Name() != "Duration" {
-			yamlFields(f.Type, path, out)
-			continue
-		}
-		out[path] = f.Type
 	}
+	walk(reflect.TypeFor[Config](), "")
+	return leaves, sections
+}
+
+// readFieldDocs parses docs/config.md, skipping the test when the file is not
+// there to read.
+func readFieldDocs(t *testing.T) map[string]fieldDoc {
+	t.Helper()
+	raw, err := os.ReadFile(docsPath)
+	if err != nil {
+		t.Skipf("docs/config.md unavailable: %v", err)
+	}
+	return parseFieldDocs(string(raw))
 }
 
 // The type a field is documented as must be the type it actually is.
@@ -129,51 +163,160 @@ func yamlFields(t reflect.Type, prefix string, out map[string]reflect.Type) {
 // config.Graph.GiveUp (how many fix attempts) with state.Fix.GiveUp (whether
 // the loop gave up). A reader following either would have written a config
 // the loader rejects.
+//
+// Every leaf must carry a **Type** line, at whatever heading level it sits.
+// This once read only ### headings, so the eight settings under review.sonar
+// and review.ai.mcp were never checked, and two of them were documented as
+// durations when one is a bool and the other a count of seconds.
 func TestDocumentedFieldTypesMatchTheStruct(t *testing.T) {
-	raw, err := os.ReadFile(docsPath)
-	if err != nil {
-		t.Skipf("docs/config.md unavailable: %v", err)
-	}
-
-	actual := map[string]reflect.Type{}
-	yamlFields(reflect.TypeOf(Config{}), "", actual)
-
-	var heading string
-	checked := 0
-	for _, line := range strings.Split(string(raw), "\n") {
-		if after, ok := strings.CutPrefix(line, "### `"); ok {
-			// A heading may carry a trailing qualifier after the closing
-			// backtick; the field path is what precedes it.
-			heading, _, _ = strings.Cut(after, "`")
+	docs := readFieldDocs(t)
+	leaves, _ := configPaths()
+	for _, path := range slices.Sorted(maps.Keys(leaves)) {
+		doc, documented := docs[path]
+		if !documented {
+			continue // TestEveryConfigFieldIsDocumented reports it.
+		}
+		if doc.Type == "" {
+			t.Errorf("docs/config.md:%d: %s has no **Type** line", doc.Line, path)
 			continue
 		}
-		after, ok := strings.CutPrefix(line, "**Type**: ")
-		if !ok || heading == "" {
-			continue
-		}
-		documented := strings.TrimSpace(strings.TrimSuffix(strings.TrimSpace(after), "  "))
-		field, known := actual[heading]
-		name := heading
-		heading = ""
-		if !known {
-			// Section headings that are not leaf fields (a whole block, or a
-			// conditional) are not type-checked here.
-			continue
-		}
-		checked++
-		want, recognised := documentedTypes[documented]
+		matches, recognised := documentedTypes[doc.Type]
 		if !recognised {
-			t.Errorf("%s: documented type %q is not one this test knows; add it to documentedTypes", name, documented)
+			t.Errorf("docs/config.md:%d: %s: documented type %q is not one this test knows; add it to documentedTypes",
+				doc.Line, path, doc.Type)
 			continue
 		}
-		if !slices.Contains(want, field.Kind()) {
-			t.Errorf("%s is documented as %q but is a %s in config.Config; a reader following the docs writes a config the loader rejects",
-				name, documented, field.Kind())
+		if !matches(leaves[path]) {
+			t.Errorf("docs/config.md:%d: %s is documented as %q but is a %s in Config; a reader following the docs writes a config the loader rejects",
+				doc.Line, path, doc.Type, leaves[path])
 		}
 	}
+}
 
-	if checked < 15 {
-		t.Fatalf("only type-checked %d fields; the heading or **Type** format changed and this guard has stopped guarding", checked)
+// fieldDoc is what docs/config.md says about one field: the attribute lines
+// written under a heading that names the field's dotted path in backticks.
+// An attribute the heading does not carry is the empty string.
+type fieldDoc struct {
+	// Line is the 1-based line of the heading, so a failure names a place.
+	Line int
+	// Type is the text after "**Type**: ".
+	Type string
+	// Default is the text after "**Default**: ".
+	Default string
+	// Valid is the text after "**Valid values**: ".
+	Valid string
+}
+
+// parseFieldDocs returns every heading in src that names a path in
+// backticks, keyed by that path, with the attribute lines written under it.
+//
+// A heading at any level counts, because the docs nest deeper sections one
+// level deeper: review.sonar.* sits under #### and review.ai.mcp.* under
+// #####. An attribute line belongs to the nearest heading above it until the
+// next heading of any level, and lines inside a fenced block are skipped, so
+// a shell comment in an example is not read as a heading. The first of a
+// repeated attribute wins.
+func parseFieldDocs(src string) map[string]fieldDoc {
+	docs := map[string]fieldDoc{}
+	current, inFence := "", false
+	for i, line := range strings.Split(src, "\n") {
+		if strings.HasPrefix(strings.TrimSpace(line), "```") {
+			inFence = !inFence
+			continue
+		}
+		if inFence {
+			continue
+		}
+		if path, ok := headingPath(line); ok {
+			current = path
+			if path != "" {
+				docs[path] = fieldDoc{Line: i + 1}
+			}
+			continue
+		}
+		if current == "" {
+			continue
+		}
+		doc := docs[current]
+		for _, attr := range []struct {
+			label string
+			field *string
+		}{
+			{"**Type**: ", &doc.Type},
+			{"**Default**: ", &doc.Default},
+			{"**Valid values**: ", &doc.Valid},
+		} {
+			if value, ok := strings.CutPrefix(line, attr.label); ok && *attr.field == "" {
+				*attr.field = strings.TrimSpace(value)
+			}
+		}
+		docs[current] = doc
 	}
-	t.Logf("type-checked %d documented fields against config.Config", checked)
+	return docs
+}
+
+// headingPath reports whether line is a markdown heading and, if the heading
+// opens with a backticked path, that path. A trailing qualifier after the
+// closing backtick is ignored.
+func headingPath(line string) (string, bool) {
+	text := strings.TrimLeft(line, "#")
+	if text == line || !strings.HasPrefix(text, " ") {
+		return "", false
+	}
+	quoted, ok := strings.CutPrefix(strings.TrimSpace(text), "`")
+	if !ok {
+		return "", true
+	}
+	path, _, _ := strings.Cut(quoted, "`")
+	return path, true
+}
+
+func TestParseFieldDocs(t *testing.T) {
+	tests := []struct {
+		name string
+		src  string
+		want map[string]fieldDoc
+	}{
+		{
+			name: "every attribute, markdown line breaks trimmed",
+			src:  "## `version`\n\n**Type**: Integer  \n**Default**: `1`  \n**Valid values**: `1`\n",
+			want: map[string]fieldDoc{"version": {Line: 1, Type: "Integer", Default: "`1`", Valid: "`1`"}},
+		},
+		{
+			name: "any heading level, with a qualifier after the path",
+			src:  "# Title\n\n##### `review.ai.mcp.mode` (if `review.mode == \"ai\"`)\n**Type**: String\n",
+			want: map[string]fieldDoc{"review.ai.mcp.mode": {Line: 3, Type: "String"}},
+		},
+		{
+			name: "a heading without a path ends the field above it",
+			src:  "### `graph.give_up`\n**Type**: Integer\n\n## Environment Variables\n**Type**: String\n",
+			want: map[string]fieldDoc{"graph.give_up": {Line: 1, Type: "Integer"}},
+		},
+		{
+			name: "a comment inside a fenced block is not a heading",
+			src:  "### `budget.max_usd`\n```bash\n# belay.yaml says max_usd: 10.0\n```\n**Default**: `5.00`\n",
+			want: map[string]fieldDoc{"budget.max_usd": {Line: 1, Default: "`5.00`"}},
+		},
+		{
+			name: "an insertion marker between fields changes nothing",
+			src:  "### `fanout.select`\n**Type**: String\n\n<!-- slice:output -->\n\n## `output`\n\n### `output.mode`\n**Type**: String\n",
+			want: map[string]fieldDoc{
+				"fanout.select": {Line: 1, Type: "String"},
+				"output":        {Line: 6},
+				"output.mode":   {Line: 8, Type: "String"},
+			},
+		},
+		{
+			name: "the first of a repeated attribute wins",
+			src:  "### `agent.mode`\n**Default**: `\"live\"`\n**Default**: `\"auto\"`\n",
+			want: map[string]fieldDoc{"agent.mode": {Line: 1, Default: "`\"live\"`"}},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if diff := cmp.Diff(tt.want, parseFieldDocs(tt.src)); diff != "" {
+				t.Errorf("parseFieldDocs (-want +got):\n%s", diff)
+			}
+		})
+	}
 }

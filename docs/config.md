@@ -195,17 +195,18 @@ Docker image to use when `review.sonar.runner == "docker"`. Example: `"sonarqube
 
 #### `review.sonar.quality_gate_wait`
 
-**Type**: String (duration)  
-**Default**: `"30s"`
+**Type**: Boolean  
+**Default**: `true`
 
-Time to wait for SonarQube to compute quality gate status after submitting analysis. If the gate is not ready after this timeout, analysis is marked failed.
+Whether the scanner waits for the SonarQube server to compute the quality gate, passed to it as `sonar.qualitygate.wait`. The gate is computed on the server, after the scan uploads its report, so the verdict belay acts on exists only if the scanner waits for it. With `false`, the scan uploads and exits without a verdict, and belay reports the review as undecided rather than as a pass.
 
 #### `review.sonar.quality_gate_timeout`
 
-**Type**: String (duration)  
-**Default**: `"10m"`
+**Type**: Integer  
+**Default**: `300`  
+**Minimum**: `1`
 
-Total time to wait for SonarQube analysis and quality gate computation before giving up.
+How long, in seconds, the scanner waits for the server's verdict, passed to it as `sonar.qualitygate.timeout`. It bounds only that wait: indexing, analysis and the upload come first, and belay allows the whole scan five minutes more than this before it stops the scanner. A gate still not computed when it runs out is reported as undecided, not as a failure, so it does not send the agent into the fix loop.
 
 ### `review.ai` (if `review.mode == "ai"`)
 
