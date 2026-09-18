@@ -16,7 +16,7 @@ This directory contains architecture decisions for belay, recorded to capture th
 | [0008](0008-local-linters-default.md) | Local Linters as Default Quality Gate; SonarQube Opt-In | Accepted | Zero-setup linters are default; SonarQube requires infrastructure. Cost: two review paths to maintain; linters miss semantic bugs. |
 | [0009](0009-record-replay-cassettes.md) | Record/Replay Cassettes for Zero-Cost CI | Accepted, amended 2026-09-06 | Tests record/replay MCP and Claude calls. CI costs zero. Cost: cassettes can drift; maintainer live-smoke test gates releases. |
 | [0010](0010-cli-designed-for-how-people-think.md) | The CLI is designed against a cognitive model, not a feature list | Accepted | Commands are designed against the six cognitive systems in Whalen's *Designing for How People Think*, so parallel contributors produce one coherent tool. |
-| 0011 | Cross-version safety for run state | Reserved (Wave 0b) | Schema-version bump plus a `requires` list, so a binary that cannot honour a run's control fields refuses it instead of silently dropping them. |
+| [0011](0011-cross-version-safety-for-run-state.md) | Cross-version safety for run state | Accepted | Schema version 2 plus a `requires` list of capabilities, so a binary that cannot honour a run's control fields refuses it instead of silently dropping them. Cost: v0.1.x cannot resume a run a later belay has saved. |
 | 0012 | Git worktrees for isolation; automatic promotion; git-native run output | Reserved (slice 1) | Will supersede 0004. |
 | 0013 | A second agent backend | Reserved (slice 5) | Will amend 0005. |
 | 0014 | Per-node model routing and the policy gate | Reserved (slice 4) | |
