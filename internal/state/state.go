@@ -34,8 +34,17 @@
 // Both on-disk documents carry a schema_version field. LoadState and
 // LoadManifest reject a version they do not recognize with a typed error
 // (VersionError, ManifestVersionError) unless a migration has been
-// registered for it; today neither package has one, since both schemas
-// are still at version 1.
+// registered for it.
+//
+// Both are at version 2, and the one registered migration takes either file
+// from version 1, which every release up to v0.1.4 wrote, to version 2 (see
+// migrateFromVersion1). Version 2 adds only the requires list described
+// below; every other field keeps its shape and meaning. The bump exists
+// because those releases accept version 1 and nothing else, and never read
+// requires: a run this belay has saved is one they refuse, rather than one
+// they resume after dropping whatever they cannot read. The cost is that
+// once this belay has saved a run, including one a released belay started,
+// no released belay can resume it.
 //
 // # Capabilities
 //
@@ -98,8 +107,10 @@ func cloneSlice[T any](s []T) []T {
 }
 
 // StateSchemaVersion is the schema version SaveState writes and the only
-// version LoadState accepts without a registered migration.
-const StateSchemaVersion = 1
+// version LoadState accepts without a registered migration. It is 2, not 1,
+// so that released belay refuses a state.json this one has written; see
+// "Schema versioning" in the package documentation.
+const StateSchemaVersion = 2
 
 // ErrUnsupportedStateVersion reports a state.json whose schema_version
 // LoadState does not know how to read and has no migration registered for.
@@ -127,10 +138,10 @@ func (e *VersionError) Unwrap() error { return ErrUnsupportedStateVersion }
 // reaches StateSchemaVersion.
 type Migration func(raw []byte) ([]byte, error)
 
-// stateMigrations holds no entries today: StateSchemaVersion is state.json's
-// only version so far. It exists so a future schema bump has somewhere to
-// register its upgrade path without changing decodeState's logic.
-var stateMigrations = map[int]Migration{}
+// stateMigrations holds every registered Migration, keyed by the version
+// it upgrades from. Version 1, which every released belay wrote, upgrades
+// to 2 by migrateFromVersion1.
+var stateMigrations = map[int]Migration{1: migrateFromVersion1}
 
 // State is the blackboard graph nodes read and the dispatcher patches
 // after every node — belay's working memory for one run.

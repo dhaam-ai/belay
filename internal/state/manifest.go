@@ -22,8 +22,9 @@ import (
 )
 
 // ManifestSchemaVersion is the schema version SaveManifest writes and the
-// only version LoadManifest accepts without a registered migration.
-const ManifestSchemaVersion = 1
+// only version LoadManifest accepts without a registered migration. It is 2
+// for the same reason StateSchemaVersion is.
+const ManifestSchemaVersion = 2
 
 // ErrUnsupportedManifestVersion reports a manifest.json whose
 // schema_version LoadManifest does not know how to read and has no
@@ -49,9 +50,11 @@ func (e *ManifestVersionError) Unwrap() error { return ErrUnsupportedManifestVer
 // schema version forward, analogous to Migration.
 type ManifestMigration func(raw []byte) ([]byte, error)
 
-// manifestMigrations holds no entries today: ManifestSchemaVersion is
-// manifest.json's only version so far.
-var manifestMigrations = map[int]ManifestMigration{}
+// manifestMigrations holds every registered ManifestMigration, keyed by
+// the version it upgrades from. Version 1, which every released belay
+// wrote, upgrades to 2 by migrateFromVersion1, the same step state.json
+// takes.
+var manifestMigrations = map[int]ManifestMigration{1: migrateFromVersion1}
 
 // ErrUnknownRunStatus reports a string that does not name a RunStatus.
 var ErrUnknownRunStatus = errors.New("state: unknown run status")
