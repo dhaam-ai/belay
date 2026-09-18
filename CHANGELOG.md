@@ -8,6 +8,21 @@ that only `pkg/belay` carries a compatibility promise. Everything under
 
 ## Unreleased
 
+### Fixed
+
+- **The configuration reference now states the defaults and values belay
+  actually uses.** docs/config.md had drifted on nine defaults, among them
+  `agent.max_turns` (30, not 5), `graph.max_steps` (60, not 20),
+  `graph.node_timeout` (15m, not 10m) and `budget.max_usd` (5, not 10). It
+  listed values the loader rejects for `agent.mode`, `test.runner`,
+  `review.fail_on` and `review.ai.mcp.mode`, and documented
+  `review.sonar.quality_gate_wait` and `quality_gate_timeout` as durations
+  when they are a boolean and a number of seconds. It also said unknown keys
+  are only warnings, when they are errors, and that environment variables
+  and flags override settings, when only a `--config` file does. Tests now
+  check every documented setting's type, default and valid values against
+  the code, and fail when a setting has no entry.
+
 ## v0.1.4 — 2026-09-17
 
 ### Fixed
