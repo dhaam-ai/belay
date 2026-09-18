@@ -198,6 +198,28 @@ type Agent struct {
 	Mode AgentMode `yaml:"mode"`
 }
 
+// ModelFor returns the model the backend is told to use when the node named
+// node calls the agent. Today that is a.Model for every node.
+//
+// It exists so that routing, sending different nodes of one run to
+// different models, has exactly one place to live. Every node that builds an
+// agent request asks here instead of reading a.Model itself, so routing will
+// change this body and no node. It takes the node's name rather than a graph
+// type because internal/graph imports this package; callers pass the
+// graph.Node* constants.
+//
+// It deliberately does not validate node. An unknown name, the empty string
+// included, gets a.Model like any other rather than an empty model, which is
+// how an agent request asks for the backend's own default: a model the user
+// never chose, and one the cost estimator has no name to price by. The
+// result depends only on a and node, so a node the dispatcher re-runs on
+// resume asks for the same model the interrupted attempt did.
+//
+//nolint:revive // node is unused until routing lands; it is the seam's whole point, so it stays named.
+func (a Agent) ModelFor(node string) string {
+	return a.Model
+}
+
 // Graph configures the dispatcher's state machine.
 type Graph struct {
 	// GiveUp caps how many times the fix loop may retry a failing gate.
