@@ -1,4 +1,4 @@
-package config_test
+package config
 
 import (
 	"os"
@@ -7,8 +7,6 @@ import (
 	"slices"
 	"strings"
 	"testing"
-
-	"github.com/dhaam-ai/belay/internal/config"
 )
 
 // docsPath is docs/config.md relative to this package.
@@ -65,7 +63,7 @@ func TestDocumentedExamplesActuallyLoad(t *testing.T) {
 			if err := os.WriteFile(path, []byte(b.Body), 0o600); err != nil {
 				t.Fatalf("write: %v", err)
 			}
-			cfg, err := config.Load(config.Options{Path: path})
+			cfg, err := Load(Options{Path: path})
 			if err != nil {
 				t.Fatalf("docs/config.md:%d does not load:\n%v\n\n--- block ---\n%s", b.Line, err, b.Body)
 			}
@@ -95,7 +93,7 @@ var documentedTypes = map[string][]reflect.Kind{
 	"Float":             {reflect.Float64},
 	"Number":            {reflect.Float64},
 	"String":            {reflect.String},
-	"String (duration)": {reflect.Struct}, // config.Duration
+	"String (duration)": {reflect.Struct}, // Duration
 }
 
 // yamlFields walks a struct and returns every leaf field by its dotted yaml
@@ -138,7 +136,7 @@ func TestDocumentedFieldTypesMatchTheStruct(t *testing.T) {
 	}
 
 	actual := map[string]reflect.Type{}
-	yamlFields(reflect.TypeOf(config.Config{}), "", actual)
+	yamlFields(reflect.TypeOf(Config{}), "", actual)
 
 	var heading string
 	checked := 0
