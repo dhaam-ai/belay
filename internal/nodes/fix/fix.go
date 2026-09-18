@@ -195,7 +195,7 @@ func (n *Node) Run(ctx context.Context, rc *graph.RunContext) (graph.Result, err
 		WorkDir:      dir,
 		AllowedTools: editTools(),
 		MaxTurns:     rc.Config.Agent.MaxTurns,
-		Model:        rc.Config.Agent.Model,
+		Model:        rc.Config.Agent.ModelFor(graph.NodeFix),
 		// Resuming the code node's session is what makes this a fix
 		// rather than a fresh, contextless rewrite: the agent already
 		// knows what it wrote and why.

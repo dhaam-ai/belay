@@ -177,7 +177,7 @@ func buildRequest(rc *graph.RunContext, workDir, plan string) belay.AgentRequest
 		WorkDir:      workDir,
 		AllowedTools: editTools(),
 		MaxTurns:     rc.Config.Agent.MaxTurns,
-		Model:        rc.Config.Agent.Model,
+		Model:        rc.Config.Agent.ModelFor(graph.NodeCode),
 		SessionID:    rc.State.Code.SessionID,
 	}
 }
