@@ -10,6 +10,7 @@ import (
 	"testing"
 
 	"github.com/google/go-cmp/cmp"
+	"gopkg.in/yaml.v3"
 )
 
 // docsPath is docs/config.md relative to this package.
@@ -220,6 +221,125 @@ func TestDocumentedFieldTypesMatchTheStruct(t *testing.T) {
 				doc.Line, path, doc.Type, leaves[path])
 		}
 	}
+}
+
+// Every setting's documented default must be the value defaults.go sets.
+//
+// A key left out of belay.yaml takes its default, so the **Default** line is
+// the one a reader relies on most, and nothing else checked it. It had
+// drifted on eleven settings: agent.max_turns was documented as 5 when it is
+// 30, graph.max_steps as 20 when it is 60, graph.node_timeout as 10m when it
+// is 15m, and budget.max_usd as 10 when it is 5, so a reader budgeting a run
+// from the docs expected twice the ceiling belay enforces.
+//
+// The default is written as a YAML literal in the first pair of backticks. It
+// is decoded by the real loader onto an empty Config and compared through
+// Snapshot, the canonical text form a run manifest records, so `5.00` and
+// the 5 defaults.go holds agree, as do "900s" and 15m, because each pair
+// drives an identical run.
+func TestDocumentedDefaultsMatchCode(t *testing.T) {
+	docs := readFieldDocs(t)
+	leaves, _ := configPaths()
+	want := Default().Snapshot()
+	for _, path := range slices.Sorted(maps.Keys(leaves)) {
+		doc, documented := docs[path]
+		if !documented {
+			continue // TestEveryConfigFieldIsDocumented reports it.
+		}
+		literals := backticked(doc.Default)
+		if len(literals) == 0 {
+			t.Errorf("docs/config.md:%d: %s has no **Default** line with its value in backticks", doc.Line, path)
+			continue
+		}
+		var got Config
+		if err := got.Merge([]byte(yamlSetting(path, literals[0])), "docs/config.md"); err != nil {
+			t.Errorf("docs/config.md:%d: %s: documented default `%s` does not load: %v", doc.Line, path, literals[0], err)
+			continue
+		}
+		if got.Snapshot()[path] != want[path] {
+			t.Errorf("docs/config.md:%d: %s is documented as defaulting to `%s`, but defaults.go sets %q",
+				doc.Line, path, literals[0], want[path])
+		}
+	}
+}
+
+// A field's documented **Valid values** must be exactly the set the validator
+// accepts, and only a field the validator checks as a closed set may carry
+// such a line.
+//
+// Four lists had drifted, one of them entirely: agent.mode was documented as
+// auto, streaming or batch, modes belay has never had, when it is live,
+// record or replay. test.runner, review.fail_on and review.ai.mcp.mode each
+// named values the loader rejects and missed values it accepts, so a reader
+// who wrote a documented value had the config refused, and one who needed an
+// undocumented value never learned it existed.
+//
+// "Valid values" promises that the loader rejects anything else. A setting
+// whose names are checked only once a run uses them, such as agent.backend or
+// review.sonar.runner, lists them as **Shipped values** instead, so the docs
+// never promise a load-time check that does not happen. Order is not
+// compared: the docs may group values the way their prose explains them.
+func TestDocumentedEnumValuesMatchTheValidator(t *testing.T) {
+	docs := readFieldDocs(t)
+	closed := map[string]bool{}
+	for _, field := range enumFields {
+		closed[field.name] = true
+		doc, documented := docs[field.name]
+		if !documented {
+			continue // TestEveryConfigFieldIsDocumented reports it.
+		}
+		var got []string
+		for _, literal := range backticked(doc.Valid) {
+			var value string
+			if err := yaml.Unmarshal([]byte(literal), &value); err != nil {
+				t.Errorf("docs/config.md:%d: %s: valid value `%s` is not a YAML string: %v", doc.Line, field.name, literal, err)
+				continue
+			}
+			got = append(got, value)
+		}
+		if !slices.Equal(slices.Sorted(slices.Values(got)), slices.Sorted(slices.Values(field.allowed))) {
+			t.Errorf("docs/config.md:%d: %s documents valid values [%s], but the validator accepts [%s]",
+				doc.Line, field.name, strings.Join(got, ", "), strings.Join(field.allowed, ", "))
+		}
+	}
+	for _, path := range slices.Sorted(maps.Keys(docs)) {
+		if doc := docs[path]; doc.Valid != "" && !closed[path] {
+			t.Errorf("docs/config.md:%d: %s lists **Valid values**, but the loader accepts any value there; "+
+				"call them **Shipped values**, or make the field a closed set in enumFields", doc.Line, path)
+		}
+	}
+}
+
+// backticked returns the text inside each pair of backticks in s, in order.
+func backticked(s string) []string {
+	var spans []string
+	for {
+		_, rest, ok := strings.Cut(s, "`")
+		if !ok {
+			return spans
+		}
+		span, after, ok := strings.Cut(rest, "`")
+		if !ok {
+			return spans
+		}
+		spans = append(spans, span)
+		s = after
+	}
+}
+
+// yamlSetting renders a document that sets the dotted path to literal, one
+// nested mapping per segment.
+func yamlSetting(path, literal string) string {
+	var b strings.Builder
+	segments := strings.Split(path, ".")
+	for depth, segment := range segments {
+		b.WriteString(strings.Repeat("  ", depth) + segment + ":")
+		if depth == len(segments)-1 {
+			b.WriteString(" " + literal)
+		}
+		b.WriteByte('\n')
+	}
+	return b.String()
 }
 
 // fieldDoc is what docs/config.md says about one field: the attribute lines
