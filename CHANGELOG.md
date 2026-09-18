@@ -8,6 +8,21 @@ that only `pkg/belay` carries a compatibility promise. Everything under
 
 ## Unreleased
 
+### Changed
+
+- **belay v0.1.x can no longer resume a run this version has saved.** belay
+  ignores fields it does not know in a run's state.json and manifest.json,
+  and saves the run without them. Once runs carry settings that change what
+  they do, an older belay resuming one would drop those settings without a
+  word. Both files now carry a `requires` list naming what a run depends on,
+  and a belay that lacks something on the list refuses the run by name and
+  says to upgrade. Nothing adds to the list yet. v0.1.x never reads it, so
+  both files also move to schema version 2, which v0.1.x refuses: its
+  `belay runs` shows such a run as "unsupported manifest version 2", and its
+  `belay resume` does not offer it. Runs started by v0.1.x still resume, and
+  are saved at version 2 from then on. With two belay installs, resume runs
+  with the newer one. ADR-0011 records the decision.
+
 ### Fixed
 
 - **The configuration reference now states the defaults and values belay
