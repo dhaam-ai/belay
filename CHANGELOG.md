@@ -6,6 +6,8 @@ All notable changes to belay are recorded here. The format follows
 that only `pkg/belay` carries a compatibility promise. Everything under
 `internal/` may change in any release.
 
+## Unreleased
+
 ## v0.1.4 — 2026-09-17
 
 ### Fixed

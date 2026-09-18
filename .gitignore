@@ -30,3 +30,6 @@
 vendor/
 # ...except in the fixture that proves internal/detect skips vendor/.
 !internal/detect/testdata/skiplist/vendor/
+
+# Per-slice isolated worktrees
+.worktrees/
