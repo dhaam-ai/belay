@@ -181,6 +181,10 @@ type AgentInfo struct {
 type Manifest struct {
 	// SchemaVersion is this document's schema version.
 	SchemaVersion int `json:"schema_version"`
+	// Requires lists the capabilities this document's fields depend on,
+	// sorted and without duplicates; see "Capabilities" in the package
+	// documentation. Empty, never nil, for a run that depends on none.
+	Requires []string `json:"requires"`
 	// RunID is this run's identifier — also the name of its directory
 	// under .belay/runs/. See NewRunID.
 	RunID string `json:"run_id"`
@@ -214,8 +218,8 @@ type Manifest struct {
 }
 
 // NewManifest returns the manifest for a freshly started run: SchemaVersion
-// current, Status running, Step zero, CreatedAt and UpdatedAt both now, and
-// Budget seeded from cfg.Budget.MaxUSD.
+// current, Requires empty, Status running, Step zero, CreatedAt and
+// UpdatedAt both now, and Budget seeded from cfg.Budget.MaxUSD.
 //
 // cfg's Snapshot is passed through RedactSnapshot before being embedded.
 // internal/config's own documentation states that a configuration file
@@ -234,6 +238,7 @@ func NewManifest(now time.Time, runID, workspace, goal string, cfg config.Config
 	}
 	return Manifest{
 		SchemaVersion:  ManifestSchemaVersion,
+		Requires:       []string{},
 		RunID:          runID,
 		CreatedAt:      now,
 		UpdatedAt:      now,
@@ -256,7 +261,8 @@ func NewManifest(now time.Time, runID, workspace, goal string, cfg config.Config
 func (m *Manifest) Touch(now time.Time) { m.UpdatedAt = now }
 
 // LoadManifest reads and decodes the manifest.json at path, applying any
-// registered migration exactly as LoadState does for state.json.
+// registered migration and checking the document's requires list exactly
+// as LoadState does for state.json.
 func LoadManifest(path string) (Manifest, error) {
 	raw, err := readFile(path)
 	if err != nil {
@@ -287,6 +293,10 @@ func decodeManifest(raw []byte) (Manifest, error) {
 			return Manifest{}, fmt.Errorf("state: migrate manifest.json from version %d: %w", probe.SchemaVersion, err)
 		}
 		raw = migrated
+	}
+
+	if err := checkRequires("manifest.json", raw); err != nil {
+		return Manifest{}, err
 	}
 
 	var m Manifest
