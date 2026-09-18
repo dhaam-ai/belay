@@ -153,6 +153,35 @@ func readFieldDocs(t *testing.T) map[string]fieldDoc {
 	return parseFieldDocs(string(raw))
 }
 
+// Every setting a user can write must have a heading in docs/config.md, at any
+// level, and every heading that names a setting must name one that exists.
+//
+// The first direction is what a new field needs: the loader accepts it the
+// moment it is added to Config, so without this a setting ships that nobody
+// can discover except by reading the source. The second catches the rename
+// or removal that leaves a heading documenting a key the strict loader now
+// rejects. A heading counts as naming a setting when its path starts with a
+// top-level key; headings such as `ANTHROPIC_API_KEY` are left alone.
+func TestEveryConfigFieldIsDocumented(t *testing.T) {
+	docs := readFieldDocs(t)
+	leaves, sections := configPaths()
+	for _, path := range slices.Sorted(maps.Keys(leaves)) {
+		if _, ok := docs[path]; !ok {
+			t.Errorf("%s is a setting in Config but has no heading in docs/config.md; add one with its **Type**, **Default** and what it does", path)
+		}
+	}
+	for _, path := range slices.Sorted(maps.Keys(docs)) {
+		top, _, _ := strings.Cut(path, ".")
+		_, isTopLeaf := leaves[top]
+		if !sections[top] && !isTopLeaf {
+			continue
+		}
+		if _, ok := leaves[path]; !ok && !sections[path] {
+			t.Errorf("docs/config.md:%d: %s is documented but is not a setting in Config", docs[path].Line, path)
+		}
+	}
+}
+
 // The type a field is documented as must be the type it actually is.
 //
 // TestDocumentedExamplesActuallyLoad only validates whole YAML examples, so a
