@@ -41,6 +41,9 @@ func goWorkspace(t *testing.T) string {
 // writeConfig drops a belay.yaml into dir.
 func writeConfig(t *testing.T, dir, body string) {
 	t.Helper()
+	// gosec's taint analysis cannot see that dir is always a t.TempDir() and
+	// that the name is a constant, so it reads this as attacker-controlled.
+	//nolint:gosec // G703: dir comes from t.TempDir(); config.ProjectFile is a constant.
 	if err := os.WriteFile(filepath.Join(dir, config.ProjectFile), []byte(body), 0o600); err != nil {
 		t.Fatalf("write %s: %v", config.ProjectFile, err)
 	}
