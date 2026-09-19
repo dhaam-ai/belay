@@ -27,7 +27,7 @@ The four product pillars are:
 
 **State**: The run's persistent state lives in `.belay/runs/<run-id>/manifest.json`, a JSON file written after every node completes (see `internal/state/manifest.go`). It contains the goal, the current state (accumulated patches from all completed nodes), configuration, and budget tracking. The dispatcher reads it on resume to reconstruct what happened.
 
-**Journal**: An append-only NDJSON file (`.belay/runs/<run-id>/belay.journal`) records every state transition. Each line is a Record (see `internal/journal/record.go`):
+**Journal**: An append-only NDJSON file (`.belay/runs/<run-id>/journal.ndjson`) records every state transition. Each line is a Record (see `internal/journal/record.go`):
 ```
 {"seq":1,"event":"run_started","ts":"2026-08-29T10:31:00Z"}
 {"seq":2,"attempt":1,"node":"plan","event":"node_started","ts":"2026-08-29T10:31:00.4Z"}
@@ -82,7 +82,7 @@ All adapters are injected at dispatcher creation time, making the entire graph b
 
 By applying first, a crash can leave an applied patch with no journal record (resume runs the node twice, idempotent because Patch is absolute), but a crash can never leave a journal record whose patch did not land.
 
-**Graph Definition**: A directed graph defined in config, with nodes like plan, approve, code, write, test, fix, review and terminal node END. Edges enforce ordering (e.g., code must precede test). The dispatcher consults this to validate that a node's Next is reachable (see `internal/graph` node implementations).
+**Graph Definition**: The graph is built in code, not read from config. `nodes.Default` (`internal/nodes/wire.go`) registers plan, approve, code, write, test, fix and review, and `nodes.Route` gives the order a run walks them in. No edge list exists: each node names its successor in its Result's `Next`, and the dispatcher looks that name up in the registry. A name no node has fails the run with `graph.ErrUnknownNode`, and `graph.End` finishes it. belay.yaml changes the graph in two ways only: `graph.approval` decides whether plan routes to approve or straight to code, and `fanout.enabled` registers fanout and join, off the route.
 
 **Fanout/Join**: The fanout and join nodes exist and are unit-tested (`internal/nodes/fanout`, `internal/nodes/join`), but no run reaches them:
 1. No node returns Next="fanout". `nodes.Default` registers fanout and join only when `fanout.enabled` is true, and even then `nodes.Route` leaves them off the route, so turning fanout on changes nothing a run does.
@@ -106,7 +106,7 @@ The critical invariant: two conforming adapters produce reports that serialize t
 
 The graph acts only on `Gate`: if GateFail, the run branches to the `fix` node (bounded by a loop counter); if GatePass, the run proceeds to the next phase; if GateError, the run aborts (the tool could not reach a verdict, not "the code is bad").
 
-**Budget Ledger** (see `internal/budget/budget.go`): Day-one constraint (ADR-0007). Every node's Usage is added to a cumulative budget. When total USD crosses the configured limit (belay.yaml review.budget_limit_usd), the dispatcher returns an error wrapping belay.ErrBudgetExceeded and aborts the run.
+**Budget Ledger** (see `internal/budget/budget.go`): Day-one constraint (ADR-0007). Every node's Usage is added to a cumulative budget. Before each node the dispatcher checks the total against `budget.max_usd` and `budget.max_tokens` in belay.yaml. Once either is exceeded, `budget.on_exceed` decides: `abort`, the default, ends the run with an error wrapping belay.ErrBudgetExceeded; `warn` logs the overrun and carries on.
 
 Usage.Estimated reports whether USD was computed from actual backend costs or estimated from a fallback table (belay.Usage.Estimated); callers can log differently for estimated costs.
 
@@ -114,14 +114,16 @@ Usage.Estimated reports whether USD was computed from actual backend costs or es
 
 **Config** (see `internal/config/config.go` and docs/config.md): belay.yaml defines:
 - `agent`: which backend to use (e.g., "claude-code")
-- `review`: quality-gate mode ("lint", "sonar-server", "sonar-docker"), severity thresholds (fail_on), budget limits
-- `runner`: test toolchain (auto-detected or explicit)
-- `graph`: node timeout, max retry attempts, max total steps
+- `review`: quality-gate mode ("lint", "sonar", "ai"), the severity that fails the gate (fail_on), and the settings for the SonarQube scanner and the AI reviewer
+- `test`: test toolchain (auto-detected or explicit)
+- `graph`: the approval gate, fix-loop limit (give_up), max total steps, node timeout
+- `budget`: spend ceilings in USD and tokens, and what to do on reaching one
 - `fanout`: best-of-N candidates, including `fanout.isolator`, whose only value is `dircopy`. No run reaches the fanout node, so none of these settings changes what a run does
 
-**CLI** (in cmd/ — not in scope for this task but referenced via internal/cli):
-- `belay run --config belay.yaml <repo>`: start a new run
+**CLI** (`cmd/belay`, implemented in `internal/cli`):
+- `belay run "<what you want built>"`: start a new run. `--workspace` names the repository, and `--config` adds a settings file on top of belay.yaml
 - `belay resume <run-id>`: continue a paused or crashed run
+- `belay runs`: list the workspace's runs
 - `belay timeline <run-id>`: inspect the journal and manifest
 - Config is validated on load; invalid settings abort before any work starts.
 
@@ -226,11 +228,12 @@ The dispatcher is single-threaded; it processes phases sequentially. This simpli
 ## Testing & Conformance
 
 **Test Layout**: Each package has its own test suite:
-- Node tests (internal/graph/*_test.go): table-driven tests of node logic against mocked adapters (pkg/belay/belaytest fakes)
+- Node tests (internal/nodes/*/*_test.go): table-driven tests of each node's logic against mocked adapters (pkg/belay/belaytest fakes)
 - Adapter tests (internal/linter/*_test.go, internal/runner/*_test.go, etc.): verify adapters parse tool output correctly, using fixtures instead of invoking real tools
-- Dispatcher tests (internal/graph/dispatcher_test.go): full end-to-end runs with recorded cassettes (see ADR-0009)
+- Dispatcher tests (internal/graph/*_test.go): the dispatcher and registry, driven by scripted fake nodes
+- End-to-end tests (test/e2e, build tag `e2e`): the real dispatcher and the nodes `nodes.Default` wires, on a real run directory, with belaytest fakes for the agent, test runner and linter
 
-**Cassette Recording** (ADR-0009): External interactions (HTTP calls, agent invocations, tool output) are recorded as cassettes (YAML files in testdata/) and replayed in CI. Run locally with `belay test --record` to capture; CI replays without network. This makes tests fast, deterministic, and network-independent.
+**Cassette Recording** (ADR-0009): Agent calls can be recorded to a cassette and replayed. With `agent.mode: record`, belay calls the agent for real and saves every exchange to `<workspace>/.belay/cassette.json`, or the file `--cassette` names; with `agent.mode: replay` it answers every agent call from the cassette, starting no agent process and spending nothing. `internal/agent/replay` implements this as a decorator over `belay.AgentBackend`, so only agent calls are recorded, not test or linter runs.
 
 **Conformance Suite**: All linter implementations must:
 - Detect the right project type (Detect(dir) → bool)
