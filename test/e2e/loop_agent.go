@@ -61,13 +61,17 @@ func loopCodeResponse(sessionID string, files ...string) belay.AgentResponse {
 	}
 }
 
-// loopFixResponse is what a real coding agent's fix-node turn looks like.
-// The fix node never parses its response for a changed-files block — it
-// only archives the exchange as evidence — so this carries prose alone, the
-// same way a real reply that made no further reported change still would.
-func loopFixResponse(sessionID string, attempt int) belay.AgentResponse {
+// loopFixResponse is what a real coding agent's fix-node turn looks like: a
+// prose summary, followed by a changed-files block naming files when any are
+// given. With none it is prose alone, a reply that reports no change, which
+// leaves the run's recorded change set as it was.
+func loopFixResponse(sessionID string, attempt int, files ...string) belay.AgentResponse {
+	text := fmt.Sprintf("Fix attempt %d: adjusted the implementation to address the reported failure.", attempt)
+	if len(files) > 0 {
+		text += "\n\n" + loopChangedFilesBlock(files...)
+	}
 	return belay.AgentResponse{
-		Text:      fmt.Sprintf("Fix attempt %d: adjusted the implementation to address the reported failure.", attempt),
+		Text:      text,
 		SessionID: sessionID,
 		Turns:     2,
 		Usage:     belay.Usage{InputTokens: 900, OutputTokens: 260, USD: 0.03},

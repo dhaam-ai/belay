@@ -102,7 +102,8 @@ type promptInput struct {
 	// Test and Review are the blackboard's failure records.
 	Test   state.Test
 	Review state.Review
-	// ChangedFiles is what the code node reported touching.
+	// ChangedFiles is what the run has recorded as changed: the files the
+	// code node reported, and those every earlier repair reported.
 	ChangedFiles []string
 }
 

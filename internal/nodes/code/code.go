@@ -40,7 +40,8 @@
 // escapes the workspace, and a file the agent changed but did not list is
 // recorded nowhere and invisible to everything downstream. A unified diff
 // is still harvested as a fallback when a backend volunteers one; see
-// changeSet for the precedence, and cleanPath for what is refused outright.
+// ParseChangedFiles for the precedence, and cleanPath for what is refused
+// outright.
 //
 // # Session reuse
 //
@@ -287,7 +288,7 @@ func (*Node) Run(ctx context.Context, rc *graph.RunContext) (graph.Result, error
 		return graph.Result{}, err
 	}
 
-	files, err := changeSet(resp.Text)
+	files, err := ParseChangedFiles(resp.Text)
 	if err != nil {
 		return graph.Result{}, err
 	}

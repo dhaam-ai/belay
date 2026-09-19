@@ -22,7 +22,7 @@ const (
 const fence = "```"
 
 // changedFilesTag is the info string on the fenced block the prompt asks for
-// and that parseChangedFiles reads back.
+// and that ParseChangedFiles reads back.
 //
 // It is deliberately not a language name. No syntax highlighter claims
 // "changed-files", so a block carrying it cannot be something a model

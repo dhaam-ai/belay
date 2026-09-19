@@ -43,6 +43,51 @@
 // again much later inherits a nearly-exhausted budget and gives up almost
 // immediately; that is a cross-node contract this package depends on and
 // cannot enforce alone.
+//
+// # A repair adds to the files the run has changed
+//
+// State.Code.ChangedFiles is the run's record of which files its change
+// touches. The review node hands it to a Reviewer, and this node's prompt
+// lists it back to the agent. A repair edits the workspace too, so Run reads
+// the changed-files block from the reply, with the code node's own parser
+// (code.ParseChangedFiles), and sets ChangedFiles to the union of the files
+// already recorded and the files the repair reports: sorted, and each listed
+// once. Code's other fields are carried through unchanged, because
+// Patch.Code replaces the whole struct.
+//
+// This node forms the union, not the write node. write verifies a claim
+// against the disk; belay keeps no pre-change baseline, so write has no way
+// to learn what a repair touched except from a claim, and the only claim is
+// the reply this node receives. For write to form it, this node would have to
+// pass its report along in a second blackboard field that only write reads,
+// and every repair would have to route through write, which changes the
+// graph and what a repair costs against graph.max_steps. Neither would tell
+// belay anything this node does not already know.
+//
+// It is a union, never a replacement. A repair's reply names what that
+// repair touched, not what the run did, and replacing the list with it would
+// drop the code node's files from the record while their edits sit on disk.
+//
+// It is sorted and each file listed once so that a re-run lands on the same
+// list. Patch fields are absolute sets, and a crash can come after the
+// dispatcher applied this node's Patch but before it journalled the finish.
+// The re-run then starts from a list that already holds the repair's files,
+// and the union of that with the same report is the same list, where an
+// append would grow it and keeping arrival order could reorder it. A crash
+// before the Patch was applied re-runs from the list as it was, and lands in
+// the same place.
+//
+// Comparing the workspace before and after the agent call would not depend
+// on the agent reporting honestly, but it does not converge. A re-run after a
+// crash starts from a tree the first attempt already edited, so a file that
+// attempt changed shows no change, and would drop out of the list.
+//
+// What this node does not do is check the reported paths against the disk.
+// fix routes straight to test, so write never sees them. They pass the checks
+// the code node applies to a path as written, so no absolute path, ".."
+// segment or backslash gets in, and a reply that fails one is refused whole,
+// as the code node refuses one. Whether a path is a regular file, or a
+// symlink out of the tree, is a question about the disk that only write asks.
 package fix
 
 import (
@@ -51,9 +96,11 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"slices"
 
 	"github.com/dhaam-ai/belay/internal/graph"
 	"github.com/dhaam-ai/belay/internal/journal"
+	"github.com/dhaam-ai/belay/internal/nodes/code"
 	"github.com/dhaam-ai/belay/internal/state"
 	"github.com/dhaam-ai/belay/pkg/belay"
 )
@@ -130,12 +177,17 @@ func (n *Node) Name() string { return graph.NodeFix }
 // failed is an outcome the graph understands. Below the cap it builds a
 // prompt from the actual failure, resumes the coding agent's session,
 // writes prompt.txt and response.json, and routes back to the test node
-// with State.Fix.Attempts set to its new total.
+// with State.Fix.Attempts set to its new total and State.Code.ChangedFiles
+// grown by the files the repair reports (see the package documentation).
 //
 // A non-nil error means the attempt could not happen at all — no agent, no
 // failure to repair, an unwritable run directory, or a backend that failed.
 // Backend errors are wrapped, so errors.Is against belay.ErrToolchainMissing
-// and friends still answers correctly at the dispatcher.
+// and friends still answers correctly at the dispatcher. A reply whose
+// changed-file report names an unusable path is an error too, wrapping
+// code.ErrFileList, for the code node's reason: the fix loop repairs code,
+// and no edit repairs a report of which files were touched. By then the
+// exchange is archived, and the edits it describes stay on disk.
 func (n *Node) Run(ctx context.Context, rc *graph.RunContext) (graph.Result, error) {
 	if rc == nil {
 		return graph.Result{}, ErrNilRunContext
@@ -211,20 +263,46 @@ func (n *Node) Run(ctx context.Context, rc *graph.RunContext) (graph.Result, err
 		return graph.Result{}, err
 	}
 
+	reported, err := code.ParseChangedFiles(resp.Text)
+	if err != nil {
+		return graph.Result{}, fmt.Errorf("fix: the reply's changed-file report: %w", err)
+	}
+	changed := rc.State.Code
+	changed.ChangedFiles = unionFiles(rc.State.Code.ChangedFiles, reported)
+
 	log.Info("fix attempt completed",
 		"attempt", attempt, "give_up", giveUp, "cause", c.String(),
-		"session_resumed", req.SessionID != "", "usd", resp.Usage.USD)
+		"session_resumed", req.SessionID != "", "reported_files", len(reported),
+		"usd", resp.Usage.USD)
 
 	return graph.Result{
 		Next:   graph.NodeTest,
 		Status: journal.StatusOK,
-		Patch:  state.Patch{Fix: &state.Fix{Attempts: attempt, GiveUp: false}},
+		Patch: state.Patch{
+			Code: &changed,
+			Fix:  &state.Fix{Attempts: attempt, GiveUp: false},
+		},
 		// Returned, never dropped: the fix loop is the most expensive part
 		// of a run, and usage the budget guard never sees is spend it
 		// cannot stop.
 		Usage: resp.Usage,
 		Note:  fmt.Sprintf("fix attempt %d of %d: %s", attempt, giveUp, causeNote(c, rc.State)),
 	}, nil
+}
+
+// unionFiles returns the files recorded and the files reported, sorted and
+// each listed once; see the package documentation for why.
+//
+// It builds a new slice rather than appending to recorded, which is the
+// RunContext's snapshot of the blackboard: sorting that in place would reorder
+// the dispatcher's own copy. Cloning also keeps a nil list nil and an empty
+// one empty when nothing is reported, so a reply that reports nothing never
+// turns the write node's [] into null in state.json.
+func unionFiles(recorded, reported []string) []string {
+	out := slices.Clone(recorded)
+	out = append(out, reported...)
+	slices.Sort(out)
+	return slices.Compact(out)
 }
 
 // writeResponse archives the agent's reply next to the prompt that caused

@@ -5,8 +5,12 @@ import (
 	"strings"
 )
 
-// changeSet resolves the set of repository-relative paths the reply reports
-// as changed.
+// ParseChangedFiles resolves the set of repository-relative paths an agent's
+// reply reports as changed.
+//
+// It is exported for the fix node, which reads the same block from a
+// repair's reply. One parser holds every reply to one set of rules, whichever
+// node it answered, so a path this node refuses is refused there too.
 //
 // # Precedence
 //
@@ -36,7 +40,7 @@ import (
 //
 // The returned slice is nil when nothing was reported, so the caller can
 // distinguish "reported nothing" from "reported an empty set".
-func changeSet(text string) ([]string, error) {
+func ParseChangedFiles(text string) ([]string, error) {
 	if raw, ok := changedFilesBlock(text); ok {
 		paths, err := cleanPaths(raw, sourceBlock)
 		if err != nil {
