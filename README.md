@@ -357,7 +357,7 @@ The graph definition and all orchestration logic are independent of which agent 
 
 ## Configuration
 
-Every belay run reads `belay.yaml` from your project root (or via `--config <path>`). The file controls:
+Every belay run reads `belay.yaml` from your project root. Your user config is read before it and a file you pass with `--config <path>` after it, merged setting by setting, so a setting in a later file wins. The file controls:
 - **agent**: which LLM backend, model, and mode (live, streaming, batch)
 - **graph**: approval gates, max retries, timeout per phase
 - **test**: auto-detect or custom test command

@@ -150,6 +150,28 @@ func TestRootPersistentFlags(t *testing.T) {
 	}
 }
 
+// TestConfigFlagSaysItLayersOnTop keeps --config's help true to
+// config.Load: the file it names is merged field by field on top of the
+// user config and the workspace's belay.yaml, which are still read
+// (internal/config's TestLoadLayerPrecedence). Help that said "instead of"
+// sent a person looking for why a setting they never put in the --config
+// file still applied.
+func TestConfigFlagSaysItLayersOnTop(t *testing.T) {
+	flag := rootCmd.PersistentFlags().Lookup("config")
+	if flag == nil {
+		t.Fatal("--config is not a persistent root flag")
+	}
+	usage := flag.Usage
+	for _, phrase := range []string{"on top of", "belay.yaml", "wins"} {
+		if !strings.Contains(usage, phrase) {
+			t.Errorf("--config help does not say %q; got %q", phrase, usage)
+		}
+	}
+	if strings.Contains(usage, "instead of") {
+		t.Errorf("--config help says the file replaces the ones belay finds, but config.Load merges it on top of them; got %q", usage)
+	}
+}
+
 // Every command names the repository the same way.
 //
 // --workspace was briefly defined three times with three different

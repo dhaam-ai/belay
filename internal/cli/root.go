@@ -107,8 +107,11 @@ node instead of restarting.`,
 
 func init() {
 	f := rootCmd.PersistentFlags()
+	// --config adds a layer rather than replacing the others: config.Load
+	// merges it field by field on top of the user config and the
+	// workspace's belay.yaml, and both are still read.
 	f.StringVar(&rootFlags.configPath, "config", "",
-		"read settings from this file instead of the belay.yaml belay would find on its own")
+		"also read this file, on top of your user config and the workspace's belay.yaml; each setting it sets wins")
 	f.BoolVar(&rootFlags.verbose, "verbose", false,
 		"also print belay's own log to stderr while it works")
 	f.BoolVar(&rootFlags.noColor, "no-color", false,

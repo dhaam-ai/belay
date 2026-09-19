@@ -25,6 +25,12 @@ that only `pkg/belay` carries a compatibility promise. Everything under
 
 ### Fixed
 
+- **`--config` help no longer says the file replaces belay.yaml.** It said
+  belay reads the file "instead of" the belay.yaml it would find, but belay
+  reads your user config and the workspace's belay.yaml as well, and merges
+  the `--config` file on top of them, setting by setting. A setting you
+  left out of that file still came from the others. The help, and the
+  README's configuration section, now say so.
 - **A run a newer belay wrote now says it needs a newer belay.** A run
   whose manifest.json requires something this belay does not have, or is
   at a schema version above the one it reads, is not damaged, but
