@@ -297,7 +297,7 @@ All state lives in `.belay/runs/<run-id>`:
 - `state.json` — current accumulated state (read by `belay resume`)
 - `plan.md` — the plan the agent generated
 
-If the run crashed mid-execution, your work is safe on disk. Restart with `belay resume` and it picks up where it left off.
+If you stopped the run with Ctrl-C, or it crashed mid-execution, your work is safe on disk. `belay resume` picks it up where it left off: the step that was interrupted runs again, and the steps that finished do not. A run that belay stopped on its own, at the budget ceiling, `graph.max_steps` or `graph.node_timeout`, has ended instead; raise the limit and start a new run.
 
 If you want to delete a run, `rm -rf .belay/runs/<run-id>` is safe.
 

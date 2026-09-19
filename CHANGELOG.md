@@ -25,6 +25,29 @@ that only `pkg/belay` carries a compatibility promise. Everything under
 
 ### Fixed
 
+- **Ctrl-C now leaves a run that `belay resume` continues.** `belay run
+  --help` promised this, but Ctrl-C, or a SIGTERM, ended the run as
+  aborted: belay printed `belay resume <id>`, and `belay resume` then
+  refused the run as "already stopped for good". belay now pauses the run
+  at the step it was in. `belay resume` runs that step again from its
+  start, and not the steps that had finished. If Ctrl-C lands while belay
+  is at the approval gate, resuming asks for approval again rather than
+  approving the plan for you. An interrupted `belay run` still exits with
+  code 3. A second Ctrl-C still quits at once, which leaves the run as a
+  crash does, and `belay resume` continues that too.
+- **belay no longer tells you to resume a run it cannot resume.** After
+  `graph.max_steps`, `graph.node_timeout`, or the budget ceiling with
+  `budget.on_exceed: abort`, the closing report offered `belay resume
+  <id>`, which refuses such a run. It now says the run has ended. After
+  the step cap or a timeout it names the setting to raise and the command
+  that starts a new run; otherwise it points at `belay timeline`.
+  docs/troubleshooting.md and docs/architecture.md also suggested `belay
+  resume` for runs that had completed or failed, and no longer do.
+- **A crash while belay recovers from a crash no longer ends the run.**
+  After a crash belay closes the step that was cut off and runs it again.
+  If belay died again between the two, the next attempt took the run for
+  aborted and refused it. It now runs the step again, and numbers it as
+  the next attempt instead of reusing the number of the one it replaces.
 - **A `belay run` that fails while creating its run no longer leaves a run
   that `belay resume` picks up.** belay wrote the run's manifest.json before
   its state.json. If writing state.json failed, or belay was killed between

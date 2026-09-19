@@ -39,6 +39,7 @@ Records are written with O_APPEND|O_WRONLY, synced after every append, and never
 
 **Resume**: On startup (or `belay resume`), the dispatcher calls `journal.ResolveStart(records)` to read the journal and compute the next node to run (see `internal/journal/journal.go`). The algorithm uses a decision table that handles:
 - A normal run ending in `node_finished`: resume at that node's `next` field
+- A node that started and never finished (a crash mid-node), or a `node_finished` that closed an interrupted attempt (status `aborted`, `next` naming the node itself): re-run that node at the next attempt
 - A paused run (ending in `run_paused`): refuse unless explicitly resumed with `belay resume`
 - A run ending in a terminal state (`run_completed`, `run_failed`, `run_aborted`): refuse to resume (it is finished)
 - A half-written final record (crash mid-append): discard and heal the journal, resuming at the prior node's `next`
@@ -169,10 +170,10 @@ The run progresses through a directed graph of nodes (see `internal/graph/node.g
 **Terminal States**:
 - StatusOK with Next="END": run completed successfully
 - StatusFailed: a node returned an error or returned StatusFailed
-- StatusAborted: budget exceeded, max steps reached, or context cancelled
+- StatusAborted: budget exceeded, max steps reached, a node timeout, or the caller's context cancelled. `belay run` and `belay resume` set the dispatcher's `SuspendOnCancel`, so for them a cancellation (Ctrl-C, SIGTERM) closes the interrupted attempt as aborted, naming the node itself as `next`, and pauses the run; `belay resume` re-runs that node
 - StatusPaused: human approval gate not granted; use `belay resume` to continue
 
-If a node returns an error or an invalid Result, the dispatcher stops the run and records the failure. The user inspects the journal with `belay timeline` and may retry with `belay resume` after fixing the underlying issue.
+If a node returns an error or an invalid Result, the dispatcher stops the run and records the failure. The user inspects the journal with `belay timeline`, fixes the underlying issue, and starts a new run: `belay resume` refuses a run that has failed.
 
 ## Isolation & Fanout
 
@@ -216,7 +217,7 @@ Five pluggable interfaces in `pkg/belay` allow third-party implementations:
 
 4. **Unsupported** (ErrUnsupported): A call was valid but the adapter cannot do it (e.g., resuming a session on a backend with no session support). Permanent, not retryable.
 
-5. **Other errors**: Network timeouts, context cancellation, parse failures, missing files, etc. Most are permanent and end the run; context cancellation is resumable (the same command can be retried).
+5. **Other errors**: Network timeouts, context cancellation, parse failures, missing files, etc. Most are permanent and end the run. Context cancellation under `belay run` or `belay resume` pauses the run instead, and `belay resume` continues it.
 
 **Recovery on Crash**: If belay crashes mid-run:
 1. The journal file may have a half-written final record (torn tail)

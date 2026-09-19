@@ -28,7 +28,7 @@ This document covers common failure modes, their symptoms, and remedies.
 **Remedy**:
 - If the goal is unclear, edit belay.yaml to provide more context or a better prompt
 - If the agent ran out of budget, increase budget.max_usd
-- If the working directory or model is wrong, edit belay.yaml and retry with `belay resume`
+- If the working directory or model is wrong, edit belay.yaml and start a new run; `belay resume` does not re-run a run that completed
 
 ## Run is Paused
 
@@ -78,7 +78,7 @@ This document covers common failure modes, their symptoms, and remedies.
 2. Run the same command in a shell to see what the error is: `which <tool>`
 
 **Remedy**:
-- Install the toolchain and retry with `belay resume`
+- Install the toolchain and start a new run. The run that hit the missing toolchain has failed, and `belay resume` refuses a failed run
 - Or, if using a different test runner or linter, update belay.yaml (test.runner, review.mode)
 
 **Note**: This is distinct from "test failure". A missing toolchain returns an error and refuses to proceed, forcing human intervention. A test failure returns a TestReport and automatically triggers the fix loop. Belay makes this distinction so the remedy is clear: install software vs. edit code.
@@ -118,23 +118,29 @@ This document covers common failure modes, their symptoms, and remedies.
 3. Check if Usage.Estimated = true; estimated costs are lower-confidence
 
 **Remedy**:
+With `budget.on_exceed: abort` the run has ended, and `belay resume` will not continue it. Change belay.yaml, then start a new run:
 - Increase budget.max_usd in belay.yaml (if the project is worth it)
 - Use a cheaper model (adjust agent.model in belay.yaml)
 - Scope the goal to fewer changes (smaller diffs cost fewer tokens)
 - If costs are overestimated, they may drop in a future API pricing update
 
-## Crashed Run
+## Interrupted or Crashed Run
 
-**Symptom**: `belay run` was interrupted (killed, network down, process exited) and a run directory exists at `.belay/runs/<run-id>/`.
+**Symptom**: You pressed Ctrl-C, or `belay run` or `belay resume` was killed, lost its terminal or exited part-way, and a run directory exists at `.belay/runs/<run-id>/`.
+
+**Expected Behavior**: The run can be continued. The first Ctrl-C (or a SIGTERM) pauses it: belay closes the step it was in, records the pause, says "belay stopped because you asked it to", and exits with code 3. A second Ctrl-C, a kill or a crash stops belay at once and leaves that step open, and `belay resume` closes it on the way back in. Either way, resuming runs the interrupted step again from its start, and does not run the steps that had finished.
 
 **Diagnosis**:
-1. Run `belay timeline <run-id>` to see how far the run got
-2. Look at the journal's final record: if it ends in run_paused or run_completed, the run is finished; if it ends in node_finished, the run can resume
+1. Run `belay runs`: an interrupted run is listed as paused (after Ctrl-C) or running (after a crash), and both can be resumed
+2. Run `belay timeline <run-id>` to see how far the run got. The interrupted step shows as stopped after Ctrl-C, or as interrupted after a crash
+3. Look at the journal's final record: if it is run_completed, run_failed or run_aborted, the run has ended and cannot be resumed; anything else can be
 
 **Remedy**:
-1. Run `belay resume <run-id>` to continue from where it stopped
+1. Run `belay resume <run-id>` to continue from where it stopped, or `belay resume` for the most recent run still waiting
 2. The journal file is automatically healed on resume (any torn tail is discarded)
 3. If the same crash happens repeatedly, it may indicate a stuck node (increase graph.node_timeout in belay.yaml)
+
+**Note**: A step cut off part-way may already have spent money that the agent had not yet reported. The run's recorded cost leaves it out, as it does for a crash.
 
 ## Fanout Refused
 
@@ -168,7 +174,7 @@ This document covers common failure modes, their symptoms, and remedies.
 **Remedy**:
 - Server mode: Set SONAR_TOKEN environment variable and verify the server URL
 - Docker mode: Install Docker or switch to server mode
-- If the server is temporarily down, `belay resume` will retry the review node
+- If the server is temporarily down, start a new run once it is back. The run whose review could not reach it has failed, and `belay resume` refuses a failed run
 - If authentication fails, rotate your token and retry
 
 ## Quality Gate Failed
@@ -260,6 +266,7 @@ belay 0.1.1 and earlier always counted every finding, and ESLint and Ruff still 
 2. The timeout is likely due to a slow operation: test suite, code generation, sonar-scanner on a large repo
 
 **Remedy**:
+The run has ended, and `belay resume` will not continue it. Change belay.yaml, then start a new run:
 - Increase graph.node_timeout in belay.yaml
 - Or reduce the scope (fewer tests, smaller code changes, scoped SonarQube analysis)
 - If timeouts happen repeatedly on the same node, there may be an infinite loop or a genuine performance problem
@@ -291,6 +298,7 @@ belay 0.1.1 and earlier always counted every finding, and ESLint and Ruff still 
 2. If the pattern shows fix → test → fix → test repeating, the agent cannot make progress
 
 **Remedy**:
+The run has ended, and `belay resume` will not continue it. Change belay.yaml or the goal, then start a new run:
 - Increase graph.max_steps in belay.yaml (default 60)
 - Or reduce the goal so fewer fixes are needed
 - Or break the work into smaller runs (smaller goals are easier to fix)
