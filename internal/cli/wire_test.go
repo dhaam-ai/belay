@@ -12,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/dhaam-ai/belay/internal/agent/claude"
 	"github.com/dhaam-ai/belay/internal/config"
 	"github.com/dhaam-ai/belay/internal/graph"
 	"github.com/dhaam-ai/belay/internal/journal"
@@ -412,6 +413,47 @@ func TestSignInWarning(t *testing.T) {
 			for _, name := range []string{anthropicKeyEnv, claudeOAuthTokenEnv} {
 				if !strings.Contains(warning, name) {
 					t.Errorf("warning = %q, want it to name %s", warning, name)
+				}
+			}
+		})
+	}
+}
+
+// TestAgentWarningsNameOnlyTheBackendInUse pins agentWarnings on its own
+// terms, beneath TestSignInWarning: a warning about how one backend signs in
+// is given only for that backend, so a run on another is not told to sign in
+// to a command line it will never call.
+func TestAgentWarningsNameOnlyTheBackendInUse(t *testing.T) {
+	tests := []struct {
+		name    string
+		backend string
+		key     string
+		want    []string
+	}{
+		{name: "claude, signed out", backend: claude.BackendName, want: []string{anthropicKeyEnv, claudeOAuthTokenEnv}},
+		{name: "claude, signed in", backend: claude.BackendName, key: "belay-test-api-credential"},
+		{name: "another backend, signed out", backend: "some-other-cli"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Setenv(anthropicKeyEnv, tt.key)
+			t.Setenv(claudeOAuthTokenEnv, "")
+			cfg := config.Default()
+			cfg.Agent.Backend = tt.backend
+
+			got := agentWarnings(cfg)
+			if len(tt.want) == 0 {
+				if len(got) != 0 {
+					t.Errorf("agentWarnings() = %q, want none", got)
+				}
+				return
+			}
+			if len(got) != 1 {
+				t.Fatalf("agentWarnings() = %q, want one warning", got)
+			}
+			for _, name := range tt.want {
+				if !strings.Contains(got[0], name) {
+					t.Errorf("warning = %q, want it to name %s", got[0], name)
 				}
 			}
 		})

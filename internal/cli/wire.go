@@ -401,7 +401,7 @@ func (p *runPlan) resolveAgent() {
 		return
 	}
 
-	backend, err := replay.New(mode, claude.New(p.logger), nil, replay.Provenance{
+	backend, err := replay.New(mode, p.newLiveAgent(), nil, replay.Provenance{
 		BelayVersion: Version,
 		Model:        p.config.Agent.Model,
 		RecordedAt:   time.Now().UTC(),
@@ -419,10 +419,42 @@ func (p *runPlan) resolveAgent() {
 	if mode == replay.ModeRecord {
 		p.recorder = backend
 	}
-	if os.Getenv(anthropicKeyEnv) == "" && os.Getenv(claudeOAuthTokenEnv) == "" {
-		p.warn("neither %s nor %s is set; belay will rely on however the claude command line is already signed in.",
-			anthropicKeyEnv, claudeOAuthTokenEnv)
+	for _, w := range agentWarnings(p.config) {
+		p.warn("%s", w)
 	}
+}
+
+// newLiveAgent builds the backend agent.backend names, the one that calls a
+// real model. resolveAgent calls it only for a run that will call one, live
+// or recording, which keeps a replayed run from constructing a backend at all.
+//
+// Choosing a backend by name is a switch over the backends belay ships rather
+// than a table of constructors, because a backend can need checks of its own
+// before it is used, and a switch keeps them beside the backend they check.
+// It returns nil for a name it does not know. resolveAgent has already
+// refused every other name before calling it.
+func (p *runPlan) newLiveAgent() belay.AgentBackend {
+	switch p.config.Agent.Backend {
+	case claude.BackendName:
+		return claude.New(p.logger)
+	default:
+		return nil
+	}
+}
+
+// agentWarnings lists what a person should know, without being stopped by it,
+// about the backend a live or recording run will call. It reads whether a
+// credential is set, and never its value. Each warning is about one backend,
+// so each is given only when cfg names that backend.
+func agentWarnings(cfg config.Config) []string {
+	var warnings []string
+	signedOut := os.Getenv(anthropicKeyEnv) == "" && os.Getenv(claudeOAuthTokenEnv) == ""
+	if cfg.Agent.Backend == claude.BackendName && signedOut {
+		warnings = append(warnings, fmt.Sprintf(
+			"neither %s nor %s is set; belay will rely on however the claude command line is already signed in.",
+			anthropicKeyEnv, claudeOAuthTokenEnv))
+	}
+	return warnings
 }
 
 // resolveReplayAgent loads the cassette a replayed run answers from.
