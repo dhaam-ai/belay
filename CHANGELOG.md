@@ -62,9 +62,18 @@ that only `pkg/belay` carries a compatibility promise. Everything under
   `graph.approval` on said "approve ran 2 times", numbered the two rows
   "approve #1/2" and "#2/2", and opened the loop-cost span at the gate — so the
   figure for what the test-and-fix loop cost included the plan, the code and
-  the write that came before it. The same held for a step Ctrl-C interrupted
-  and resumed. Both now read as one visit, and the loop cost covers the loop.
-  The README's example output is regenerated from what belay prints.
+  the write that came before it. The same held for a step that Ctrl-C or a
+  crash interrupted and belay ran again. Both now read as one visit, and the
+  loop cost covers the loop. The README's example output is regenerated from
+  what belay prints.
+
+  A script reading `belay timeline --json` will see different numbers for
+  such runs. `loops[].executions` now counts visits to a node; it counted
+  journal records, which over-counted every run with the gate on, so
+  `approve` no longer appears in `loops`. Each entry's `iteration`
+  and `iterations` count visits too, and the `loop_*` totals start at the
+  first node that really looped. `schema` stays 1: these fields always meant
+  how many times the run came back to a node, and the old values were wrong.
 - **Stopping a run with Ctrl-C no longer costs it a step.** The interrupted
   step was counted against `graph.max_steps` before the run was paused, so a
   run stopped twice had two fewer steps left to finish in than one killed
