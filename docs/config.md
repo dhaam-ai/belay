@@ -325,10 +325,10 @@ Git worktrees and containers are anticipated by the `belay.Isolator` interface b
 **Default**: `"fewest_issues"`  
 **Valid values**: `"fewest_issues"`, `"first_pass"`, `"fastest"`
 
-How to choose the winning candidate after fanout:
-- `"fewest_issues"`: The passing candidate with the fewest review issues
-- `"first_pass"`: The first candidate that clears the quality gate
-- `"fastest"`: The candidate that finished soonest
+How the join node chooses the winning candidate. Only a candidate whose tests passed can win:
+- `"fewest_issues"`: The candidate with the fewest review issues. A tie goes to the lowest candidate ID.
+- `"first_pass"`: The first candidate whose tests passed, in the order fanout recorded the candidates.
+- `"fastest"`: Meant to be the candidate that finished soonest, but no candidate's duration is recorded, so join picks the first candidate whose tests passed in recorded order, as `"first_pass"` does, and logs a warning that the choice is approximate.
 
 <!-- slice:output -->
 
