@@ -3,6 +3,7 @@ package state
 import (
 	"encoding/json"
 	"fmt"
+	"strings"
 )
 
 // migrateFromVersion1 upgrades a state.json or manifest.json from version
@@ -22,6 +23,14 @@ import (
 // drop exactly the kind of requirement the list exists to enforce; the
 // checkRequires that follows every migration judges it like any other.
 //
+// "Already there" is judged case-insensitively, because the decode that
+// follows is: encoding/json fills Requires from "Requires" or "REQUIRES"
+// as readily as from "requires", but a map of raw values is a map, and
+// "Requires" is not "requires". Adding the lower-case empty list beside
+// one spelled another way would hand the decode an exact match to prefer,
+// and the requirement would vanish — from a version-1 document only, while
+// the same spelling at version 2 is honoured.
+//
 // It works on a map of raw values rather than on State or Manifest, so
 // every other key reaches the decode that follows byte for byte as it was
 // written, whatever those types look like by then.
@@ -31,7 +40,7 @@ func migrateFromVersion1(raw []byte) ([]byte, error) {
 		return nil, fmt.Errorf("decode version 1: %w", err)
 	}
 	doc["schema_version"] = json.RawMessage(`2`)
-	if requires, ok := doc["requires"]; !ok || string(requires) == "null" {
+	if !hasRequiresList(doc) {
 		doc["requires"] = json.RawMessage(`[]`)
 	}
 	migrated, err := json.Marshal(doc)
@@ -39,4 +48,21 @@ func migrateFromVersion1(raw []byte) ([]byte, error) {
 		return nil, fmt.Errorf("encode version 2: %w", err)
 	}
 	return migrated, nil
+}
+
+// hasRequiresList reports whether doc already carries a requires list the
+// decode after the migration would read: a key spelled any way encoding/json
+// matches against the Requires field, holding anything but null.
+//
+// A null is not a list. Every released belay left the key out entirely, and
+// the two readings of an explicit null — "no requirements" and "nobody wrote
+// one" — are the same reading here, so it is replaced by the empty list every
+// version-2 document carries.
+func hasRequiresList(doc map[string]json.RawMessage) bool {
+	for key, value := range doc {
+		if strings.EqualFold(key, "requires") && string(value) != "null" {
+			return true
+		}
+	}
+	return false
 }

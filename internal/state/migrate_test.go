@@ -142,13 +142,23 @@ func TestLoad_MigratesAVersion1Run(t *testing.T) {
 		// requires is spliced into the version-1 document as its requires
 		// value; empty leaves the key out, as every released belay did.
 		requires string
-		want     []any
-		wantErr  error
+		// key is the spelling requires is spliced under; empty means
+		// "requires". encoding/json matches a field name
+		// case-insensitively, so a document spelling it another way still
+		// decodes into Requires — and the migration must not add a
+		// lower-case empty list that would win that decode against it.
+		key     string
+		want    []any
+		wantErr error
 	}{
 		{name: "as released belay wrote it, with no requires key", want: []any{}},
 		{name: "with requires null", requires: `null`, want: []any{}},
 		{name: "with requires empty", requires: `[]`, want: []any{}},
 		{name: "requiring a capability this belay lacks", requires: `["from.the.future"]`, wantErr: ErrUnknownCapability},
+		{
+			name: "requiring a capability this belay lacks, spelled Requires",
+			key:  "Requires", requires: `["from.the.future"]`, wantErr: ErrUnknownCapability,
+		},
 	}
 	for _, d := range schemaDocuments() {
 		for _, tt := range cases {
@@ -163,7 +173,11 @@ func TestLoad_MigratesAVersion1Run(t *testing.T) {
 					if err := json.Unmarshal([]byte(tt.requires), &requires); err != nil {
 						t.Fatalf("decode requires %s: %v", tt.requires, err)
 					}
-					doc["requires"] = requires
+					key := tt.key
+					if key == "" {
+						key = "requires"
+					}
+					doc[key] = requires
 				}
 				path := writeJSONObject(t, d.file, doc)
 
