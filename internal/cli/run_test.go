@@ -846,6 +846,100 @@ func TestDriveRunResumesPastTheApprovalGate(t *testing.T) {
 	}
 }
 
+// routesTo is a node that succeeds and hands the run to next.
+type routesTo struct{ name, next string }
+
+func (n routesTo) Name() string { return n.name }
+
+func (n routesTo) Run(context.Context, *graph.RunContext) (graph.Result, error) {
+	return graph.Result{Status: journal.StatusOK, Next: n.next}, nil
+}
+
+// TestCtrlCLeavesARunBelayResumeContinues is the promise belay run --help
+// makes: "Press Ctrl-C whenever you like: the run stops, its state stays, and
+// belay resume picks it up from the last completed step."
+//
+// The run is interrupted while code runs, after plan has finished. belay
+// exits as a Ctrl-C always has, and says how to pick the run up. belay resume
+// then chooses the run, by id and by default, and continues it: code runs
+// again, and plan does not.
+func TestCtrlCLeavesARunBelayResumeContinues(t *testing.T) {
+	ws := goWorkspace(t)
+	var out bytes.Buffer
+	u := &ui{out: &out, err: &out}
+
+	plan, err := resolve(resolveRequest{workspace: ws, logger: newLogger(u)})
+	if err != nil {
+		t.Fatalf("resolve: %v", err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	interrupted := graph.NewRegistry()
+	interrupted.MustRegister(
+		routesTo{name: graph.NodePlan, next: graph.NodeCode},
+		pressesCtrlC{name: graph.NodeCode, cancel: cancel},
+	)
+	plan.registry = interrupted
+	store := seedRunDir(t, plan, "add tests")
+	runID := store.Layout().RunID()
+
+	cmd := &cobra.Command{}
+	cmd.SetContext(ctx)
+	err = driveRun(cmd, u, plan, store, false)
+	var exit *ExitError
+	if !errors.As(err, &exit) || exit.Code != graph.ExitAborted {
+		t.Fatalf("driveRun = %v, want an ExitError with the exit code a Ctrl-C has always had, %d", err, graph.ExitAborted)
+	}
+	got := out.String()
+	t.Logf("verbatim output after Ctrl-C:\n%s", got)
+	for _, phrase := range []string{
+		"belay stopped because you asked it to",
+		"pick up where it stopped with:",
+		"belay resume " + runID,
+	} {
+		if !strings.Contains(got, phrase) {
+			t.Errorf("after Ctrl-C belay never says %q; got:\n%s", phrase, got)
+		}
+	}
+
+	for _, id := range []string{runID, ""} {
+		chosen, err := chooseRun(ws, id)
+		if err != nil {
+			t.Fatalf("chooseRun(%q) = %v, want the interrupted run: its next step is belay resume", id, err)
+		}
+		if chosen.id != runID {
+			t.Errorf("chooseRun(%q) chose %s, want %s", id, chosen.id, runID)
+		}
+	}
+
+	// belay resume, with a context nobody cancels.
+	reached := false
+	finishing := graph.NewRegistry()
+	finishing.MustRegister(
+		routesTo{name: graph.NodePlan, next: graph.NodeCode},
+		endsTheRun{reached: &reached},
+	)
+	plan.registry = finishing
+	out.Reset()
+	cmd.SetContext(context.Background())
+	if err := driveRun(cmd, u, plan, store, true); err != nil {
+		t.Fatalf("resume: %v", err)
+	}
+	got = out.String()
+	t.Logf("verbatim resume output:\n%s", got)
+	if !reached {
+		t.Error("resuming must run the step Ctrl-C interrupted")
+	}
+	for _, phrase := range []string{"→ code", "attempt 2", "belay finished"} {
+		if !strings.Contains(got, phrase) {
+			t.Errorf("the resume never says %q; got:\n%s", phrase, got)
+		}
+	}
+	if strings.Contains(got, "→ plan") {
+		t.Errorf("the resume ran plan again, which finished before Ctrl-C; got:\n%s", got)
+	}
+}
+
 // finishes is a node that ends the run the moment it runs.
 type finishes struct{ name string }
 
