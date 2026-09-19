@@ -3,6 +3,7 @@ package cli
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"os"
 	"path/filepath"
@@ -634,6 +635,86 @@ func TestResumeApprovesOnlyAPlanTheGateAskedAbout(t *testing.T) {
 				t.Errorf("awaitsApproval() = %v, want %v", got, tt.want)
 			}
 		})
+	}
+}
+
+// downgradeToVersion1 rewrites a run document as belay v0.1.x wrote it:
+// schema_version 1, and no requires list, which is the shape those binaries
+// read and the only shape they will resume.
+func downgradeToVersion1(t *testing.T, path string) {
+	t.Helper()
+	raw, err := os.ReadFile(path) //nolint:gosec // a run document this test wrote itself, under t.TempDir()
+	if err != nil {
+		t.Fatalf("read %s: %v", path, err)
+	}
+	var doc map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &doc); err != nil {
+		t.Fatalf("decode %s: %v", path, err)
+	}
+	doc["schema_version"] = json.RawMessage(`1`)
+	delete(doc, "requires")
+	out, err := json.Marshal(doc)
+	if err != nil {
+		t.Fatalf("encode %s: %v", path, err)
+	}
+	if err := os.WriteFile(path, out, 0o600); err != nil {
+		t.Fatalf("write %s: %v", path, err)
+	}
+}
+
+// TestResumeUpgradesTheManifestBeforeItRecordsAnApproval pins the order the
+// two documents of a version-1 run are upgraded in when `belay resume`
+// approves its plan.
+//
+// Recording the approval saves state.json, which saves it at version 2. A
+// crash between that and the manifest's own upgrade leaves belay v0.1.x a
+// version-1 manifest — which it accepts — over a version-2 state.json, and it
+// resumes the run and writes into it (ADR-0011). So the manifest is saved
+// first, before belay writes anything else to the run.
+//
+// The run directory is made read-only to prove the ordering: both writes then
+// fail, and which one belay reports is which one it tried first.
+func TestResumeUpgradesTheManifestBeforeItRecordsAnApproval(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("running as root: a read-only directory is still writable, so there is no failure to order")
+	}
+	ws := goWorkspace(t)
+	plan, err := resolve(resolveRequest{workspace: ws, logger: quietLogger()})
+	if err != nil {
+		t.Fatalf("resolve: %v", err)
+	}
+	registry := graph.NewRegistry()
+	registry.MustRegister(planWriter{body: "# Plan\n\nwrite a test\n"}, approve.New())
+	plan.registry = registry
+	store := seedRunDir(t, plan, "add tests")
+
+	// The gate's own pause, so resuming is the approval.
+	dispatcher, err := graph.NewDispatcher(plan.options(store))
+	if err != nil {
+		t.Fatalf("graph.NewDispatcher: %v", err)
+	}
+	if _, err := dispatcher.Run(context.Background()); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	layout := store.Layout()
+	downgradeToVersion1(t, layout.StatePath())
+	downgradeToVersion1(t, layout.ManifestPath())
+	if err := os.Chmod(layout.RunDir(), 0o500); err != nil {
+		t.Fatalf("chmod the run directory read-only: %v", err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(layout.RunDir(), 0o750) })
+
+	out, _, err := runCLI(t, "resume", layout.RunID(), "--workspace", ws)
+	if err == nil {
+		t.Fatalf("belay resume wrote to a read-only run directory:\n%s", out)
+	}
+	var exit *ExitError
+	if !errors.As(err, &exit) {
+		t.Fatalf("error = %#v, want an ExitError", err)
+	}
+	if !strings.Contains(exit.Message, "manifest.json") {
+		t.Errorf("belay resume failed on %q; the manifest must be saved at the current version "+
+			"before the approval is recorded", exit.Message)
 	}
 }
 

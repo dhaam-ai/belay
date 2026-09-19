@@ -102,6 +102,17 @@ func continueRun(cmd *cobra.Command, runID string) error {
 
 	announceContinue(u, plan, chosen, layout, runID == "")
 
+	// Recording an approval below saves state.json, and that is the first
+	// thing belay writes to this run — before the dispatcher, which
+	// establishes the run for itself before it opens the journal.
+	// state.Store.Preflight refuses a run belay may not read, and saves the
+	// manifest at the schema version belay writes, so a crash after the
+	// approval cannot leave an older belay a manifest it still accepts over a
+	// state.json it does not (ADR-0011).
+	if err := store.Preflight(); err != nil {
+		return &ExitError{Code: graph.ExitFailed, Message: "belay: " + err.Error(), Err: err}
+	}
+
 	awaiting, err := awaitsApproval(chosen, layout)
 	if err != nil {
 		return &ExitError{Code: graph.ExitFailed, Message: "belay: " + err.Error(), Err: err}

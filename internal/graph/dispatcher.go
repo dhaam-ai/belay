@@ -237,6 +237,16 @@ type Options struct {
 // still ends the run, as the budget ceiling and the step cap do: they are
 // verdicts on the run, and a resume would only meet them again.
 //
+// # Before the first write: establish the run
+//
+// Opening the journal writes to a run: journal.Open creates the file and heals
+// a torn tail. So dispatch reads the manifest, then calls state.Store.Preflight
+// — which refuses a run this belay may not read, and saves the manifest at the
+// current schema version — and only then opens anything. A run declaring a
+// capability this belay lacks in state.json alone was otherwise healed,
+// appended to and, at the first guard, ended for good, although belay had
+// already established it could not read it (ADR-0011).
+//
 // # What the dispatcher owns
 //
 // The dispatcher opens, writes and closes the *journal.Journal, and it is the
@@ -326,6 +336,16 @@ func (d *Dispatcher) dispatch(ctx context.Context, resuming bool) (Outcome, erro
 	man, err := d.store.LoadManifest()
 	if err != nil {
 		return Outcome{ExitCode: ExitFailed}, fmt.Errorf("graph: load manifest: %w", err)
+	}
+
+	// Before the first write to this run, and so before the journal is
+	// opened: establish that belay may read the whole run, and bring the
+	// manifest up to the version belay writes. Store.Preflight says why both
+	// belong here rather than further in. The manifest is loaded first only
+	// because a manifest this belay cannot read is not a run it can dispatch
+	// at all.
+	if err := d.store.Preflight(); err != nil {
+		return Outcome{ExitCode: ExitFailed}, fmt.Errorf("graph: %w", err)
 	}
 
 	// Open before reading: Open heals a torn tail left by a previous crash,

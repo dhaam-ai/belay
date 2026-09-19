@@ -35,6 +35,22 @@ that only `pkg/belay` carries a compatibility promise. Everything under
 
 ### Fixed
 
+- **A version-1 run's manifest is now saved at the current schema version
+  before belay writes anything else to the run.** Resuming a run belay v0.1.x
+  started upgrades both of its documents, and state.json was saved first — by
+  the dispatcher's first patch, or by `belay resume` recording your approval.
+  A crash in between left a version-1 manifest over a version-2 state.json,
+  which a released belay accepts: it would resume the run, append to its
+  journal, and on the next invocation report that the run had already ended.
+  The manifest is now saved first, which is the version a released belay
+  refuses (ADR-0011).
+- **A run that requires something this belay does not have is refused before
+  its journal is touched.** A run may declare a required capability in
+  state.json alone, and the dispatcher read manifest.json, opened the journal
+  and healed a crashed step before it ever read state.json — so a run it was
+  not allowed to read had already been written to, and the first guard it met
+  ended it for good. Nothing sets `requires` yet, so no run was affected in
+  practice.
 - **A repair that quotes the failure it fixed no longer poisons or ends the
   run.** The fix node read its reply with the code node's parser, which, when
   no changed-files block is present, salvages paths out of any unified diff in

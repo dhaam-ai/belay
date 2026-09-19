@@ -21,7 +21,8 @@ manifest.json and state.json move to schema version 2, and both carry a `require
 ## Consequences
 
 ### Positive
-- **Released binaries refuse newer runs.** v0.1.x rejects either file at version 2 before it writes anything to it. journal.ndjson has no version of its own, but the dispatcher loads manifest.json before it opens the journal, so a manifest at version 2 also keeps a released binary out of the journal.
+- **Released binaries refuse newer runs.** v0.1.x rejects either file at version 2 before it writes anything to it. journal.ndjson has no version of its own, but the dispatcher loads manifest.json before it opens the journal, so a manifest at version 2 also keeps a released binary out of the journal. Which of the two this belay saves at version 2 *first* decides what a crash between them leaves behind, and a version-1 manifest over a version-2 state.json is a pair v0.1.x accepts, resumes and writes into. So `Store.Preflight` saves manifest.json at the current version before belay writes anything else to a run: the dispatcher calls it before it opens the journal, and `belay resume` before it records an approval.
+- **A run is refused before belay writes to it, not after.** A capability can be declared in state.json alone, and the dispatcher read the manifest, opened the journal and healed a crashed attempt long before it loaded state.json — so it had already written to a run it had no right to read, and the first guard it met ended that run for good. `Store.Preflight` loads state.json before the journal is opened, so the refusal comes first.
 - **One bump, not one per slice.** Each later control field costs a capability name, not a schema version and a migration. Slices built in parallel cannot collide on a version number.
 - **A binary refuses only the runs that use a feature it lacks.** A run that edits in place requires nothing and stays readable by every belay from this one on, even after `output.branch` exists.
 - **The refusal names the cause.** The error names the missing capability and the file that requires it. `requires` is read before the rest of the document, so a field in a shape this binary cannot decode does not hide the capability that explains it.
@@ -52,6 +53,7 @@ manifest.json and state.json move to schema version 2, and both carry a `require
 
 ## References
 - internal/state/requires.go (`checkRequires`, `CapabilityError`, `knownCapabilities`)
+- internal/state/manifest.go (`Store.Preflight`: refuse, then upgrade the manifest, before anything in a run is written)
 - internal/state/migrate.go (`migrateFromVersion1`)
 - internal/state/state.go package documentation: "Schema versioning" and "Capabilities"
 - ADR-0002 (the dispatcher is the only writer of both files)

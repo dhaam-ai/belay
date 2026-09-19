@@ -2,8 +2,10 @@ package graph_test
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"testing"
 	"time"
@@ -1305,5 +1307,151 @@ func TestDispatcher_SuspendOnCancelStartsNoNodeOnceCancelled(t *testing.T) {
 	}
 	if plan2.calls != 1 || plan2.attempts[0] != 1 {
 		t.Errorf("plan ran %d times at attempts %v on resume, want 1 call at attempt 1", plan2.calls, plan2.attempts)
+	}
+}
+
+// downgradeToVersion1 rewrites a run document as belay v0.1.x wrote it:
+// schema_version 1, and no requires list, which is the shape those binaries
+// read and the only shape they will resume.
+func downgradeToVersion1(t *testing.T, path string) {
+	t.Helper()
+	editRunDocument(t, path, func(doc map[string]json.RawMessage) {
+		doc["schema_version"] = json.RawMessage(`1`)
+		delete(doc, "requires")
+	})
+}
+
+// editRunDocument applies edit to the JSON object at path, leaving every
+// other key exactly as it was written.
+func editRunDocument(t *testing.T, path string, edit func(map[string]json.RawMessage)) {
+	t.Helper()
+	raw, err := os.ReadFile(path) //nolint:gosec // a path the test's own harness built under t.TempDir()
+	if err != nil {
+		t.Fatalf("read %s: %v", path, err)
+	}
+	var doc map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &doc); err != nil {
+		t.Fatalf("decode %s: %v", path, err)
+	}
+	edit(doc)
+	out, err := json.Marshal(doc)
+	if err != nil {
+		t.Fatalf("encode %s: %v", path, err)
+	}
+	if err := os.WriteFile(path, out, 0o600); err != nil {
+		t.Fatalf("write %s: %v", path, err)
+	}
+}
+
+// schemaVersionOnDisk reads a run document's schema_version raw. A loader
+// would migrate the document and report the version it produced, not the one
+// a crash at this moment would leave behind.
+func schemaVersionOnDisk(t *testing.T, path string) int {
+	t.Helper()
+	raw, err := os.ReadFile(path) //nolint:gosec // a path the test's own harness built under t.TempDir()
+	if err != nil {
+		t.Fatalf("read %s: %v", path, err)
+	}
+	var probe struct {
+		SchemaVersion int `json:"schema_version"`
+	}
+	if err := json.Unmarshal(raw, &probe); err != nil {
+		t.Fatalf("decode %s: %v", path, err)
+	}
+	return probe.SchemaVersion
+}
+
+// TestDispatcher_RefusesARunItMayNotReadBeforeWritingToIt is ADR-0011's
+// promise, at the dispatcher: a run requiring a capability this belay does not
+// have is refused before anything is written to it.
+//
+// A capability may be declared in state.json alone, and the dispatcher read
+// the manifest, opened the journal, healed it and appended to it long before
+// it ever loaded state.json. On a run a crash had left mid-node that wrote a
+// node_finished into a run this belay was never allowed to read — and, once
+// the loop reached a guard, run_aborted and an aborted manifest, ending for
+// good a run whose only fault was having been written by a newer belay.
+func TestDispatcher_RefusesARunItMayNotReadBeforeWritingToIt(t *testing.T) {
+	tests := []struct {
+		name    string
+		seed    []journal.Record
+		records int
+	}{
+		{name: "a fresh run: the journal is not even created"},
+		{
+			name: "a run a crash left inside a node: nothing is healed",
+			seed: []journal.Record{
+				{Event: journal.EventRunStarted},
+				{Event: journal.EventNodeStarted, Node: graph.NodePlan, Attempt: 1},
+			},
+			records: 2,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			h := newRun(t, config.Default(), "add tests")
+			if len(tt.seed) > 0 {
+				h.seedJournal(t, tt.seed...)
+			}
+			editRunDocument(t, h.layout.StatePath(), func(doc map[string]json.RawMessage) {
+				doc["requires"] = json.RawMessage(`["output.branch"]`)
+			})
+
+			plan := ok(graph.NodePlan, graph.End)
+			out, err := h.dispatcher(t, plan).Resume(context.Background())
+			if !errors.Is(err, state.ErrUnknownCapability) {
+				t.Fatalf("Resume() error = %v, want one wrapping state.ErrUnknownCapability", err)
+			}
+			if out.ExitCode != graph.ExitFailed {
+				t.Errorf("exit code = %d, want %d", out.ExitCode, graph.ExitFailed)
+			}
+			if plan.calls != 0 {
+				t.Errorf("plan ran %d times in a run belay may not read, want 0", plan.calls)
+			}
+
+			if tt.records == 0 {
+				if _, err := os.Stat(h.layout.JournalPath()); !errors.Is(err, fs.ErrNotExist) {
+					t.Errorf("the journal exists (%v); belay wrote to a run it refused", err)
+				}
+			} else if got := len(h.records(t)); got != tt.records {
+				t.Errorf("the journal has %d records, want the %d it had; belay wrote to a run it refused:\n  %v",
+					got, tt.records, h.timeline(t))
+			}
+			if m := h.manifest(t); m.Status != state.RunStatusRunning {
+				t.Errorf("manifest status = %v, want it left as %v", m.Status, state.RunStatusRunning)
+			}
+		})
+	}
+}
+
+// TestDispatcher_SavesTheManifestAtTheCurrentVersionBeforeItWritesAnything is
+// the other half of ADR-0011's promise. A version-1 run resumed here has both
+// its documents rewritten at version 2 as they are saved, and whichever goes
+// first decides what belay v0.1.x makes of a crash in between: a version-1
+// manifest over a version-2 state.json is a run it accepts, resumes, and
+// writes into. So the manifest goes first, before the journal is even opened.
+//
+// The journal is made unopenable to prove the ordering: the dispatch fails at
+// the first write it attempts, and the manifest is already at version 2.
+func TestDispatcher_SavesTheManifestAtTheCurrentVersionBeforeItWritesAnything(t *testing.T) {
+	h := newRun(t, config.Default(), "add tests")
+	downgradeToVersion1(t, h.layout.StatePath())
+	downgradeToVersion1(t, h.layout.ManifestPath())
+	// A directory where the journal goes: journal.Open cannot write a byte,
+	// which stands in for a crash at belay's first write to this run.
+	if err := os.MkdirAll(h.layout.JournalPath(), 0o750); err != nil {
+		t.Fatalf("MkdirAll: %v", err)
+	}
+
+	plan := ok(graph.NodePlan, graph.End)
+	if _, err := h.dispatcher(t, plan).Resume(context.Background()); err == nil {
+		t.Fatal("Resume() = nil with an unopenable journal")
+	}
+	if plan.calls != 0 {
+		t.Errorf("plan ran %d times, want 0", plan.calls)
+	}
+	if got := schemaVersionOnDisk(t, h.layout.ManifestPath()); got != state.ManifestSchemaVersion {
+		t.Errorf("manifest.json is at schema version %d before belay's first write to the run, want %d",
+			got, state.ManifestSchemaVersion)
 	}
 }
