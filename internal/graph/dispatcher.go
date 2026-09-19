@@ -115,7 +115,7 @@ type Outcome struct {
 	// the run's cumulative step count, which lives in the manifest.
 	Steps int
 	// Usage is the run's cumulative usage, including everything spent before
-	// a resume, as restored from the manifest.
+	// a resume, as rebuilt from the journal.
 	Usage belay.Usage
 	// Note is a short, redacted, human-readable reason, matching the note
 	// written to the journal.
@@ -376,13 +376,14 @@ func (d *Dispatcher) dispatch(ctx context.Context, resuming bool) (Outcome, erro
 		return Outcome{ExitCode: ExitFailed}, fmt.Errorf("graph: resolve resume point: %w", err)
 	}
 
-	// Restore, never New: a resumed run must keep accumulating spend from
+	// Rebuilt, never New: a resumed run must keep accumulating spend from
 	// where the crash left off. A fresh ledger would hand every crash a full
 	// ceiling to spend again, turning a hard cap into a suggestion. For a
-	// fresh run the manifest's budget block is zero, so Restore is exactly
-	// New — which is why this is unconditional rather than a branch that
-	// could be wrong.
-	ledger := budget.Restore(restoreSnapshot(man.Budget))
+	// fresh run the journal and the manifest's budget block are both empty,
+	// so this is exactly New — which is why it is unconditional rather than
+	// a branch that could be wrong. See rebuildLedger for why the journal,
+	// and not the manifest, is what it is rebuilt from.
+	ledger := rebuildLedger(read.Records, man.Budget)
 
 	// Heal the run-level bookkeeping a crash can leave behind, before any new
 	// record is appended. start is computed above, from the records as the
@@ -983,8 +984,10 @@ func (d *Dispatcher) endRun(
 }
 
 // persist writes the manifest's lifecycle fields and the ledger's current
-// snapshot. The budget snapshot is what a later resume restores from, so it is
-// written after every node rather than only at the end of the run.
+// snapshot. A later resume rebuilds the ledger from the journal, and uses this
+// snapshot only as the floor beneath it (rebuildLedger); it is written after
+// every node all the same, so `belay runs` and anything else that reads the
+// manifest see the spend as it stands.
 func (d *Dispatcher) persist(
 	man *state.Manifest, status state.RunStatus, current string, ledger *budget.Ledger,
 ) error {
@@ -1018,6 +1021,33 @@ func journalUsage(u belay.Usage) *journal.Usage {
 		InputTokens: u.InputTokens, OutputTokens: u.OutputTokens,
 		USD: u.USD, Estimated: u.Estimated,
 	}
+}
+
+// rebuildLedger returns the ledger a dispatch of this run starts from: the
+// Usage of every node_finished in records, with the manifest's budget block as
+// a floor (budget.Rebuild).
+//
+// The journal is the source of truth for spend, as it is for everything else
+// a resume decides. settle appends a node's node_finished, Usage and all, and
+// only afterwards saves the manifest, so a crash between the two leaves a
+// manifest that never heard of that node's cost. Restoring from the manifest,
+// as the dispatcher once did, let a resumed run spend it again.
+//
+// Only node_finished carries Usage (journal.Record). A record with none — a
+// journal written before usage was accounted for — contributes nothing, and
+// the floor still carries whatever that run's manifest saved.
+func rebuildLedger(records []journal.Record, saved state.Budget) *budget.Ledger {
+	var entries []budget.NodeUsage
+	for _, r := range records {
+		if r.Event != journal.EventNodeFinished || r.Usage == nil {
+			continue
+		}
+		entries = append(entries, budget.NodeUsage{Node: r.Node, Usage: belay.Usage{
+			InputTokens: r.Usage.InputTokens, OutputTokens: r.Usage.OutputTokens,
+			USD: r.Usage.USD, Estimated: r.Usage.Estimated,
+		}})
+	}
+	return budget.Rebuild(entries, restoreSnapshot(saved))
 }
 
 // restoreSnapshot converts the manifest's budget block into the ledger's

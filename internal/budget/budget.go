@@ -45,11 +45,15 @@
 //
 // # Resumption
 //
-// internal/state owns manifest.json; this package never imports it. A
-// dispatcher persists a Ledger's Snapshot into the manifest's budget block
-// after every node and, on resume, calls Restore instead of New — see
-// Snapshot's and Restore's doc comments for why skipping this turns a hard
-// budget cap into a suggestion that resets on every crash.
+// internal/state owns manifest.json and internal/journal owns the journal;
+// this package imports neither. A dispatcher persists a Ledger's Snapshot
+// into the manifest's budget block after every node and, on resume, calls
+// Rebuild instead of New, handing it every node's Usage from the journal and
+// the manifest's Snapshot as a floor. Starting a resumed run from New turns a
+// hard budget cap into a suggestion that resets on every crash; starting it
+// from the Snapshot alone lets it spend again whatever the last node cost, if
+// the crash landed after that node's journal record and before the manifest
+// was saved. See Rebuild.
 package budget
 
 import (

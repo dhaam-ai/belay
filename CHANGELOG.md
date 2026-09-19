@@ -231,6 +231,12 @@ that only `pkg/belay` carries a compatibility promise. Everything under
   its whole budget a second time. Whatever the agent reported spending is
   now added to the run's total and written to the journal, however the step
   ended.
+- **A resumed run no longer forgets what its last step cost.** belay
+  records a step's cost in the journal and then saves it in manifest.json.
+  If belay was killed between the two, `belay resume` read the older total
+  from manifest.json and let the run spend that step's cost again, past
+  `budget.max_usd`. A resume now adds up the cost of every step in the
+  journal, and never starts below the total manifest.json saved.
 
 ## v0.1.4 — 2026-09-17
 

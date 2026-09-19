@@ -658,6 +658,83 @@ func TestDispatcher_ResumeContinuesTheLedgerRatherThanResettingIt(t *testing.T) 
 	}
 }
 
+// TestDispatcher_ResumeRebuildsTheLedgerFromTheJournal closes the stale
+// window ADR-0007's ledger used to leave open. The dispatcher appends a
+// node's node_finished, Usage included, and only then saves the manifest's
+// budget block. A crash between the two left a manifest that had never heard
+// of the node's spend, and a resume that restored the ledger from that
+// manifest let the run spend it again. The journal is the durable record, so
+// the ledger is rebuilt from it.
+func TestDispatcher_ResumeRebuildsTheLedgerFromTheJournal(t *testing.T) {
+	journalled := belay.Usage{InputTokens: 1000, OutputTokens: 200, USD: 3.00}
+	tests := []struct {
+		name     string
+		maxUSD   float64
+		wantCode int
+		wantUSD  float64
+		wantErr  error
+	}{
+		{
+			name:     "a resume counts the spend the journal recorded",
+			maxUSD:   100.00,
+			wantCode: 1,
+			wantUSD:  3.00 + 1.00,
+		},
+		{
+			name:     "a resume meets the ceiling the journal says the run reached",
+			maxUSD:   2.00,
+			wantCode: 0,
+			wantUSD:  3.00,
+			wantErr:  belay.ErrBudgetExceeded,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			h := newRun(t, budgetCfg(tt.maxUSD, 0), "count what the journal says")
+			// The manifest's budget block is still zero: the previous
+			// process died after journalling plan's spend and before
+			// saving the manifest.
+			h.seedJournal(t,
+				journal.Record{Event: journal.EventRunStarted},
+				journal.Record{Event: journal.EventNodeStarted, Node: graph.NodePlan, Attempt: 1},
+				journal.Record{
+					Event: journal.EventNodeFinished, Node: graph.NodePlan, Attempt: 1,
+					Status: journal.StatusOK, Next: graph.NodeCode,
+					Usage: &journal.Usage{
+						InputTokens: journalled.InputTokens, OutputTokens: journalled.OutputTokens,
+						USD: journalled.USD,
+					},
+				},
+			)
+
+			code := &fakeNode{name: graph.NodeCode, steps: []nodeStep{{
+				res: Result{
+					Next: graph.End, Status: journal.StatusOK,
+					Usage: belay.Usage{InputTokens: 10, OutputTokens: 5, USD: 1.00},
+				},
+			}}}
+			out, err := h.dispatcher(t, ok(graph.NodePlan, graph.NodeCode), code).Resume(context.Background())
+
+			if tt.wantErr != nil && !errors.Is(err, tt.wantErr) {
+				t.Fatalf("Resume() error = %v, want one wrapping %v", err, tt.wantErr)
+			}
+			if tt.wantErr == nil && err != nil {
+				t.Fatalf("Resume() error = %v, want nil", err)
+			}
+			if code.calls != tt.wantCode {
+				t.Errorf("code ran %d times, want %d", code.calls, tt.wantCode)
+			}
+			if !closeTo(out.Usage.USD, tt.wantUSD) {
+				t.Errorf("Outcome.Usage.USD = %v, want %v: the spend the journal recorded before the crash was lost",
+					out.Usage.USD, tt.wantUSD)
+			}
+			if got := h.manifest(t).Budget; !closeTo(got.SpentUSD, tt.wantUSD) {
+				t.Errorf("manifest.Budget.SpentUSD = %v, want %v", got.SpentUSD, tt.wantUSD)
+			}
+		})
+	}
+}
+
 // TestDispatcher_RecordsWhatARejectedNodeSpent is the first half of the
 // budget-integrity contract ADR-0007 makes: money a backend reports having
 // spent is spent, whatever the dispatcher then decides about the node's

@@ -531,8 +531,9 @@ func TestDurability_TornJournalTail_IsHealedNotTreatedAsCorruption(t *testing.T)
 }
 
 // TestDurability_LedgerContinuesAcrossACrash_NotResets is acceptance
-// scenario 5: budget.Restore, not budget.New, is what a resume must call, or
-// every crash hands a runaway run a fresh ceiling to spend through again.
+// scenario 5: a resume must rebuild the ledger from what the run has already
+// spent (budget.Rebuild), never start it from budget.New, or every crash hands
+// a runaway run a fresh ceiling to spend through again.
 // This test spends real (fake) money before a crash and real money after
 // one, and checks the two amounts landed on disk summed, exactly -- a
 // numeric assertion, not merely "spend is non-zero".
@@ -566,9 +567,9 @@ func TestDurability_LedgerContinuesAcrossACrash_NotResets(t *testing.T) {
 		t.Errorf("plan ran again after resume, want 0 calls: it already finished before the crash")
 	}
 
-	// 1.50 (before the crash, restored) + 2.25 (after) = 3.75, exactly. Not
+	// 1.50 (before the crash, rebuilt) + 2.25 (after) = 3.75, exactly. Not
 	// 2.25, which is what a resume that called budget.New instead of
-	// budget.Restore would report -- see this suite's mutation test.
+	// rebuilding the ledger would report -- see this suite's mutation test.
 	const want = 1.50 + 2.25
 	if !durabilityCloseTo(out.Usage.USD, want) {
 		t.Errorf("Outcome.Usage.USD = %v, want %v", out.Usage.USD, want)
