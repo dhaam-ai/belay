@@ -563,6 +563,9 @@ type Result struct {
 //     there, at attempt 1.
 //   - The most recent node_started has no matching node_finished: that node
 //     died mid-execution. Re-run it at attempt+1.
+//   - The most recent node_finished closed an interrupted attempt (see
+//     Record.Interrupted): re-run that node at attempt+1, exactly as if the
+//     attempt had been left open.
 //   - The journal's last record is a run-lifecycle marker (run_paused,
 //     run_completed, run_failed or run_aborted): State reports it, while
 //     Node and Attempt still carry the position resolved from the records
@@ -584,6 +587,12 @@ func ResolveStart(records []Record) (Result, error) {
 	node, attempt := FirstNode, 1
 	if lastFinished != nil {
 		node, attempt = lastFinished.Next, 1
+		if lastFinished.Interrupted() {
+			// The same visit, cut short and closed so it could be run
+			// again. Starting it over at attempt 1 would give the retry the
+			// number of the attempt it replaces.
+			attempt = lastFinished.Attempt + 1
+		}
 	}
 
 	if len(records) == 0 {

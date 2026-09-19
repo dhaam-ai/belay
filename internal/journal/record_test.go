@@ -525,3 +525,57 @@ func TestRecordValidate(t *testing.T) {
 		})
 	}
 }
+
+// TestRecordInterrupted pins the one shape that means "this attempt was cut
+// short and its node runs again", against every near miss that means
+// something else: an abort that ended the run, a gate's own pause, a node
+// that routed back to itself on success, and records that are not a
+// node_finished at all.
+func TestRecordInterrupted(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name string
+		rec  Record
+		want bool
+	}{
+		{
+			name: "aborted and naming its own node",
+			rec:  Record{Event: EventNodeFinished, Node: "code", Attempt: 1, Status: StatusAborted, Next: "code"},
+			want: true,
+		},
+		{
+			name: "aborted with no next ended the run",
+			rec:  Record{Event: EventNodeFinished, Node: "code", Attempt: 1, Status: StatusAborted},
+		},
+		{
+			name: "aborted naming another node",
+			rec:  Record{Event: EventNodeFinished, Node: "code", Attempt: 1, Status: StatusAborted, Next: "write"},
+		},
+		{
+			name: "a gate's pause names itself but finished its work",
+			rec:  Record{Event: EventNodeFinished, Node: "approve", Attempt: 1, Status: StatusPaused, Next: "approve"},
+		},
+		{
+			name: "ok routing back to itself is a loop, not an interruption",
+			rec:  Record{Event: EventNodeFinished, Node: "fix", Attempt: 1, Status: StatusOK, Next: "fix"},
+		},
+		{
+			name: "a node_started is not a finish",
+			rec:  Record{Event: EventNodeStarted, Node: "code", Attempt: 1},
+		},
+		{
+			name: "a run-level marker is not a finish",
+			rec:  Record{Event: EventRunPaused},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			if got := tt.rec.Interrupted(); got != tt.want {
+				t.Errorf("Interrupted() = %v, want %v for %+v", got, tt.want, tt.rec)
+			}
+		})
+	}
+}

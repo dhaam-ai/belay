@@ -126,7 +126,9 @@ const (
 	// StatusPaused means the node's own logic (such as an approval gate)
 	// suspended the run before its successor would begin.
 	StatusPaused
-	// StatusAborted means the node's execution was cut short.
+	// StatusAborted means the node's execution was cut short. A record
+	// that also names its own node as Next closed an attempt that will be
+	// run again; see Record.Interrupted.
 	StatusAborted
 )
 
@@ -213,10 +215,11 @@ type Record struct {
 	// across a journal's records is never valid.
 	Seq uint64 `json:"seq"`
 	// Attempt is the 1-based execution attempt of Node. It increments only
-	// when a previous attempt of the same visit to Node died without a
-	// matching EventNodeFinished (see ResolveStart); a fresh visit to Node
-	// later in the graph — a loop iteration, not a crash recovery — starts
-	// over at attempt 1.
+	// when a previous attempt of the same visit to Node was cut short: it
+	// died without a matching EventNodeFinished, or its EventNodeFinished
+	// closed it as interrupted (see Record.Interrupted and ResolveStart). A
+	// fresh visit to Node later in the graph — a loop iteration, not a
+	// recovery — starts over at attempt 1.
 	Attempt int `json:"attempt,omitempty"`
 	// Node is the node this record concerns. Empty for run-level events.
 	Node string `json:"node,omitempty"`
@@ -247,6 +250,21 @@ type Record struct {
 	// and displayed verbatim, and redaction is internal/exec's
 	// responsibility, not this package's.
 	Note string `json:"note,omitempty"`
+}
+
+// Interrupted reports whether r closes an attempt that was cut short and whose
+// node must run again: a node_finished with StatusAborted that names its own
+// Node as Next.
+//
+// The dispatcher writes that shape when it closes an attempt it will re-run,
+// and at no other time: today, when a crash left the attempt open. An abort
+// that ends the run names no Next, which is how the two are told apart.
+//
+// The shape was chosen over a new Status so that a journal written this way
+// reads, to anything that does not call Interrupted, as what it is: the
+// attempt was aborted.
+func (r Record) Interrupted() bool {
+	return r.Event == EventNodeFinished && r.Status == StatusAborted && r.Next != "" && r.Next == r.Node
 }
 
 // validate reports whether r is well-formed enough to append: a known
