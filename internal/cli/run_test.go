@@ -3,15 +3,18 @@ package cli
 import (
 	"bytes"
 	"context"
+	"encoding/csv"
 	"errors"
 	"log/slog"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/spf13/cobra"
+	"github.com/spf13/pflag"
 
 	"github.com/dhaam-ai/belay/internal/graph"
 	"github.com/dhaam-ai/belay/internal/journal"
@@ -23,13 +26,14 @@ import (
 // captured.
 //
 // The command tree is a package-level singleton, because subcommands register
-// themselves through init(); flag values therefore outlive one invocation and
-// have to be reset by hand. Tests using it must not run in parallel.
+// themselves through init(); flag values therefore outlive one invocation.
+// runCLI puts every flag in the tree back to its default first, so a command
+// or flag added later is covered without editing this helper. Tests using it
+// must not run in parallel.
 func runCLI(t *testing.T, args ...string) (stdout, stderr string, err error) {
 	t.Helper()
 
-	rootFlags.configPath, rootFlags.verbose, rootFlags.noColor, rootFlags.dryRun = "", false, false, false
-	rootFlags.workspace, runFlags.cassette = ".", ""
+	resetFlags(t, rootCmd)
 
 	var out, errOut bytes.Buffer
 	rootCmd.SetOut(&out)
@@ -41,18 +45,46 @@ func runCLI(t *testing.T, args ...string) (stdout, stderr string, err error) {
 		rootCmd.SetArgs(nil)
 	})
 
-	resetHelpFlags()
 	err = rootCmd.Execute()
 	return out.String(), errOut.String(), err
 }
 
-// resetHelpFlags clears the --help flag cobra sets on whichever command last
-// printed help. Without it, one `belay run --help` in a test file turns every
-// later invocation into another help screen.
-func resetHelpFlags() {
-	for _, cmd := range append([]*cobra.Command{rootCmd}, rootCmd.Commands()...) {
-		_ = cmd.Flags().Set("help", "false")
+// resetFlags sets every flag of cmd and of every command under it back to its
+// default, and forgets that it was set. That includes the --help flag cobra
+// adds to whichever command last printed help, which would otherwise turn
+// every later invocation into another help screen.
+func resetFlags(t *testing.T, cmd *cobra.Command) {
+	t.Helper()
+	reset := func(f *pflag.Flag) {
+		if err := setToDefault(f); err != nil {
+			t.Fatalf("reset --%s on %q to %q: %v", f.Name, cmd.Name(), f.DefValue, err)
+		}
+		f.Changed = false
 	}
+	cmd.PersistentFlags().VisitAll(reset)
+	cmd.Flags().VisitAll(reset)
+	for _, sub := range cmd.Commands() {
+		resetFlags(t, sub)
+	}
+}
+
+// setToDefault sets f to its DefValue. A list flag needs Replace: its Set
+// appends once the flag has been set, so setting the default would add the
+// defaults to what the last invocation left.
+func setToDefault(f *pflag.Flag) error {
+	list, ok := f.Value.(pflag.SliceValue)
+	if !ok {
+		return f.Value.Set(f.DefValue)
+	}
+	inner := strings.TrimSuffix(strings.TrimPrefix(f.DefValue, "["), "]")
+	if inner == "" {
+		return list.Replace(nil)
+	}
+	values, err := csv.NewReader(strings.NewReader(inner)).Read()
+	if err != nil {
+		return err
+	}
+	return list.Replace(values)
 }
 
 // assertPlainText is the non-TTY contract: piping belay anywhere must produce
@@ -61,6 +93,61 @@ func assertPlainText(t *testing.T, label, s string) {
 	t.Helper()
 	if strings.ContainsRune(s, '\x1b') {
 		t.Errorf("%s contains an ANSI escape sequence; output to a non-terminal must be plain:\n%q", label, s)
+	}
+}
+
+// TestRunCLIStartsEachInvocationFromTheDefaults pins runCLI's promise to
+// every test that uses it: a flag one invocation sets does not carry into
+// the next, whichever command owns the flag. The command tree is one
+// package-level value, so without the reset a --json from one test would
+// silently change the output of the next.
+func TestRunCLIStartsEachInvocationFromTheDefaults(t *testing.T) {
+	ws := t.TempDir()
+
+	asJSON, _, err := runCLI(t, "runs", "--workspace", ws, "--json")
+	if err != nil {
+		t.Fatalf("belay runs --json: %v", err)
+	}
+	if !strings.HasPrefix(strings.TrimSpace(asJSON), "{") {
+		t.Fatalf("belay runs --json did not print JSON, so this test proves nothing:\n%s", asJSON)
+	}
+
+	plain, _, err := runCLI(t, "runs", "--workspace", ws)
+	if err != nil {
+		t.Fatalf("belay runs: %v", err)
+	}
+	if strings.HasPrefix(strings.TrimSpace(plain), "{") {
+		t.Errorf("--json from the previous invocation carried into this one:\n%s", plain)
+	}
+}
+
+// TestSetToDefaultRestoresAListFlag covers the flag kind whose Set appends
+// once the flag has been set, so that setting its default would keep what
+// the last invocation left. No command has a list flag yet; runCLI must not
+// start leaking one when a command does.
+func TestSetToDefaultRestoresAListFlag(t *testing.T) {
+	tests := []struct {
+		name     string
+		defaults []string
+	}{
+		{name: "empty default", defaults: []string{}},
+		{name: "default with values", defaults: []string{"a", "b,c"}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			flags := pflag.NewFlagSet("test", pflag.ContinueOnError)
+			got := flags.StringSlice("names", tt.defaults, "")
+			if err := flags.Parse([]string{"--names", "x", "--names", "y"}); err != nil {
+				t.Fatalf("parse: %v", err)
+			}
+
+			if err := setToDefault(flags.Lookup("names")); err != nil {
+				t.Fatalf("setToDefault: %v", err)
+			}
+			if !slices.Equal(*got, tt.defaults) {
+				t.Errorf("--names = %q after reset, want its default %q", *got, tt.defaults)
+			}
+		})
 	}
 }
 
