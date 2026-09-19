@@ -1,6 +1,6 @@
 // Package cli assembles belay's cobra command tree. Subcommands register
-// themselves from their own packages via init(); only the root and version
-// commands are defined here.
+// themselves from their own files via init(); only the root and version
+// commands are defined in this one.
 //
 // # Two streams, on purpose
 //
@@ -123,8 +123,8 @@ func init() {
 		"the repository belay reads and edits")
 
 	rootCmd.AddCommand(versionCmd)
-	// NOTE: Other subcommands (run, resume, runs, timeline) are registered by
-	// their respective packages via init(). Do not add them here.
+	// Every other command registers itself from the init() of the file that
+	// defines it, so adding a command never means editing this file.
 }
 
 var versionCmd = &cobra.Command{
