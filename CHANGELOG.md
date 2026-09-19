@@ -25,6 +25,15 @@ that only `pkg/belay` carries a compatibility promise. Everything under
 
 ### Fixed
 
+- **Files changed in the fix loop are now recorded with the rest of the
+  run's change.** belay keeps a list of the files a run changed, taken from
+  the files the agent reports after writing the code. When a test or the
+  quality gate failed and the agent repaired it, the files that repair
+  touched were never added, so the list belay passes to a reviewer, and
+  shows the agent on its next repair, left them out. belay now asks the
+  agent which files each repair changed and adds them to the list, each
+  file once. A repair that reports a path outside the repository fails the
+  run, as the first change already did.
 - **Ctrl-C now leaves a run that `belay resume` continues.** `belay run
   --help` promised this, but Ctrl-C, or a SIGTERM, ended the run as
   aborted: belay printed `belay resume <id>`, and `belay resume` then

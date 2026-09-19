@@ -162,7 +162,7 @@ The run progresses through a directed graph of nodes (see `internal/graph/node.g
 - **code** (Agent): Uses the agent to implement the plan. If fanout is enabled, branches to fanout; else proceeds to write.
 - **write** (Agent): Commits code changes (writes files, formats). Branches to test.
 - **test** (TestRunner): Executes the test suite. If all tests pass, branches to review; if any fail, branches to fix.
-- **fix** (Agent): Uses the agent to fix failing tests. Branches back to test (bounded by attempt counter graph.give_up to prevent infinite loops).
+- **fix** (Agent): Uses the agent to fix failing tests, and adds the files the repair reports changing to the run's list of changed files (state.Code.ChangedFiles). Branches back to test (bounded by attempt counter graph.give_up to prevent infinite loops).
 - **review** (Linter or Reviewer): Runs static analysis or AI review. If gate passes, branches to END; if gate fails, branches to fix.
 - **fanout** (Isolator): Creates N isolated workspaces and runs each from code onward in parallel. Branches to join.
 - **join** (Merge): Selects the best candidate (by gate, coverage, cost) and merges back to main. Branches to review. **Note**: join is not implemented; fanout is disabled (ADR-0004).
