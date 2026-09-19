@@ -16,3 +16,10 @@ linters:
     - errorlint
     - gocritic
     - misspell
+
+# gofmt as a formatter makes `golangci-lint run` report any file gofmt
+# would change, so an unformatted file fails the Lint job instead of
+# waiting for someone to run gofmt -l by hand.
+formatters:
+  enable:
+    - gofmt
