@@ -442,13 +442,27 @@ type fieldDoc struct {
 // A heading at any level counts, because the docs nest deeper sections one
 // level deeper: review.sonar.* sits under #### and review.ai.mcp.* under
 // #####. An attribute line belongs to the nearest heading above it until the
-// next heading of any level, and lines inside a fenced block are skipped, so
-// a shell comment in an example is not read as a heading. The first of a
-// repeated attribute wins.
+// next heading of any level. The first of a repeated attribute wins.
+//
+// Two kinds of line are not the docs' own text, and are skipped. A line inside
+// a fenced block is an example, so a shell comment in one is not a heading. A
+// line inside an HTML comment is not rendered at all: the file carries
+// <!-- slice:NAME --> markers that slices write prose around, and a field
+// drafted inside a comment is not a documented field. A comment marker inside
+// a fenced block is code, and opens nothing.
 func parseFieldDocs(src string) map[string]fieldDoc {
 	docs := map[string]fieldDoc{}
-	current, inFence := "", false
+	current, inFence, inComment := "", false, false
 	for i, line := range strings.Split(src, "\n") {
+		switch {
+		case inComment:
+			inComment = !strings.Contains(line, "-->")
+			continue
+		case !inFence && strings.Contains(line, "<!--"):
+			_, after, _ := strings.Cut(line, "<!--")
+			inComment = !strings.Contains(after, "-->")
+			continue
+		}
 		if strings.HasPrefix(strings.TrimSpace(line), "```") {
 			inFence = !inFence
 			continue
@@ -539,6 +553,27 @@ func TestParseFieldDocs(t *testing.T) {
 			name: "the first of a repeated attribute wins",
 			src:  "### `agent.mode`\n**Default**: `\"live\"`\n**Default**: `\"auto\"`\n",
 			want: map[string]fieldDoc{"agent.mode": {Line: 1, Default: "`\"live\"`"}},
+		},
+		{
+			// Slices add prose around their <!-- slice:NAME --> markers, and a
+			// field drafted inside a comment is not a documented field.
+			name: "a heading inside a multi-line HTML comment is not a field",
+			src: "### `graph.give_up`\n**Type**: Integer\n\n<!--\n### `ghost.field`\n**Type**: String\n-->\n\n" +
+				"### `graph.max_steps`\n**Type**: Integer\n",
+			want: map[string]fieldDoc{
+				"graph.give_up":   {Line: 1, Type: "Integer"},
+				"graph.max_steps": {Line: 9, Type: "Integer"},
+			},
+		},
+		{
+			name: "an attribute inside an HTML comment is not the field's",
+			src:  "### `graph.give_up`\n<!-- drafted, not decided:\n**Type**: String\n-->\n**Type**: Integer\n",
+			want: map[string]fieldDoc{"graph.give_up": {Line: 1, Type: "Integer"}},
+		},
+		{
+			name: "a comment marker inside a fenced block is code, not a comment",
+			src:  "### `budget.max_usd`\n```html\n<!-- an example -->\n<!--\n```\n**Default**: `5.00`\n",
+			want: map[string]fieldDoc{"budget.max_usd": {Line: 1, Default: "`5.00`"}},
 		},
 	}
 	for _, tt := range tests {
