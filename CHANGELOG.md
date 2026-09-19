@@ -35,6 +35,13 @@ that only `pkg/belay` carries a compatibility promise. Everything under
 
 ### Fixed
 
+- **Stopping a run with Ctrl-C no longer costs it a step.** The interrupted
+  step was counted against `graph.max_steps` before the run was paused, so a
+  run stopped twice had two fewer steps left to finish in than one killed
+  twice — although `belay run`'s help promises that Ctrl-C leaves the run
+  where a kill would. It also moved the re-run's evidence directory under
+  `nodes/` beside the attempt it replaces rather than over it. Only a step the
+  run acted on is counted now.
 - **A version-1 run's manifest is now saved at the current schema version
   before belay writes anything else to the run.** Resuming a run belay v0.1.x
   started upgrades both of its documents, and state.json was saved first — by

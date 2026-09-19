@@ -1114,12 +1114,16 @@ type interruptingNode struct {
 	cancel context.CancelFunc
 	finish bool
 	calls  int
+	// seenStep records the RunContext.Step of each execution, which is the
+	// step number the run would have spent on it.
+	seenStep []int
 }
 
 func (n *interruptingNode) Name() string { return n.name }
 
-func (n *interruptingNode) Run(ctx context.Context, _ *graph.RunContext) (graph.Result, error) {
+func (n *interruptingNode) Run(ctx context.Context, rc *graph.RunContext) (graph.Result, error) {
 	n.calls++
+	n.seenStep = append(n.seenStep, rc.Step)
 	n.cancel()
 	<-ctx.Done()
 	if n.finish {
@@ -1454,4 +1458,75 @@ func TestDispatcher_SavesTheManifestAtTheCurrentVersionBeforeItWritesAnything(t 
 		t.Errorf("manifest.json is at schema version %d before belay's first write to the run, want %d",
 			got, state.ManifestSchemaVersion)
 	}
+}
+
+// TestDispatcher_AnInterruptedAttemptDoesNotConsumeAStep pins what an
+// interruption costs the run: nothing. Options.SuspendOnCancel promises the
+// attempt number, the discarded Result and the re-run "a kill at the same
+// moment would have produced", and a kill costs no step — the crashed process
+// never got to write the manifest.
+//
+// A step is not bookkeeping. graph.max_steps is counted in them, so a person
+// who presses Ctrl-C twice has fewer steps left to finish the run with than
+// one who was killed twice; and a node's evidence directory is named after
+// its step, so the re-run of an interrupted node would write beside the
+// attempt it replaces rather than over it.
+func TestDispatcher_AnInterruptedAttemptDoesNotConsumeAStep(t *testing.T) {
+	t.Run("Ctrl-C inside the node", func(t *testing.T) {
+		h := newRun(t, config.Default(), "stop when asked")
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+
+		code := &interruptingNode{name: graph.NodeCode, cancel: cancel}
+		_, err := h.suspendingDispatcher(t, true, ok(graph.NodePlan, graph.NodeCode), code).Run(ctx)
+		if !errors.Is(err, graph.ErrInterrupted) {
+			t.Fatalf("Run() error = %v, want one wrapping ErrInterrupted", err)
+		}
+		if got := code.seenStep; len(got) != 1 || got[0] != 2 {
+			t.Fatalf("the interrupted attempt ran at steps %v, want [2]", got)
+		}
+		if got := h.manifest(t).Step; got != 1 {
+			t.Errorf("manifest.Step = %d after an interrupted attempt, want 1: only plan finished", got)
+		}
+
+		code2 := ok(graph.NodeCode, graph.End)
+		if _, err := h.suspendingDispatcher(t, true, ok(graph.NodePlan, graph.NodeCode), code2).
+			Resume(context.Background()); err != nil {
+			t.Fatalf("Resume() error = %v, want nil", err)
+		}
+		if got := code2.seenStep; len(got) != 1 || got[0] != 2 {
+			t.Errorf("the re-run ran at steps %v, want [2]: the same step the interrupted attempt had", got)
+		}
+	})
+
+	// The same run as a kill leaves it: plan finished and counted, code
+	// opened and never closed. This is the behaviour the row above must
+	// match, and it is a guard, not a change.
+	t.Run("a kill at the same moment", func(t *testing.T) {
+		h := newRun(t, config.Default(), "survive a kill")
+		h.seedJournal(t,
+			journal.Record{Event: journal.EventRunStarted},
+			journal.Record{Event: journal.EventNodeStarted, Node: graph.NodePlan, Attempt: 1},
+			journal.Record{
+				Event: journal.EventNodeFinished, Node: graph.NodePlan, Attempt: 1,
+				Status: journal.StatusOK, Next: graph.NodeCode, Usage: &journal.Usage{},
+			},
+			journal.Record{Event: journal.EventNodeStarted, Node: graph.NodeCode, Attempt: 1},
+		)
+		man := h.manifest(t)
+		man.Step = 1
+		man.CurrentNode = graph.NodeCode
+		if err := h.store.SaveManifest(man); err != nil {
+			t.Fatalf("SaveManifest: %v", err)
+		}
+
+		code := ok(graph.NodeCode, graph.End)
+		if _, err := h.dispatcher(t, ok(graph.NodePlan, graph.NodeCode), code).
+			Resume(context.Background()); err != nil {
+			t.Fatalf("Resume() error = %v, want nil", err)
+		}
+		if got := code.seenStep; len(got) != 1 || got[0] != 2 {
+			t.Errorf("the re-run after a kill ran at steps %v, want [2]", got)
+		}
+	})
 }

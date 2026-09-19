@@ -222,9 +222,11 @@ type Options struct {
 // closed with the record heal writes for an attempt a crash left open
 // (journal.Record.Interrupted), run_paused follows it, and Resume re-runs the
 // node at the next attempt. That is the crash-recovery path with the journal
-// already healed. The attempt number, the discarded Result and the re-run are
-// what a kill at the same moment would have produced, but the journal says the
-// run was asked to stop, and the manifest says paused rather than running.
+// already healed. The attempt number, the step count, the discarded Result and
+// the re-run are what a kill at the same moment would have produced — an
+// interrupted execution is not counted as a step, exactly as a killed one is
+// not (see settle) — but the journal says the run was asked to stop, and the
+// manifest says paused rather than running.
 //
 // Pausing needs no event or status of its own. An older belay reads the
 // journal as a run paused at that node, which its resume already continues,
@@ -639,11 +641,9 @@ func (d *Dispatcher) loop(
 		logger.Info("belay/graph: node started")
 
 		exec := d.execute(ctx, node, rc)
-
-		man.Step = step
 		steps++
 
-		out, err := d.settle(jrnl, man, ledger, node.Name(), attempt, started.Seq, steps, exec, logger)
+		out, err := d.settle(jrnl, man, ledger, node.Name(), attempt, started.Seq, step, steps, exec, logger)
 		if out != nil {
 			return *out, err
 		}
@@ -742,7 +742,7 @@ func (d *Dispatcher) execute(ctx context.Context, n Node, rc *RunContext) nodeOu
 //nolint:gocritic // the branching here is the run's terminal-state table; splitting it hides the shape.
 func (d *Dispatcher) settle(
 	jrnl *journal.Journal, man *state.Manifest, ledger *budget.Ledger,
-	node string, attempt int, startedSeq uint64, steps int, exec nodeOutcome, logger *slog.Logger,
+	node string, attempt int, startedSeq uint64, step, steps int, exec nodeOutcome, logger *slog.Logger,
 ) (*Outcome, error) {
 	// The rejected paths. None of them applies a Patch or records Usage:
 	// each means the Result is untrustworthy or absent. A run that ends here
@@ -780,7 +780,17 @@ func (d *Dispatcher) settle(
 			fmt.Errorf("%w: %q returned an unusable Result: %w", ErrNodeFailed, node, err), logger)
 	}
 
-	// Accepted. Apply the patch FIRST — see the ordering contract on
+	// Accepted, and only now is this execution one of the run's steps.
+	// man.Step counts the executions the run acted on: it is what
+	// graph.max_steps is measured against, and what names a node's evidence
+	// directory. An execution that timed out, failed or was interrupted
+	// produced no Result to act on, and a kill at the same moment would have
+	// counted nothing either — the process died before it could write the
+	// manifest. Counting one would spend a step of the run's budget on an
+	// interruption, and move the re-run's evidence directory beside the
+	// attempt it replaces instead of over it.
+	man.Step = step
+	// Apply the patch FIRST — see the ordering contract on
 	// Dispatcher. History is keyed on the node_started record's Seq: a real,
 	// already-durable journal sequence number unique to this attempt, which
 	// is what makes re-applying this patch after a crash idempotent.
