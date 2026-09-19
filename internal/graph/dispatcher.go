@@ -339,7 +339,8 @@ func (d *Dispatcher) dispatch(ctx context.Context, resuming bool) (Outcome, erro
 //     first as corruption, and refuses to open such a file ever again — so
 //     retrying without closing the dead attempt would brick the run's journal
 //     on its first crash. heal closes it as aborted, naming the same node in
-//     Next so that a crash during recovery itself still resolves back here.
+//     Next so that a crash during recovery itself still resolves back here,
+//     at the attempt after the one it closed (journal.Record.Interrupted).
 //
 //   - A terminal node_finished with no run-level marker after it: the process
 //     died between ending a node and recording that the run ended. Left alone,
@@ -372,7 +373,7 @@ func (d *Dispatcher) heal(jrnl *journal.Journal, records []journal.Record, start
 		return true, nil
 
 	case journal.EventNodeFinished:
-		event, runState, okToHeal := owedRunMarker(last.Status)
+		event, runState, okToHeal := owedRunMarker(last)
 		if !okToHeal {
 			return false, nil
 		}
@@ -390,11 +391,19 @@ func (d *Dispatcher) heal(jrnl *journal.Journal, records []journal.Record, start
 	}
 }
 
-// owedRunMarker maps a terminal node status onto the run-level record that
-// should have followed it. A StatusOK node is not terminal — the loop decides
-// what follows it — so it owes nothing.
-func owedRunMarker(status journal.Status) (journal.Event, journal.RunState, bool) {
-	switch status {
+// owedRunMarker maps a node_finished that ended the run onto the run-level
+// record that should have followed it. A StatusOK node is not terminal — the
+// loop decides what follows it — so it owes nothing.
+//
+// Neither does an attempt closed as interrupted (journal.Record.Interrupted),
+// although its status is aborted. heal writes one and then re-runs its node,
+// so a crash right after it leaves exactly that record last. Owing run_aborted
+// for it would end, for good, a run whose only fault was dying twice.
+func owedRunMarker(last journal.Record) (journal.Event, journal.RunState, bool) {
+	if last.Interrupted() {
+		return journal.EventUnknown, journal.RunStateRunnable, false
+	}
+	switch last.Status {
 	case journal.StatusFailed:
 		return journal.EventRunFailed, journal.RunStateFailed, true
 	case journal.StatusAborted:

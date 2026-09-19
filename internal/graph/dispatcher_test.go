@@ -1042,3 +1042,45 @@ func TestDispatcher_CrashBetweenNodeFinishedAndRunMarker(t *testing.T) {
 		})
 	}
 }
+
+// TestDispatcher_CrashAfterClosingAnInterruptedAttemptStillReRunsIt covers
+// the window inside recovery itself: heal has closed the dead attempt, naming
+// its own node as Next, and the process died before the retry's
+// node_started. That record is an attempt closed so it can be run again, not
+// an abort that ended the run, so nothing is owed: the next process re-runs
+// the node at the attempt after the closed one and finishes the run.
+func TestDispatcher_CrashAfterClosingAnInterruptedAttemptStillReRunsIt(t *testing.T) {
+	h := newRun(t, config.Default(), "crash during recovery")
+	h.seedJournal(t,
+		journal.Record{Event: journal.EventRunStarted},
+		journal.Record{Event: journal.EventNodeStarted, Node: graph.NodePlan, Attempt: 1},
+		journal.Record{
+			Event: journal.EventNodeFinished, Node: graph.NodePlan, Attempt: 1,
+			Status: journal.StatusAborted, Next: graph.NodePlan,
+		},
+	)
+	plan := ok(graph.NodePlan, graph.NodeCode)
+	code := ok(graph.NodeCode, graph.End)
+
+	out, err := h.dispatcher(t, plan, code).Run(context.Background())
+	if err != nil {
+		t.Fatalf("Run() error = %v, want nil: the run was interrupted, not ended", err)
+	}
+	if out.Status != state.RunStatusCompleted {
+		t.Fatalf("Outcome.Status = %v, want completed", out.Status)
+	}
+	if plan.calls != 1 || plan.attempts[0] != 2 {
+		t.Errorf("plan ran %d times at attempts %v, want 1 call at attempt 2", plan.calls, plan.attempts)
+	}
+
+	want := []string{
+		"run_started",
+		"plan#1 started", "plan#1 finished aborted -> plan",
+		"plan#2 started", "plan#2 finished ok -> code",
+		"code#1 started", "code#1 finished ok -> END",
+		"run_completed",
+	}
+	if got := h.timeline(t); !equalStrings(got, want) {
+		t.Errorf("timeline =\n  %v\nwant\n  %v", got, want)
+	}
+}
