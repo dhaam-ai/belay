@@ -1269,3 +1269,41 @@ func TestDispatcher_SuspendOnCancelDoesNotExcuseATimeout(t *testing.T) {
 		t.Errorf("timeline =\n  %v\nwant\n  %v", got, want)
 	}
 }
+
+// TestDispatcher_SuspendOnCancelStartsNoNodeOnceCancelled: once the caller
+// has cancelled, a suspending dispatcher starts nothing more. The run pauses
+// where it stands, with no attempt opened on a context that is already done
+// and none thrown away, and Resume starts that node at its first attempt.
+func TestDispatcher_SuspendOnCancelStartsNoNodeOnceCancelled(t *testing.T) {
+	h := newRun(t, config.Default(), "stopped before it began")
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	plan := ok(graph.NodePlan, graph.End)
+	out, err := h.suspendingDispatcher(t, true, plan).Run(ctx)
+	if !errors.Is(err, graph.ErrInterrupted) || !errors.Is(err, context.Canceled) {
+		t.Fatalf("Run() error = %v, want one wrapping both ErrInterrupted and context.Canceled", err)
+	}
+	if out.Status != state.RunStatusPaused || out.ExitCode != graph.ExitAborted ||
+		out.Node != graph.NodePlan || out.Steps != 0 {
+		t.Errorf("Outcome = {%v, exit %d, node %q, %d steps}, want {paused, exit %d, node %q, 0 steps}",
+			out.Status, out.ExitCode, out.Node, out.Steps, graph.ExitAborted, graph.NodePlan)
+	}
+	if plan.calls != 0 {
+		t.Errorf("plan ran %d times after the run was cancelled, want 0", plan.calls)
+	}
+	if got, want := h.timeline(t), []string{"run_started", "run_paused"}; !equalStrings(got, want) {
+		t.Errorf("timeline =\n  %v\nwant\n  %v", got, want)
+	}
+	if m := h.manifest(t); m.Status != state.RunStatusPaused || m.CurrentNode != graph.NodePlan {
+		t.Errorf("manifest = {%v, %q}, want {paused, %q}", m.Status, m.CurrentNode, graph.NodePlan)
+	}
+
+	plan2 := ok(graph.NodePlan, graph.End)
+	if _, err := h.suspendingDispatcher(t, true, plan2).Resume(context.Background()); err != nil {
+		t.Fatalf("Resume() error = %v, want nil", err)
+	}
+	if plan2.calls != 1 || plan2.attempts[0] != 1 {
+		t.Errorf("plan ran %d times at attempts %v on resume, want 1 call at attempt 1", plan2.calls, plan2.attempts)
+	}
+}

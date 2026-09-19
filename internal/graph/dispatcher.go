@@ -150,10 +150,11 @@ type Options struct {
 	// Defaults to a no-op, which still collapses whitespace and truncates.
 	Redact func(string) string
 	// SuspendOnCancel pauses the run, rather than ending it, when ctx is
-	// cancelled while a node runs, so Resume can continue it. The attempt
-	// that was interrupted is closed as one to run again, and Resume
-	// re-runs its node at the next attempt. Run returns ErrInterrupted.
-	// See "Cancellation" on Dispatcher.
+	// cancelled, so Resume can continue it. An attempt the cancellation
+	// interrupted is closed as one to run again, and Resume re-runs its
+	// node at the next attempt; a cancellation between nodes pauses the
+	// run before the next one starts. Run returns ErrInterrupted. See
+	// "Cancellation" on Dispatcher.
 	//
 	// It is off by default, so a caller that never set it still gets the
 	// run ended as aborted. `belay run` and `belay resume` set it, because
@@ -228,6 +229,9 @@ type Options struct {
 // Pausing needs no event or status of its own. An older belay reads the
 // journal as a run paused at that node, which its resume already continues,
 // so the run needs no capability in its manifest's requires list.
+//
+// A cancellation that arrives between nodes pauses the run before the next
+// one starts, with no attempt opened. Resume then starts that node afresh.
 //
 // Only cancellation suspends. A node timeout is the dispatcher's own guard and
 // still ends the run, as the budget ceiling and the step cap do: they are
@@ -576,6 +580,14 @@ func (d *Dispatcher) loop(
 			return d.endRun(jrnl, man, ledger, journal.EventRunAborted, state.RunStatusAborted,
 				ExitAborted, current, steps, d.note(err.Error()), err)
 		}
+		// A run its caller has cancelled starts nothing more. Started on a
+		// context that is already done, the node would be cut off at once,
+		// or, if it never looks at its context, do its work only to have it
+		// thrown away. This comes after the two guards: a run they would
+		// end is ended now, not paused to meet them again on resume.
+		if d.suspendOnCancel && errors.Is(ctx.Err(), context.Canceled) {
+			return d.pauseInterrupted(jrnl, man, ledger, current, steps)
+		}
 
 		node, err := d.registry.Get(current)
 		if err != nil {
@@ -842,11 +854,20 @@ func (d *Dispatcher) suspend(
 			fmt.Errorf("graph: journal node_finished for %q: %w", node, err)
 	}
 
-	out, err := d.endRun(jrnl, man, ledger, journal.EventRunPaused, state.RunStatusPaused,
+	out, err := d.pauseInterrupted(jrnl, man, ledger, node, steps)
+	return &out, err
+}
+
+// pauseInterrupted ends this dispatch of a run its caller cancelled, pausing
+// the run at node so that Resume continues it from there. It must not be
+// called while a node_started is open; suspend closes one first.
+func (d *Dispatcher) pauseInterrupted(
+	jrnl *journal.Journal, man *state.Manifest, ledger *budget.Ledger, node string, steps int,
+) (Outcome, error) {
+	return d.endRun(jrnl, man, ledger, journal.EventRunPaused, state.RunStatusPaused,
 		ExitAborted, node, steps,
 		fmt.Sprintf("interrupted at %q; use `belay resume` to continue", node),
 		fmt.Errorf("%w: at %q: %w", ErrInterrupted, node, context.Canceled))
-	return &out, err
 }
 
 // terminal closes an open node_started with a node_finished carrying status,
