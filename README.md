@@ -1,6 +1,6 @@
 # belay
 
-belay is a durable, resumable orchestrator for autonomous coding agents. Instead of one unreliable AI call that crashes and loses work, it runs a persistent, multi-phase state machine — plan → approve → code → write → test → fix → review — where state is journaled after every node. When a run crashes, the next invocation resumes from the last completed node, not from the start.
+belay is a durable, resumable orchestrator for autonomous coding agents. Instead of one unreliable AI call that crashes and loses work, it runs a persistent, multi-step state machine — plan → approve → code → write → test → fix → review — where every node's result is saved and journaled before the next node starts. When a run crashes, `belay resume` picks it up after the last completed node, not from the start.
 
 **The Problem It Solves**: When you invoke a code-generating agent once, you get a response. If it crashes, you lose everything and re-run from zero, wasting tokens on work already done. If tests fail, you re-prompt by hand with no loop. If there is no budget cap, a prompt bug can burn money. If the generated code is never reviewed, it may break your standards. belay builds all the logic that wraps the agent — the crash recovery, the retry loops, the approval gates, the cost tracking, the quality gates — so you can point it at a repository and get reliable software generation without operator intervention.
 
@@ -239,11 +239,11 @@ Nothing was created and nothing was spent. Run the same command without --dry-ru
 belay run "add a --json flag to the CLI output"
 ```
 
-belay writes a plan to `.belay/runs/<run-id>/plan.md` and stops, waiting for your approval. Read it.
+belay writes a plan to `.belay/runs/<run-id>/artifacts/plan.md`, prints where it is, and stops, waiting for your approval. Read it.
 
 ```bash
 # Look at the plan:
-cat .belay/runs/*/plan.md
+cat .belay/runs/*/artifacts/plan.md
 
 # If you like it, continue:
 belay resume
@@ -307,11 +307,12 @@ Files changed:
 
 ### 7. The output is yours to keep
 
-All state lives in `.belay/runs/<run-id>`:
-- `manifest.json` — the run's complete state (goal, changes, budget tracking)
-- `journal.ndjson` — append-only log of every state transition
-- `state.json` — current accumulated state (read by `belay resume`)
-- `plan.md` — the plan the agent generated
+Everything belay records about a run lives in `.belay/runs/<run-id>`:
+- `manifest.json` — what the run is and where it stands: its goal, status and current step, the settings it started with, and what it has spent
+- `state.json` — what the steps have produced so far, which every step reads: the plan, the files changed, the latest test and review results, how many repairs were made
+- `journal.ndjson` — an append-only record of every step's start and finish, from which `belay resume` works out where to pick up
+- `artifacts/` — the plan the agent generated (`artifacts/plan.md`), the agent's summary of the code it wrote, the diff each write step recorded, and the test and quality-gate reports
+- `nodes/` — for each step that called the agent, the prompt it sent and the reply it got
 
 If you stopped the run with Ctrl-C, or it crashed mid-execution, your work is safe on disk. `belay resume` picks it up where it left off: the step that was interrupted runs again, and the steps that finished do not. A run that belay stopped on its own, at the budget ceiling, `graph.max_steps` or `graph.node_timeout`, has ended instead; raise the limit and start a new run.
 
@@ -330,7 +331,7 @@ If you want to delete a run, `rm -rf .belay/runs/<run-id>` is safe.
 │ │  ↓                                              │  │
 │ │ code (Agent)      → Generate code              │  │
 │ │  ↓                                              │  │
-│ │ write (Agent)     → Save files, format         │  │
+│ │ write (belay)     → Record the changed files   │  │
 │ │  ↓                                              │  │
 │ │ test (Runner)     → Run test suite             │  │
 │ │  ├─ pass? → review (next)                      │  │
@@ -347,23 +348,23 @@ If you want to delete a run, `rm -rf .belay/runs/<run-id>` is safe.
 └──────────────────────────────────────────────────────┘
 ```
 
-For every phase:
-1. **State** is read from disk (on resume, or initialized fresh)
-2. **The phase runs** (agent, test runner, linter, etc.)
-3. **Result is validated** (e.g., generated code is well-formed)
-4. **Result is persisted to journal** (so a crash does not lose it)
-5. **State is updated** with the result
-6. **Next phase is decided** (automatically or by human gate)
+For every step:
+1. **The limits are checked** — the budget ceiling and `graph.max_steps` — before anything is spent
+2. **The blackboard is read** from `state.json`, and the step's start is journaled
+3. **The node runs** (agent, test runner, linter, etc.)
+4. **Its result is checked**: it must have a status, and name the next node if it succeeded
+5. **Its changes are saved** to `state.json`
+6. **Its finish is journaled**, naming the next node — only after its changes are saved, so the journal never records a finished step whose changes are missing
 
-If a crash occurs mid-execution, the journal file may have a half-written last line, but earlier lines are durable. `belay resume` detects the incomplete line, discards it, and resumes from the last fully-written state. This is not an error; it is expected. durability.
+If a crash occurs mid-execution, the journal file may have a half-written last line, but earlier lines are durable. `belay resume` discards the incomplete line and picks up from the last complete record, running again the step that was cut off. This is expected, not an error.
 
 ## The Four Pillars
 
 ### 1. Durable + Resumable Runs
-Every phase's result is persisted to an append-only journal *before* the next phase starts. If a run crashes, the next `belay resume` reads the journal and picks up from the last completed phase, not from the beginning. Tokens spent on completed work are not wasted.
+Every step's result is saved, and its finish journaled, *before* the next step starts. If a run crashes, the next `belay resume` reads the journal and picks up after the last completed step, not from the beginning. Tokens spent on completed work are not wasted.
 
 ### 2. Approval Gates
-The `approve` phase pauses the run after the agent writes a plan. You can read it, edit it, and decide whether to proceed. This stops a runaway agent before it writes code. Runs also pause if quality gates fail and manual review is needed.
+The `approve` step pauses the run after the agent writes a plan. You can read it, edit it, and decide whether to proceed. This stops a runaway agent before it writes code. It is the only step that pauses a run for you. A failing quality gate does not pause: it sends the change to `fix`, like a failing test, and a run that `graph.give_up` repairs have not brought to passing tests and a passing gate ends as failed.
 
 ### 3. Best-of-N Candidates (Fanout) — not working yet
 The aim is to give one goal N independent candidates, each in its own workspace, and keep the best, so that the variance between agent runs works for you. Two pieces of that exist: a `fanout` node that prepares one workspace per candidate, and a `join` node that picks a winner among the candidates whose tests passed. No run reaches either one, and nothing runs the candidates. See *Maturity & Limitations* below.
@@ -374,10 +375,10 @@ The graph definition and all orchestration logic are independent of which agent 
 ## Configuration
 
 Every belay run reads `belay.yaml` from your project root. Your user config is read before it and a file you pass with `--config <path>` after it, merged setting by setting, so a setting in a later file wins. The file controls:
-- **agent**: which LLM backend, model, and mode (live, streaming, batch)
-- **graph**: approval gates, max retries, timeout per phase
+- **agent**: which backend and model, and the mode: `live`, `record` or `replay`
+- **graph**: the approval gate, how many repairs before giving up, the step cap, and the timeout per step
 - **test**: auto-detect or custom test command
-- **review**: linter mode (local, SonarQube) or AI review
+- **review**: the quality gate: local linters (`lint`), SonarQube (`sonar`), or the AI reviewer (`ai`), which `belay run` does not use yet
 - **budget**: spend ceiling in USD and tokens
 - **fanout**: best-of-N candidates, which no run uses yet (see *Maturity & Limitations*)
 
@@ -387,9 +388,9 @@ See `docs/config.md` for the complete reference, including examples.
 
 belay is built on a few core ideas:
 
-1. **State machine, not a list of tasks**: Each phase (plan, code, test, fix, review) is a node in a directed graph. Nodes can loop (test → fix → test) and branch (test success → review, test failure → fix). This makes the logic clear and testable.
+1. **State machine, not a list of tasks**: Each step (plan, approve, code, write, test, fix, review) is a node in a directed graph. Nodes can loop (test → fix → test) and branch (test success → review, test failure → fix). This makes the logic clear and testable.
 
-2. **Dispatcher owns durability**: A single `Dispatcher` orchestrates the graph, and it is responsible for persisting state. Phases themselves are pure functions: they take context, return a result, and never touch the filesystem. This separation makes phases testable in isolation and makes the durability logic auditable.
+2. **Dispatcher owns durability**: A single `Dispatcher` orchestrates the graph and writes the run's state as it goes: `state.json`, `manifest.json` and the journal. No node writes any of them: a node takes a context and returns a result, which the dispatcher saves. Nodes do touch the filesystem — they write files of their own under the run directory (the plan, diffs, reports, and each agent step's prompt and reply), the agent a node calls edits your working tree, and the test and review steps run tools in it — but none of that decides where a resumed run picks up. This separation makes nodes testable in isolation and makes the durability logic auditable.
 
 3. **Append-only journal**: All state transitions are written to an NDJSON journal file with `O_APPEND` and explicit fsync. This means a crash mid-write corrupts only the current record, not past ones. Resume logic detects and heals torn tails.
 

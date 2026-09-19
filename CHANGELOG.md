@@ -41,11 +41,18 @@ that only `pkg/belay` carries a compatibility promise. Everything under
 
 ### Fixed
 
-- **The README's quickstart shows what belay really prints.** Its dry-run
+- **The README describes what belay really does and prints.** Its dry-run
   example showed a ceiling of 1,000,000 tokens, 5 agent turns a step and a
   closing line belay never printed, and left out what reaching the ceiling
   does and when belay gives up. It is now exactly what `belay run --dry-run`
   prints for the quickstart's own belay.yaml, and a test keeps it that way.
+  The README also sent you to `.belay/runs/<run-id>/plan.md`, when the plan
+  is at `artifacts/plan.md`; said manifest.json holds the run's state, which
+  is in state.json; listed agent modes belay does not have (streaming,
+  batch) instead of live, record and replay; said a failing quality gate
+  pauses the run, when it sends the change to the fix step; said nodes
+  never touch the filesystem; and put writing the journal before saving a
+  step's changes, the reverse of the order belay depends on.
 - **belay no longer says its write step saves the agent's changes.** The
   closing report described the write step as "saving the agent's changes
   into your repository", and `belay run --help` said belay "saves the
