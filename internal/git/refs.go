@@ -3,6 +3,7 @@
 package git
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"strings"
@@ -88,4 +89,49 @@ func ValidateRefComponent(s string) error {
 		}
 	}
 	return nil
+}
+
+// validateBranch reports whether name is usable as a whole branch name, such
+// as "belay/<run-id>": every slash-separated component must pass
+// ValidateRefComponent, which also rules out an empty component (a leading,
+// trailing or doubled slash).
+//
+// Two whole names are refused on top of that. "HEAD" is refused by git
+// itself as a branch name. A name starting with "refs/" is accepted by git,
+// which would create refs/heads/refs/heads/x; a caller passing one meant the
+// branch x, and a silent double prefix is a branch nobody can find.
+func validateBranch(name string) error {
+	switch {
+	case name == "HEAD":
+		return fmt.Errorf("%w: %q is not a branch name", ErrInvalidRef, name)
+	case strings.HasPrefix(name, "refs/"):
+		return fmt.Errorf("%w: %q is a ref, and this takes a branch name without refs/heads/", ErrInvalidRef, name)
+	}
+	for component := range strings.SplitSeq(name, "/") {
+		if err := ValidateRefComponent(component); err != nil {
+			return fmt.Errorf("branch %q: %w", name, err)
+		}
+	}
+	return nil
+}
+
+// BranchTip returns the commit the branch name points at, and false when
+// there is no such branch.
+//
+// The full ref, refs/heads/<name>, is what is asked about. A bare name would
+// go through git's revision lookup, where a tag of the same name wins, and a
+// caller comparing tips before deleting a branch must be told the branch's
+// tip and nothing else.
+func (r *Repo) BranchTip(ctx context.Context, name string) (string, bool, error) {
+	if err := validateBranch(name); err != nil {
+		return "", false, err
+	}
+	res, err := r.run(ctx, r.top, "rev-parse", "--verify", "--quiet", "refs/heads/"+name)
+	if code, exited := exitCode(err); exited && code == 1 {
+		return "", false, nil
+	}
+	if err != nil {
+		return "", false, err
+	}
+	return strings.TrimSpace(res.Stdout), true, nil
 }

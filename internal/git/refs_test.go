@@ -163,3 +163,84 @@ func TestStricterThanGitHasNoStaleRows(t *testing.T) {
 		}
 	}
 }
+
+// TestValidateBranch pins the rule for a whole branch name, which is what
+// the methods that take one are given: every component must pass
+// ValidateRefComponent, and the name must be a branch, not a ref.
+func TestValidateBranch(t *testing.T) {
+	tests := []struct {
+		name string
+		in   string
+		ok   bool
+	}{
+		{name: "one component", in: "main", ok: true},
+		{name: "the run branch", in: "belay/20260918T120000Z-1f2e3d4c5b6a", ok: true},
+		{name: "a candidate branch", in: "belay/20260918T120000Z-1f2e3d4c5b6a-cand-01-a1", ok: true},
+		{name: "several components", in: "team/feature/x", ok: true},
+
+		{name: "empty", in: ""},
+		{name: "a leading slash", in: "/x"},
+		{name: "a trailing slash", in: "x/"},
+		{name: "an empty component", in: "a//b"},
+		{name: "a bad component", in: "belay/x.lock"},
+		{name: "a leading dash", in: "-x"},
+		{name: "HEAD, which git refuses as a branch", in: "HEAD"},
+		{name: "a full ref instead of a branch", in: "refs/heads/x"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := validateBranch(tt.in)
+			switch {
+			case tt.ok && err != nil:
+				t.Errorf("validateBranch(%q) error = %v, want nil", tt.in, err)
+			case !tt.ok && !errors.Is(err, ErrInvalidRef):
+				t.Errorf("validateBranch(%q) error = %v, want one wrapping ErrInvalidRef", tt.in, err)
+			}
+		})
+	}
+}
+
+// TestBranchTip pins the answer to "where is this branch?", including the
+// two ways a name can be something other than a branch: absent, and shared
+// with a tag. The tag must not answer for the branch.
+func TestBranchTip(t *testing.T) {
+	f := newFixture(t)
+	top := f.repo("repo")
+	r := f.open(top)
+	first := f.git(top, "rev-parse", "HEAD")
+	f.git(top, "tag", "dup", first)
+	f.write(top, "a.txt", "second\n")
+	f.git(top, "commit", "-qam", "second")
+	second := f.git(top, "rev-parse", "HEAD")
+	f.git(top, "branch", "dup", second)
+
+	tests := []struct {
+		name    string
+		branch  string
+		want    string
+		wantOK  bool
+		wantErr error
+	}{
+		{name: "an existing branch", branch: "main", want: second, wantOK: true},
+		{name: "a branch sharing its name with a tag", branch: "dup", want: second, wantOK: true},
+		{name: "no such branch", branch: "absent"},
+		{name: "a name git would refuse", branch: "a..b", wantErr: ErrInvalidRef},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, ok, err := r.BranchTip(t.Context(), tt.branch)
+			if tt.wantErr != nil {
+				if !errors.Is(err, tt.wantErr) {
+					t.Fatalf("BranchTip(%q) error = %v, want %v", tt.branch, err, tt.wantErr)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("BranchTip(%q) error = %v", tt.branch, err)
+			}
+			if got != tt.want || ok != tt.wantOK {
+				t.Errorf("BranchTip(%q) = %q, %t; want %q, %t", tt.branch, got, ok, tt.want, tt.wantOK)
+			}
+		})
+	}
+}

@@ -434,14 +434,22 @@ type hardenedCall struct {
 	call func(r *Repo) error
 }
 
-// hardenedCalls names every method that starts git, so the hardening test
-// cannot miss one: a method that is not listed here has nothing proving its
-// argv carries the flags. Each call must succeed, or its argv proves nothing.
-func hardenedCalls(t *testing.T, dir string) []hardenedCall {
+// hardenedCalls names every method that starts git, in an order in which
+// each can succeed, so the hardening test cannot miss one: a method that is
+// not listed here has nothing proving its argv carries the flags. Each call
+// must succeed, or its argv proves nothing.
+func hardenedCalls(t *testing.T, f *fixture, dir string) []hardenedCall {
 	t.Helper()
+	wt := filepath.Join(f.root, "hardened-wt")
 	return []hardenedCall{
 		{name: "Head", call: func(r *Repo) error { _, err := r.Head(t.Context()); return err }},
 		{name: "Status", call: func(r *Repo) error { _, err := r.Status(t.Context(), dir); return err }},
+		{name: "Worktrees", call: func(r *Repo) error { _, err := r.Worktrees(t.Context()); return err }},
+		{name: "AddWorktree", call: func(r *Repo) error {
+			f.git(dir, "branch", "hardened-wt")
+			return r.AddWorktree(t.Context(), wt, "hardened-wt")
+		}},
+		{name: "RemoveWorktree", call: func(r *Repo) error { return r.RemoveWorktree(t.Context(), wt) }},
 	}
 }
 
@@ -461,7 +469,7 @@ func TestEveryCommandIsHardened(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Open() error = %v", err)
 	}
-	calls := append([]hardenedCall{{name: "Open"}}, hardenedCalls(t, dir)...)
+	calls := append([]hardenedCall{{name: "Open"}}, hardenedCalls(t, f, dir)...)
 
 	for _, tc := range calls {
 		t.Run(tc.name, func(t *testing.T) {
