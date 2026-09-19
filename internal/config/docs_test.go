@@ -78,6 +78,86 @@ func TestDocumentedExamplesActuallyLoad(t *testing.T) {
 	}
 }
 
+// The "Example Configuration" block reads like a whole belay.yaml, so a
+// reader takes its values for belay's own. max_turns 5, max_steps 20 and
+// node_timeout 10m sat there with nothing saying they were not the defaults
+// (30, 60 and 15m). Any value there that differs from Default must carry a
+// "# default <value>" comment, and that value must be the real default.
+func TestExampleConfigurationMarksEveryValueThatIsNotTheDefault(t *testing.T) {
+	raw, err := os.ReadFile(docsPath)
+	if err != nil {
+		t.Skipf("docs/config.md unavailable: %v", err)
+	}
+	src := string(raw)
+	heading := strings.Index(src, "\n## Example Configuration\n")
+	if heading < 0 {
+		t.Fatal(`docs/config.md has no "## Example Configuration" heading; this guard would silently pass forever`)
+	}
+	headingLine := strings.Count(src[:heading+1], "\n") + 1
+	var (
+		body  string
+		fence int
+	)
+	for _, b := range yamlBlocks(src) {
+		if b.Line > headingLine {
+			body, fence = b.Body, b.Line
+			break
+		}
+	}
+	if body == "" {
+		t.Fatal("no ```yaml block follows \"## Example Configuration\"")
+	}
+
+	var doc yaml.Node
+	if err := yaml.Unmarshal([]byte(body), &doc); err != nil || len(doc.Content) == 0 {
+		t.Fatalf("the example does not parse: %v", err)
+	}
+	want := Default().Snapshot()
+	// snapshotOf returns what literal at path loads as, in Snapshot's form.
+	snapshotOf := func(path, literal string) (string, error) {
+		var got Config
+		if err := got.Merge([]byte(yamlSetting(path, literal)), "docs/config.md"); err != nil {
+			return "", err
+		}
+		return got.Snapshot()[path], nil
+	}
+
+	var walk func(n *yaml.Node, prefix string)
+	walk = func(n *yaml.Node, prefix string) {
+		for i := 0; i+1 < len(n.Content); i += 2 {
+			key, value := n.Content[i], n.Content[i+1]
+			path := key.Value
+			if prefix != "" {
+				path = prefix + "." + key.Value
+			}
+			if value.Kind == yaml.MappingNode {
+				walk(value, path)
+				continue
+			}
+			got, err := snapshotOf(path, value.Value)
+			if err != nil {
+				t.Errorf("docs/config.md:%d: %s: %v", fence+value.Line, path, err)
+				continue
+			}
+			comment := strings.TrimSpace(strings.TrimPrefix(value.LineComment, "#"))
+			stated, marked := strings.CutPrefix(comment, "default ")
+			stated, _, _ = strings.Cut(stated, ";")
+			switch {
+			case got != want[path] && !marked:
+				t.Errorf("docs/config.md:%d: %s is %s, not its default %s, and has no \"# default\" comment saying so",
+					fence+value.Line, path, value.Value, want[path])
+			case marked:
+				def, err := snapshotOf(path, strings.TrimSpace(stated))
+				if err != nil || def != want[path] {
+					t.Errorf("docs/config.md:%d: %s says \"# default %s\", but the default is %s",
+						fence+value.Line, path, strings.TrimSpace(stated), want[path])
+				}
+			}
+		}
+	}
+	walk(doc.Content[0], "")
+}
+
 func itoa(n int) string {
 	if n == 0 {
 		return "0"

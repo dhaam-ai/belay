@@ -376,19 +376,21 @@ Read by the `docker` CLI itself, not by belay. It therefore affects the SonarQub
 
 ## Example Configuration
 
+A whole `belay.yaml`. The values marked `# default` differ from belay's defaults on purpose, to show settings you might tighten; every other value is the default.
+
 ```yaml
 version: 1
 
 agent:
   backend: "claude-code"
   model: "sonnet"
-  max_turns: 5
+  max_turns: 5          # default 30
   mode: "live"
 
 graph:
   give_up: 3
-  max_steps: 20
-  node_timeout: "10m"
+  max_steps: 20         # default 60
+  node_timeout: "10m"   # default 15m
   approval: true
 
 test:
@@ -400,11 +402,11 @@ review:
 
 budget:
   max_usd: 5.0
-  max_tokens: 500000
+  max_tokens: 500000    # default 2000000
   on_exceed: "abort"
 
 fanout:
-  enabled: true
+  enabled: false
   candidates: 3
   isolator: "dircopy"
   select: "fewest_issues"
