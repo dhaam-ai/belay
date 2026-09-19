@@ -54,6 +54,14 @@ Continuing an interrupted run from its last finished node, re-running any node t
 started but did not finish.
 _Avoid_: restart, retry, recover
 
+**Fork**:
+A new run, with its own ID, that re-runs one node of an existing run from the
+blackboard as it stood before that node, and never writes to the source run. The
+command is `belay fork <run-id> <node>`, which is not built yet (ADR-0017 is
+reserved for it). Unrelated to forking belay's own repository, which is what
+"fork" means in ADR-0009.
+_Avoid_: replay, node re-run
+
 ## Gates and loops
 
 **Approve gate**:
@@ -141,26 +149,20 @@ _Avoid_: quota, limit, cap (fine in prose)
 An ordered list of goals belay works through unattended, one run per goal.
 _Avoid_: batch, backlog, job list
 
-## Replay (disambiguation required)
-
-"Replay" currently names three different things. Until one is renamed, always
-qualify it.
+## Recorded agents
 
 **Cassette**:
-A recording of an agent's responses that a test plays back instead of calling a real
-backend (ADR-0009). This is the established meaning of "replay" in the code.
+A recording, made with `agent.mode: record`, of the requests belay sent the backend
+and the responses it got back. `agent.mode: replay` answers from it instead of calling
+the backend, so the recorded run repeats without spending anything (ADR-0009). It holds
+the conversation, not the workspace: the edits the agent made are not in it. "Replay"
+means playing a cassette, and nothing else.
 _Avoid_: fixture, mock, recording (fine in prose)
 
 **Scripted mode**:
 A fix-rate benchmark run driven by a zero-cost scripted agent, which measures belay's
 graph and not any agent's skill. Named `ModeReplay` in code.
 _Avoid_: replay mode (collides with cassette)
-
-**Node re-run** _(proposed; name not yet settled)_:
-Executing one node of an existing run again from the blackboard as it stood before
-that node, without re-spending on the nodes before it. Requested as `belay replay`,
-which collides with both terms above.
-_Avoid_: replay (until the collision is resolved)
 
 ## Measurement
 

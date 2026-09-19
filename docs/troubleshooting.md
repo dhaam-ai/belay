@@ -336,7 +336,7 @@ The run has ended, and `belay resume` will not continue it. Change belay.yaml or
 
 <!-- slice:plan -->
 
-<!-- slice:rerun -->
+<!-- slice:fork -->
 
 <!-- slice:queue -->
 
