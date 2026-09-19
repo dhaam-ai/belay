@@ -50,16 +50,16 @@ func (v Version) String() string {
 	return strconv.Itoa(v.Major) + "." + strconv.Itoa(v.Minor) + "." + strconv.Itoa(v.Patch)
 }
 
-// AtLeast reports whether v is min or newer, comparing major, then minor,
+// AtLeast reports whether v is floor or newer, comparing major, then minor,
 // then patch.
-func (v Version) AtLeast(min Version) bool {
+func (v Version) AtLeast(floor Version) bool {
 	switch {
-	case v.Major != min.Major:
-		return v.Major > min.Major
-	case v.Minor != min.Minor:
-		return v.Minor > min.Minor
+	case v.Major != floor.Major:
+		return v.Major > floor.Major
+	case v.Minor != floor.Minor:
+		return v.Minor > floor.Minor
 	default:
-		return v.Patch >= min.Patch
+		return v.Patch >= floor.Patch
 	}
 }
 
