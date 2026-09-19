@@ -35,8 +35,8 @@ const (
 	// not an error in the timeline's own operation: a failing test node is
 	// exactly what a fix loop is for.
 	TimelineFailed TimelineOutcome = "failed"
-	// TimelinePaused is a node that suspended the run, such as an approval
-	// gate waiting on a human.
+	// TimelinePaused is a node that paused the run, such as an approval gate
+	// waiting on a human.
 	TimelinePaused TimelineOutcome = "paused"
 	// TimelineStopped is a node whose execution was cut short.
 	TimelineStopped TimelineOutcome = "stopped"

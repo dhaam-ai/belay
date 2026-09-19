@@ -78,16 +78,18 @@ const (
 	RunStatusUnknown RunStatus = iota
 	// RunStatusRunning is a run the dispatcher is actively advancing.
 	RunStatusRunning
-	// RunStatusPaused is a run suspended for human input — typically plan
-	// approval — that "belay resume" can continue.
+	// RunStatusPaused is a run paused for human input — typically plan
+	// approval — or because its caller cancelled it and asked for a pause, as
+	// Ctrl-C does under `belay run` and `belay resume`. "belay resume" can
+	// continue it.
 	RunStatusPaused
 	// RunStatusCompleted is a run that reached a terminal success node.
 	RunStatusCompleted
 	// RunStatusFailed is a run that reached a terminal failure, such as the
 	// fix loop giving up.
 	RunStatusFailed
-	// RunStatusAborted is a run stopped before it could finish, such as by
-	// user request or a budget ceiling.
+	// RunStatusAborted is a run stopped before it could finish, such as at a
+	// budget ceiling, or by a cancellation its caller did not ask to pause.
 	RunStatusAborted
 )
 

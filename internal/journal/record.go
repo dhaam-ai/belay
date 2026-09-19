@@ -34,9 +34,10 @@ const (
 	// carrying its outcome in Record.Status and its successor in
 	// Record.Next.
 	EventNodeFinished
-	// EventRunPaused marks a run explicitly suspended. A plain `belay run`
-	// on a journal ending in EventRunPaused must refuse; only `belay resume`
-	// may advance past it.
+	// EventRunPaused marks a run paused: by a node such as the approval gate,
+	// or by a caller that cancelled the run and asked for it to be paused
+	// rather than ended. A plain `belay run` on a journal ending in
+	// EventRunPaused must refuse; only `belay resume` may advance past it.
 	EventRunPaused
 	// EventRunResumed marks a paused run continuing.
 	EventRunResumed
@@ -124,7 +125,7 @@ const (
 	// StatusFailed means the node ran and produced a failing result.
 	StatusFailed
 	// StatusPaused means the node's own logic (such as an approval gate)
-	// suspended the run before its successor would begin.
+	// paused the run before its successor would begin.
 	StatusPaused
 	// StatusAborted means the node's execution was cut short. A record
 	// that also names its own node as Next closed an attempt that will be
@@ -258,7 +259,7 @@ type Record struct {
 //
 // The dispatcher writes that shape when it closes an attempt it will re-run,
 // and at no other time: when a crash left the attempt open, and when a caller
-// cancelled the run and asked for it to be suspended rather than ended. An
+// cancelled the run and asked for it to be paused rather than ended. An
 // abort that ends the run names no Next, which is how the two are told apart.
 //
 // The shape was chosen over a new Status so that a journal written this way

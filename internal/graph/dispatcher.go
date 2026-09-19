@@ -747,9 +747,10 @@ func (d *Dispatcher) settle(
 	// The rejected paths. None of them applies a Patch or records Usage:
 	// each means the Result is untrustworthy or absent. A run that ends here
 	// executes nothing further, so under-counting a failed node's spend
-	// cannot let a later node overspend. A suspended run does continue, and
-	// its interrupted node's spend goes uncounted exactly as a crashed one's
-	// does: a node cut off part-way has not reported what it spent.
+	// cannot let a later node overspend. A run paused by a cancellation does
+	// continue, and its interrupted node's spend goes uncounted exactly as a
+	// crashed one's does: a node cut off part-way has not reported what it
+	// spent.
 	//
 	// The timeout is checked first. It is the dispatcher's own guard, and a
 	// node that outlived it is not excused by a cancellation that arrived
