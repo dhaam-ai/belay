@@ -248,10 +248,10 @@ func TestRecordJSONFieldPresence(t *testing.T) {
 	ts := time.Date(2026, 8, 29, 10, 31, 4, 221_000_000, time.UTC)
 
 	tests := []struct {
-		name    string
-		rec     Record
-		want    []string
-		absent  []string
+		name   string
+		rec    Record
+		want   []string
+		absent []string
 	}{
 		{
 			name: "node_started",
