@@ -148,13 +148,15 @@ type TimelineMarker struct {
 	Gap time.Duration
 }
 
-// TimelineLoop names a node that ran more than once, and how many times.
-// It is derived from journal.Stats, which already counts executions per
-// node, so the timeline never recounts what the journal package derives.
+// TimelineLoop names a node the run came back to, and how many times it
+// visited it. It is what makes the test-and-fix cycle legible as a cycle.
 type TimelineLoop struct {
 	// Node is the repeated node.
 	Node string
-	// Executions is how many times it completed.
+	// Executions is how many times the run visited it — visits, not journal
+	// records. A gate that paused for a person and ran again when they
+	// resumed the run was visited once (see resumesTheSameVisit), so a run
+	// that never looped reports no loop at all.
 	Executions int
 }
 
@@ -288,14 +290,12 @@ func BuildTimeline(sel TimelineSelection, manifest *state.Manifest, res journal.
 		tl.Totals.BudgetLimitUSD = manifest.Budget.LimitUSD
 	}
 
-	// journal.Stats already derives per-node execution counts and summed
-	// durations, and is documented to degrade rather than fail on a damaged
-	// history. Loop detection and total agent time come from it verbatim.
+	// journal.Stats already sums per-node durations and is documented to
+	// degrade rather than fail on a damaged history, so total agent time comes
+	// from it verbatim. Loops do not: Stats counts records, and a visit to a
+	// node can span two of them (see resumesTheSameVisit).
 	for _, s := range journal.Stats(res.Records) {
 		tl.Totals.AgentDuration += s.TotalDuration
-		if s.Executions > 1 {
-			tl.Loops = append(tl.Loops, TimelineLoop{Node: s.Node, Executions: s.Executions})
-		}
 	}
 
 	visits := make(map[string]int)
@@ -316,7 +316,9 @@ func BuildTimeline(sel TimelineSelection, manifest *state.Manifest, res journal.
 				started = open.Time
 			}
 			open = nil
-			visits[rec.Node]++
+			if !resumesTheSameVisit(tl.Entries, rec.Node) {
+				visits[rec.Node]++
+			}
 			tl.Entries = append(tl.Entries, TimelineEntry{
 				Index:      len(tl.Entries) + 1,
 				Node:       rec.Node,
@@ -360,7 +362,9 @@ func BuildTimeline(sel TimelineSelection, manifest *state.Manifest, res journal.
 	// belongs in the order, with the honest admission that its duration and
 	// cost were never recorded.
 	if open != nil {
-		visits[open.Node]++
+		if !resumesTheSameVisit(tl.Entries, open.Node) {
+			visits[open.Node]++
+		}
 		tl.Interrupted = true
 		tl.InterruptedNode = open.Node
 		tl.Entries = append(tl.Entries, TimelineEntry{
@@ -376,6 +380,15 @@ func BuildTimeline(sel TimelineSelection, manifest *state.Manifest, res journal.
 	for i := range tl.Entries {
 		tl.Entries[i].Iterations = visits[tl.Entries[i].Node]
 	}
+	// Named in the order the run first reached them, so the summary reads in
+	// the same direction as the table.
+	named := make(map[string]bool, len(visits))
+	for _, e := range tl.Entries {
+		if visits[e.Node] > 1 && !named[e.Node] {
+			named[e.Node] = true
+			tl.Loops = append(tl.Loops, TimelineLoop{Node: e.Node, Executions: visits[e.Node]})
+		}
+	}
 	tl.Totals.Nodes = len(tl.Entries)
 
 	if n := len(res.Records); n > 0 {
@@ -389,6 +402,32 @@ func BuildTimeline(sel TimelineSelection, manifest *state.Manifest, res journal.
 	tl.applyLoopCost()
 	tl.applyRunState(res.Records, manifest)
 	return tl
+}
+
+// resumesTheSameVisit reports whether the next execution of node continues the
+// visit the last entry began, rather than being a second visit to it.
+//
+// A node_finished that names its own node as what comes next has not finished
+// its visit: it is the approve gate pausing for a person, or an attempt a
+// Ctrl-C or a crash cut short (journal.Record.Interrupted). Either way the
+// execution that follows is the same visit taken up again — the graph did not
+// route anywhere and come back. Counting two would report every run with
+// graph.approval on as having looped at the gate, and would open the
+// loop-cost span there, charging the fix loop for the plan, the code and the
+// write that came between.
+//
+// A node that genuinely routes to itself is a loop, and is not this: its
+// record is a StatusOK verdict with a Next, which is the graph deciding to go
+// round again.
+func resumesTheSameVisit(entries []TimelineEntry, node string) bool {
+	if len(entries) == 0 {
+		return false
+	}
+	prev := entries[len(entries)-1]
+	if prev.Node != node || prev.Next != node {
+		return false
+	}
+	return prev.Outcome == TimelinePaused || prev.Outcome == TimelineStopped
 }
 
 // applyLoopCost measures the stretch of the run spent looping: from the first

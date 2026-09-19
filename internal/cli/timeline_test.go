@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"errors"
+	"flag"
 	"io"
 	"maps"
 	"math"
@@ -198,9 +199,15 @@ func TestTimelineBuildOrdersAndNumbersLoopIterations(t *testing.T) {
 	}
 }
 
-// TestTimelineIterationCountsAgreeWithJournalStats pins the contract that the
-// per-entry iteration count is the same number journal.Stats derives, so the
-// two never disagree in the rendered output.
+// TestTimelineIterationCountsAgreeWithJournalStats pins where the timeline's
+// count of visits and journal.Stats's count of executions must agree, and the
+// one place they deliberately do not.
+//
+// They agree for every node whose every visit ran to a verdict, which is what
+// keeps the table's "test #2/3" from contradicting the journal. They differ
+// where one visit spans two records: a gate that paused for a person, or an
+// attempt a Ctrl-C cut short, is two executions of one visit, and the timeline
+// counts the visit (see TestTimelineAGatePauseAndItsResumeAreOneVisit).
 func TestTimelineIterationCountsAgreeWithJournalStats(t *testing.T) {
 	t.Parallel()
 
@@ -214,6 +221,24 @@ func TestTimelineIterationCountsAgreeWithJournalStats(t *testing.T) {
 	for _, e := range tl.Entries {
 		if got, want := e.Iterations, fromStats[e.Node]; got != want {
 			t.Errorf("entry %d (%s): Iterations = %d, journal.Stats says %d", e.Index, e.Node, got, want)
+		}
+	}
+
+	// The gate's pause: two records, one visit.
+	paused := timelineReadmeRun()
+	pausedTL := BuildTimeline(TimelineSelection{}, nil, timelineResult(paused, false))
+	executions := 0
+	for _, s := range journal.Stats(paused) {
+		if s.Node == "approve" {
+			executions = s.Executions
+		}
+	}
+	if executions != 2 {
+		t.Fatalf("journal.Stats counts %d executions of approve, want the 2 records the run wrote", executions)
+	}
+	for _, e := range pausedTL.Entries {
+		if e.Node == "approve" && e.Iterations != 1 {
+			t.Errorf("approve: Iterations = %d, want 1 visit for the 2 records", e.Iterations)
 		}
 	}
 }
@@ -725,6 +750,16 @@ func timelineReadmeRun() []journal.Record {
 		records
 }
 
+// updateReadme rewrites README.md's example timeline output instead of
+// asserting against it. The example is generated output, so it is regenerated
+// rather than hand-edited:
+//
+//	go test ./internal/cli/ -run TestReadmeTimelineExample -update
+//
+// Read the diff afterwards: every changed line should be one this change
+// meant to change.
+var updateReadme = flag.Bool("update", false, "rewrite README.md's example timeline output")
+
 // TestReadmeTimelineExampleIsWhatTimelinePrints keeps README.md's "Example
 // timeline output" exactly what belay timeline prints for timelineReadmeRun.
 // The example once showed a table layout and a "Files changed:" section that
@@ -733,21 +768,30 @@ func timelineReadmeRun() []journal.Record {
 func TestReadmeTimelineExampleIsWhatTimelinePrints(t *testing.T) {
 	t.Parallel()
 
-	readme, err := os.ReadFile(filepath.Join("..", "..", "README.md"))
+	path := filepath.Join("..", "..", "README.md")
+	readme, err := os.ReadFile(path) //nolint:gosec // this repository's own README, at a fixed relative path
 	if err != nil {
 		t.Fatalf("read README.md: %v", err)
 	}
 	const opening = "Example timeline output:\n\n```\n"
-	_, rest, found := strings.Cut(string(readme), opening)
+	head, rest, found := strings.Cut(string(readme), opening)
 	if !found {
 		t.Fatalf("README.md has no %q block", strings.TrimSpace(opening))
 	}
-	example, _, found := strings.Cut(rest, "```\n")
+	example, tail, found := strings.Cut(rest, "```\n")
 	if !found {
 		t.Fatal("README.md's example timeline output has no closing fence")
 	}
 
-	if diff := cmp.Diff(timelineReadmeExample(t), example); diff != "" {
+	printed := timelineReadmeExample(t)
+	if *updateReadme {
+		if err := os.WriteFile(path, []byte(head+opening+printed+"```\n"+tail), 0o600); err != nil {
+			t.Fatalf("rewrite README.md: %v", err)
+		}
+		t.Log("README.md's example timeline output rewritten from what belay timeline prints")
+		return
+	}
+	if diff := cmp.Diff(printed, example); diff != "" {
 		t.Errorf("README.md's example is not what belay timeline prints (-printed +README):\n%s", diff)
 	}
 }
@@ -1492,4 +1536,89 @@ func TestTimelineRenderHasNoTrailingWhitespace(t *testing.T) {
 			t.Errorf("line %d has trailing whitespace: %q", i+1, line)
 		}
 	}
+}
+
+// TestTimelineAGatePauseAndItsResumeAreOneVisit pins what a pause costs the
+// timeline's counting: nothing. The approve gate pauses, a person resumes the
+// run, and the gate runs again — two node_finished records for one visit to
+// one node. Counted as two, every run with graph.approval on reports "approve
+// ran 2 times" as though the graph had looped, and the loop-cost span opens at
+// the gate, charging the fix loop for the plan, the code and the write that
+// came between.
+//
+// The same shape closes an attempt a Ctrl-C or a crash cut short: the record
+// names its own node as what runs next, because the visit is not over.
+func TestTimelineAGatePauseAndItsResumeAreOneVisit(t *testing.T) {
+	t.Parallel()
+
+	t.Run("the approve gate", func(t *testing.T) {
+		t.Parallel()
+		tl := BuildTimeline(timelineDemoSelection(), nil, timelineResult(timelineReadmeRun(), false))
+
+		for _, e := range tl.Entries {
+			if e.Node != "approve" {
+				continue
+			}
+			if e.Iterations != 1 {
+				t.Errorf("entry %d is %s #%d/%d; the gate was visited once and waited for a person",
+					e.Index, e.Node, e.Iteration, e.Iterations)
+			}
+		}
+		wantLoops := []TimelineLoop{{Node: "test", Executions: 3}, {Node: "fix", Executions: 2}}
+		if diff := cmp.Diff(wantLoops, tl.Loops); diff != "" {
+			t.Errorf("loops mismatch (-want +got):\n%s", diff)
+		}
+		// The loop is the test-and-fix stretch, steps 6 to 10: two repairs at
+		// $0.120 and $0.150, and the three test runs between and around them.
+		if got, want := [2]int{tl.Totals.LoopFirstIndex, tl.Totals.LoopLastIndex}, [2]int{6, 10}; got != want {
+			t.Errorf("loop span = %v, want %v", got, want)
+		}
+		if got, want := tl.Totals.LoopUSD, 0.270; math.Abs(got-want) > 1e-9 {
+			t.Errorf("LoopUSD = %v, want %v", got, want)
+		}
+	})
+
+	t.Run("an attempt a Ctrl-C cut short", func(t *testing.T) {
+		t.Parallel()
+		records := newTimelineBuilder().
+			run(journal.EventRunStarted).
+			node(timelineNodeSpec{node: "plan", status: journal.StatusOK, durationMS: 1000, next: "code"}).
+			// What the dispatcher writes for an interrupted attempt: aborted,
+			// naming its own node, with no usage recorded.
+			node(timelineNodeSpec{node: "code", status: journal.StatusAborted, durationMS: 400, next: "code",
+				usage: usd(0, 0, 0, false), note: "interrupted: belay was asked to stop"}).
+			run(journal.EventRunPaused).
+			run(journal.EventRunResumed).
+			node(timelineNodeSpec{node: "code", attempt: 2, status: journal.StatusOK, durationMS: 2000, next: "write",
+				usage: usd(900, 210, 0.05, false)}).
+			records
+		tl := BuildTimeline(timelineDemoSelection(), nil, timelineResult(records, false))
+
+		if len(tl.Loops) != 0 {
+			t.Errorf("Loops = %v; stopping a run and continuing it is not a loop", tl.Loops)
+		}
+		for _, e := range tl.Entries {
+			if e.Node == "code" && e.Iterations != 1 {
+				t.Errorf("entry %d is %s #%d/%d, want one visit", e.Index, e.Node, e.Iteration, e.Iterations)
+			}
+		}
+	})
+
+	// A node that routes to itself is a real loop, and must still read as one.
+	t.Run("a node that routes to itself is still a loop", func(t *testing.T) {
+		t.Parallel()
+		records := newTimelineBuilder().
+			run(journal.EventRunStarted).
+			node(timelineNodeSpec{node: "fix", status: journal.StatusOK, durationMS: 1000, next: "fix",
+				usage: usd(900, 210, 0.05, false)}).
+			node(timelineNodeSpec{node: "fix", status: journal.StatusOK, durationMS: 1000, next: "test",
+				usage: usd(900, 210, 0.05, false)}).
+			records
+		tl := BuildTimeline(timelineDemoSelection(), nil, timelineResult(records, false))
+
+		wantLoops := []TimelineLoop{{Node: "fix", Executions: 2}}
+		if diff := cmp.Diff(wantLoops, tl.Loops); diff != "" {
+			t.Errorf("loops mismatch (-want +got):\n%s", diff)
+		}
+	})
 }

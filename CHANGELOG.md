@@ -35,6 +35,15 @@ that only `pkg/belay` carries a compatibility promise. Everything under
 
 ### Fixed
 
+- **`belay timeline` no longer reports the approval gate as a loop.** The gate
+  pausing for you and running again when you resumed the run is two journal
+  records for one visit, and the timeline counted them as two: every run with
+  `graph.approval` on said "approve ran 2 times", numbered the two rows
+  "approve #1/2" and "#2/2", and opened the loop-cost span at the gate — so the
+  figure for what the test-and-fix loop cost included the plan, the code and
+  the write that came before it. The same held for a step Ctrl-C interrupted
+  and resumed. Both now read as one visit, and the loop cost covers the loop.
+  The README's example output is regenerated from what belay prints.
 - **Stopping a run with Ctrl-C no longer costs it a step.** The interrupted
   step was counted against `graph.max_steps` before the run was paused, so a
   run stopped twice had two fewer steps left to finish in than one killed
