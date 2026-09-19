@@ -294,6 +294,23 @@ func TestResumeRefusesARunThatNeedsANewerBelay(t *testing.T) {
 	}
 }
 
+// emptyCassette writes the recording a replayed run reads, with nothing in
+// it. A run wired this way cannot call a real agent: the first request the
+// code node makes fails with replay.ErrNoInteraction instead. It is how a
+// command-level test can let `belay resume` walk past a gate it should have
+// stopped at without spending anything to prove it.
+func emptyCassette(t *testing.T, workspace string) {
+	t.Helper()
+	dir := filepath.Join(workspace, ".belay")
+	if err := os.MkdirAll(dir, 0o750); err != nil {
+		t.Fatalf("create %s: %v", dir, err)
+	}
+	const body = `{"format_version":1,"provenance":{},"interactions":[]}`
+	if err := os.WriteFile(filepath.Join(dir, defaultCassetteName), []byte(body), 0o600); err != nil {
+		t.Fatalf("write cassette: %v", err)
+	}
+}
+
 // isCapabilityError reports whether err wraps a *state.CapabilityError.
 func isCapabilityError(err error) bool {
 	var target *state.CapabilityError
@@ -617,5 +634,75 @@ func TestResumeApprovesOnlyAPlanTheGateAskedAbout(t *testing.T) {
 				t.Errorf("awaitsApproval() = %v, want %v", got, tt.want)
 			}
 		})
+	}
+}
+
+// TestResumeCommandDoesNotApproveAPlanCtrlCInterrupted is the same rule as
+// TestResumeApprovesOnlyAPlanTheGateAskedAbout, through the command a person
+// types. That test calls awaitsApproval; this one runs `belay resume`, so
+// reverting the call site in continueRun to the manifest-only condition fails
+// here rather than nowhere.
+//
+// The run is wired to replay an empty recording, so a resume that wrongly
+// approved the plan would route to code and fail there on the first agent
+// request instead of calling a real agent.
+func TestResumeCommandDoesNotApproveAPlanCtrlCInterrupted(t *testing.T) {
+	ws := goWorkspace(t)
+	writeConfig(t, ws, "version: 1\nagent:\n  mode: \"replay\"\n")
+	emptyCassette(t, ws)
+
+	plan, err := resolve(resolveRequest{workspace: ws, logger: quietLogger()})
+	if err != nil {
+		t.Fatalf("resolve: %v", err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	registry := graph.NewRegistry()
+	registry.MustRegister(
+		planWriter{body: "# Plan\n\nwrite a test\n"},
+		pressesCtrlC{name: graph.NodeApprove, cancel: cancel},
+	)
+	plan.registry = registry
+	store := seedRunDir(t, plan, "add tests")
+
+	opts := plan.options(store)
+	opts.SuspendOnCancel = true
+	dispatcher, err := graph.NewDispatcher(opts)
+	if err != nil {
+		t.Fatalf("graph.NewDispatcher: %v", err)
+	}
+	if _, err := dispatcher.Run(ctx); err != nil && !errors.Is(err, graph.ErrInterrupted) {
+		t.Fatalf("Run: %v", err)
+	}
+
+	out, _, err := runCLI(t, "resume", store.Layout().RunID(), "--workspace", ws)
+	if err != nil {
+		t.Fatalf("belay resume on a run Ctrl-C stopped at the gate: %v\n%s", err, out)
+	}
+
+	st, err := store.LoadState()
+	if err != nil {
+		t.Fatalf("load state: %v", err)
+	}
+	if st.Plan.Approved {
+		t.Error("belay resume approved a plan nobody was shown")
+	}
+
+	// The gate ran again and asked: its own pause is now the run's last
+	// node_finished, so a second resume is the approval this one was not.
+	chosen, err := chooseRun(ws, store.Layout().RunID())
+	if err != nil {
+		t.Fatalf("chooseRun: %v", err)
+	}
+	asked, err := awaitsApproval(chosen, store.Layout())
+	if err != nil {
+		t.Fatalf("awaitsApproval: %v", err)
+	}
+	if !asked {
+		t.Errorf("the run is %v at %q; resuming should have run the gate again, which asks",
+			chosen.status, chosen.node)
+	}
+	if !strings.Contains(out, "the plan is at") {
+		t.Errorf("belay resume never told the person to read the plan; got:\n%s", out)
 	}
 }
