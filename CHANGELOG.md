@@ -35,6 +35,13 @@ that only `pkg/belay` carries a compatibility promise. Everything under
 
 ### Fixed
 
+- **A dry run with `graph.approval: false` no longer shows the approve gate on
+  the route.** The route belay prints is the walk a run takes, and with
+  approval off the plan node goes straight to code — which the line under the
+  route already said, while the route above it still listed `approve`. The gate
+  is still part of the graph belay can resolve, so a run started with it and
+  resumed after the flag was turned off still re-runs the step its journal
+  names.
 - **`belay resume <run-id>` says a damaged run is damaged, instead of saying
   it does not exist.** A run whose manifest.json belay cannot read was skipped
   when choosing a run, and naming it answered "belay has no run called

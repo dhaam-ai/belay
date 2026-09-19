@@ -242,6 +242,27 @@ func TestDryRunCreatesNothing(t *testing.T) {
 	}
 }
 
+// TestDryRunWithApprovalOffShowsTheRouteWithoutTheGate: a dry run prints the
+// walk the run really takes, and with graph.approval false the plan node
+// routes straight to code, so the gate is not on it. Printing it there
+// contradicted the line underneath, which says belay will not stop.
+func TestDryRunWithApprovalOffShowsTheRouteWithoutTheGate(t *testing.T) {
+	ws := goWorkspace(t)
+	writeConfig(t, ws, "version: 1\ngraph:\n  approval: false\n")
+
+	out, _, err := runCLI(t, "--dry-run", "run", "--workspace", ws, "add tests")
+	if err != nil {
+		t.Fatalf("belay --dry-run run: %v\n%s", err, out)
+	}
+	const want = "plan → code → write → test → fix → review → done"
+	if !strings.Contains(out, want) {
+		t.Errorf("the dry run never says %q; got:\n%s", want, out)
+	}
+	if !strings.Contains(out, "graph.approval is false") {
+		t.Errorf("the dry run should still explain why there is no gate; got:\n%s", out)
+	}
+}
+
 // TestDryRunNeverPrintsCredentialValues guards the one thing a plan must not
 // leak while reporting on the environment it read.
 func TestDryRunNeverPrintsCredentialValues(t *testing.T) {

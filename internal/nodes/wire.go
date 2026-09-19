@@ -78,8 +78,10 @@ type wiring struct {
 	// route is the walk a run takes, in order, from the entry point. Every
 	// node on it is registered, by construction.
 	route []graph.Node
-	// offRoute are registered but on no route. Today that is fanout and
-	// join: no node routes into fanout yet, so a run cannot reach either.
+	// offRoute are registered but on no route this run walks: fanout and
+	// join, which no node routes into yet, and the approve gate of a run
+	// with graph.approval off. A run cannot reach any of them, and every one
+	// of them must still be resolvable by name (see Default).
 	offRoute []graph.Node
 }
 
@@ -113,6 +115,20 @@ func wire(cfg config.Config, opts []Option) *wiring {
 		fix.New(),
 		review.New(),
 	}}
+	// graph.approval false means the plan node routes straight to code, so
+	// the gate is on no walk this run takes. It is still registered, and must
+	// be: a run started with the gate can be resumed by a process that reads
+	// a belay.yaml where the flag has since been turned off, and it re-runs
+	// the node the journal names. Routing to a node nobody registered ends
+	// that run with nothing to show for what it spent. So the gate leaves the
+	// route — which is what a person is shown — and stays in the registry,
+	// which is what the dispatcher resolves names through.
+	if !cfg.Graph.Approval {
+		w.route = slices.DeleteFunc(w.route, func(n graph.Node) bool {
+			return n.Name() == graph.NodeApprove
+		})
+		w.offRoute = append(w.offRoute, approve.New())
+	}
 	if cfg.Fanout.Enabled {
 		w.offRoute = append(w.offRoute, fanout.New(), join.New())
 	}
@@ -130,6 +146,13 @@ func wire(cfg config.Config, opts []Option) *wiring {
 // bounded by graph.give_up. When fanout is enabled the graph also carries
 // fanout and join, which turn N candidate workspaces into one winner. Each
 // Option adds to or changes that graph.
+//
+// The approve gate is registered whatever graph.approval says, although a run
+// with it off never reaches the gate (see Route). The flag is read from
+// belay.yaml on every invocation, so a run started with the gate can be
+// resumed after someone turns it off, and the journal still names approve as
+// the node to re-run. A registry without it would end that run on an unknown
+// node.
 func Default(cfg config.Config, opts ...Option) (*graph.Registry, error) {
 	w := wire(cfg, opts)
 	r := graph.NewRegistry()
@@ -148,8 +171,11 @@ func Default(cfg config.Config, opts ...Option) (*graph.Registry, error) {
 // It is the order a person reads, not a trace. The graph has two cycles,
 // test → fix → test and review → fix → test, and Route repeats neither: it
 // lists fix once, after test, and a run whose tests and quality gate pass
-// never runs it. Nodes registered but not reachable, such as fanout and join
-// today, are not on it.
+// never runs it. Nodes registered but not reachable are not on it: fanout and
+// join, which nothing routes into yet, and the approve gate when
+// graph.approval is false, since the plan node then routes straight to code.
+// A dry run prints this, so it has to be the walk the run really takes rather
+// than the walk the graph could take.
 //
 // Give it the options Default was given. With any others it describes a
 // graph the dispatcher is not walking.

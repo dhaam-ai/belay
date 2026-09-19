@@ -17,8 +17,8 @@ import (
 func TestRouteMatchesRegistry(t *testing.T) {
 	t.Parallel()
 
-	// The route every release so far has walked and shown. With no options
-	// Route must return exactly this, whatever else the config says.
+	// The route every release so far has walked and shown, with the gate the
+	// default configuration asks for.
 	standard := []string{
 		graph.NodePlan, graph.NodeApprove, graph.NodeCode,
 		graph.NodeWrite, graph.NodeTest, graph.NodeFix, graph.NodeReview,
@@ -26,19 +26,32 @@ func TestRouteMatchesRegistry(t *testing.T) {
 	fanoutOn := config.Default()
 	fanoutOn.Fanout.Enabled = true
 	fanoutOn.Fanout.Candidates = 3
+	// graph.approval false: the plan node routes straight to code, so the
+	// gate is not on the walk. It stays registered — a re-run of a run
+	// started with the gate must never route to a node nobody registered.
+	approvalOff := config.Default()
+	approvalOff.Graph.Approval = false
 
 	for _, tc := range []struct {
 		name string
 		cfg  config.Config
 		want []string
-		// offRoute are registered but not on the route: no node routes
-		// into them yet, so a run cannot reach them.
+		// offRoute are registered but not on the route: nothing this run
+		// walks routes into them.
 		offRoute []string
 	}{
 		{name: "defaults", cfg: config.Default(), want: standard},
 		{
 			name: "fanout enabled", cfg: fanoutOn, want: standard,
 			offRoute: []string{graph.NodeFanout, graph.NodeJoin},
+		},
+		{
+			name: "graph.approval false", cfg: approvalOff,
+			want: []string{
+				graph.NodePlan, graph.NodeCode, graph.NodeWrite,
+				graph.NodeTest, graph.NodeFix, graph.NodeReview,
+			},
+			offRoute: []string{graph.NodeApprove},
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
