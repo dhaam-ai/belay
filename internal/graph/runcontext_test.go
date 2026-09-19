@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"log/slog"
+	"path/filepath"
 	"reflect"
 	"testing"
 	"time"
@@ -13,6 +14,7 @@ import (
 	"github.com/dhaam-ai/belay/internal/config"
 	"github.com/dhaam-ai/belay/internal/journal"
 	"github.com/dhaam-ai/belay/internal/state"
+	"github.com/dhaam-ai/belay/internal/vcs"
 	"github.com/dhaam-ai/belay/pkg/belay"
 )
 
@@ -30,6 +32,7 @@ type (
 	rcLinter   struct{ belay.Linter }
 	rcReviewer struct{ belay.Reviewer }
 	rcIsolator struct{ belay.Isolator }
+	rcVCS      struct{ vcs.Repository }
 )
 
 // rcIdle exists because NewDispatcher refuses an empty registry.
@@ -51,19 +54,28 @@ func TestRunContextCarriesEverythingANodeIsAllowedToSee(t *testing.T) {
 	var logs bytes.Buffer
 	cfg := config.Default()
 	agent, runner, linter := &rcAgent{}, &rcRunner{}, &rcLinter{}
-	reviewer, isolator := &rcReviewer{}, &rcIsolator{}
+	reviewer, isolator, repo := &rcReviewer{}, &rcIsolator{}, &rcVCS{}
 	reg := NewRegistry()
 	reg.MustRegister(rcIdle{})
 	d, err := NewDispatcher(Options{
 		Store: state.NewStore(layout), Registry: reg, Config: cfg,
 		Logger: slog.New(slog.NewJSONHandler(&logs, nil)),
 		Agent:  agent, Runner: runner, Linter: linter, Reviewer: reviewer, Isolator: isolator,
+		VCS: repo,
 	})
 	if err != nil {
 		t.Fatalf("NewDispatcher: %v", err)
 	}
 
 	man := state.NewManifest(time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC), runID, ws, "ship it", cfg)
+	// A branch-mode run, because the whole point of Output on the context
+	// is that it comes from the manifest rather than from d.cfg, and the
+	// zero Output could not tell the two apart.
+	man.SetOutput(state.Output{
+		Mode: state.OutputBranch, Repo: ws, Branch: "belay/" + runID, Base: "1111111",
+		BaseRef: "main", WorkTree: filepath.Join(layout.RunDir(), "worktree"), Prefix: "sub/",
+		PullRequest: true,
+	})
 	st := state.NewState("ship it")
 	st.Fix.Attempts = 2
 	// Spend something, so a Budget that was never filled in cannot pass as
@@ -93,6 +105,11 @@ func TestRunContextCarriesEverythingANodeIsAllowedToSee(t *testing.T) {
 		{"Linter", rc.Linter, linter},
 		{"Reviewer", rc.Reviewer, reviewer},
 		{"Isolator", rc.Isolator, isolator},
+		// Read from the manifest, not from d.cfg: a run delivers its
+		// result the way it was started, whatever belay.yaml says when it
+		// is resumed.
+		{"Output", rc.Output, man.Output},
+		{"VCS", rc.VCS, repo},
 	} {
 		if !reflect.DeepEqual(tc.got, tc.want) {
 			t.Errorf("RunContext.%s = %#v, want %#v", tc.field, tc.got, tc.want)

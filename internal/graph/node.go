@@ -28,6 +28,7 @@ import (
 	"github.com/dhaam-ai/belay/internal/config"
 	"github.com/dhaam-ai/belay/internal/journal"
 	"github.com/dhaam-ai/belay/internal/state"
+	"github.com/dhaam-ai/belay/internal/vcs"
 	"github.com/dhaam-ai/belay/pkg/belay"
 )
 
@@ -50,6 +51,7 @@ const (
 	NodeReview  = "review"
 	NodeFanout  = "fanout"
 	NodeJoin    = "join"
+	NodePromote = "promote"
 )
 
 // Errors returned by this package.
@@ -187,6 +189,28 @@ type RunContext struct {
 	Linter   belay.Linter
 	Reviewer belay.Reviewer
 	Isolator belay.Isolator
+
+	// Output is how the run delivers its result, as pinned in its manifest
+	// when the run was created. It is the zero Output, which means in
+	// place, for every run that does not work on a branch, including every
+	// run started before branch output existed.
+	//
+	// It comes from the manifest and not from Config, for the same reason
+	// the graph's shape does (see internal/nodes): a run resumed after
+	// belay.yaml changed must still deliver its result the way it started.
+	// A node never chooses its behaviour from it at runtime; which nodes a
+	// run has is decided once, when the registry is built.
+	Output state.Output
+
+	// VCS is the run's version control: what the promote node commits and
+	// integrates through. It is nil unless the run's output is a branch,
+	// and a node that needs it must return a clear error when it is nil,
+	// like any other adapter.
+	//
+	// It is an internal/vcs.Repository rather than a git type because
+	// internal/graph has no build tag and the git package runs git through
+	// internal/exec, which builds only on unix; see internal/vcs.
+	VCS vcs.Repository
 }
 
 // WriteArtifact writes a run artifact — plan.md, review.json, a diff — and

@@ -333,6 +333,7 @@ Adapters are given to the dispatcher when it is created, in `graph.Options`, and
 - `Linter belay.Linter`: used by the review node when review.mode is "lint"
 - `Reviewer belay.Reviewer`: used by the review node when review.mode is "sonar" (the SonarQube scanner) or "ai" (the reviewer that asks SonarQube through its MCP server, which `belay run` does not wire in yet)
 - `Isolator belay.Isolator`: used only by the fanout node, which no run reaches; the CLI sets none
+- `VCS vcs.Repository` (`internal/vcs`, deliberately not exported): used only by the promote node, in a run whose output is a branch; the CLI sets none yet, because nothing selects branch output
 
 The CLI builds all of this in `internal/cli/wire.go` (`resolve`, then `runPlan.options`). In outline, for a Go repository under review.mode "lint":
 ```go

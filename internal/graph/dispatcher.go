@@ -12,6 +12,7 @@ import (
 	"github.com/dhaam-ai/belay/internal/config"
 	"github.com/dhaam-ai/belay/internal/journal"
 	"github.com/dhaam-ai/belay/internal/state"
+	"github.com/dhaam-ai/belay/internal/vcs"
 	"github.com/dhaam-ai/belay/pkg/belay"
 )
 
@@ -169,6 +170,12 @@ type Options struct {
 	Linter   belay.Linter
 	Reviewer belay.Reviewer
 	Isolator belay.Isolator
+
+	// VCS is the version control handed to every node as RunContext.VCS.
+	// Leave it nil for a run whose output is not a branch. The run's output
+	// mode itself is not an option: the dispatcher reads it from the
+	// manifest it already loads, which is where a run's pins live.
+	VCS vcs.Repository
 }
 
 // Dispatcher drives one run's node graph: it resolves where to start, executes
@@ -276,6 +283,7 @@ type Dispatcher struct {
 	linter   belay.Linter
 	reviewer belay.Reviewer
 	isolator belay.Isolator
+	vcs      vcs.Repository
 }
 
 // NewDispatcher returns a Dispatcher for the run described by opts. It does not
@@ -307,6 +315,7 @@ func NewDispatcher(opts Options) (*Dispatcher, error) {
 		linter:   opts.Linter,
 		reviewer: opts.Reviewer,
 		isolator: opts.Isolator,
+		vcs:      opts.VCS,
 	}
 	if d.logger == nil {
 		d.logger = slog.Default()
@@ -694,6 +703,10 @@ func (d *Dispatcher) runContext(
 			slog.String("node", node), slog.Int("step", step), slog.Int("attempt", attempt)),
 		Agent: d.agent, Runner: d.runner, Linter: d.linter,
 		Reviewer: d.reviewer, Isolator: d.isolator,
+		// A run-long value, so it comes from man, which was written when
+		// the run was created, never from d.cfg.
+		Output: man.Output,
+		VCS:    d.vcs,
 	}
 }
 

@@ -61,6 +61,9 @@ Nothing is recomputed from the journal. On resume the dispatcher reads state.jso
 - `Linter belay.Linter`: static analysis (golangci-lint, eslint, etc.)
 - `Reviewer belay.Reviewer`: quality gates (SonarQube, AI review, etc.)
 - `Isolator belay.Isolator`: workspace isolation, used only by the fanout node; the CLI injects none
+- `VCS vcs.Repository`: commits and merges, used only by the promote node of a run whose output is a branch; the CLI injects none yet, because nothing selects branch output. It is an `internal/vcs` interface, not a `pkg/belay` one, because git is its only implementation.
+
+Beside the adapters, RunContext carries `Output`, how the run delivers its result. It is read from the run's manifest, where it was pinned when the run was created, never from live configuration.
 
 All adapters are injected at dispatcher creation time, making the entire graph backend-agnostic (ADR-0005).
 
