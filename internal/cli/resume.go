@@ -79,6 +79,9 @@ func continueRun(cmd *cobra.Command, runID string) error {
 		return &ExitError{Code: graph.ExitFailed, Message: "belay: " + err.Error(), Err: err}
 	}
 	store := state.NewStore(layout)
+	if err := plan.resumePreflight(store); err != nil {
+		return &ExitError{Code: graph.ExitFailed, Message: "belay: " + err.Error(), Err: err}
+	}
 
 	if rootFlags.dryRun {
 		return describeDryRun(u, plan, chosen.goal, chosen.describe(runID == ""))
@@ -101,6 +104,29 @@ func continueRun(cmd *cobra.Command, runID string) error {
 	}
 
 	return driveRun(cmd, u, plan, store, true)
+}
+
+// resumePreflight checks, before anything is spent, that this plan can
+// continue the run in store, and records a blocker for each reason it cannot.
+// continueRun calls it once, after choosing the run and before either the dry
+// run or the dispatch, so a dry run lists the same refusals a real resume
+// would.
+//
+// resolve built the plan from belay.yaml as it is now, and the file may have
+// changed since the run began. Whatever decides the shape of a run is pinned
+// in the run's manifest when the run is created, and a resume must build the
+// graph from that pin, not from belay.yaml (internal/nodes explains why).
+// This is where a resume reads the pins and rebuilds or refuses accordingly,
+// before the dispatcher runs anything.
+//
+// Today it checks nothing: no manifest pins anything yet. An error means the
+// check itself could not be made, such as a manifest that cannot be read. A
+// run that cannot be continued is a blocker instead, so that it is reported
+// with the others.
+//
+//nolint:revive // store is unused until a run's manifest pins something a resume must check; it is the hook's contract.
+func (p *runPlan) resumePreflight(store *state.Store) error {
+	return nil
 }
 
 // approvePlan records that the human approved the plan, and reports whether
