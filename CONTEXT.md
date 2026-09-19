@@ -7,7 +7,7 @@ recorded outcome rather than lost work.
 ## Runs and the graph
 
 **Run**:
-One attempt to achieve one goal against one repository, from first step to end,
+One effort to achieve one goal against one repository, from first step to end,
 identified by a run ID and recorded under `.belay/runs/<run-id>/`.
 _Avoid_: job, session, task, execution
 
@@ -25,8 +25,8 @@ or join — that reads the blackboard and returns a result.
 _Avoid_: phase, stage, step (in code; "step" is fine in prose), task
 
 **Dispatcher**:
-The one component that executes nodes in order and makes the run durable; nodes
-never persist anything themselves.
+The one component that executes nodes in order and makes the run durable; no node
+writes the blackboard, the manifest or the journal itself.
 _Avoid_: engine, runner, scheduler, orchestrator
 
 **Result**:
@@ -53,6 +53,14 @@ _Avoid_: log, history, event stream
 Continuing an interrupted run from its last finished node, re-running any node that
 started but did not finish.
 _Avoid_: restart, retry, recover
+
+**Attempt**:
+One execution of a node within a run. A node cut short by a crash or Ctrl-C is
+re-run as the next attempt of the same visit; a later visit to the node, such as
+the test node's next round of the fix loop, starts again at attempt 1. The fix
+loop's count of repairs (`state.Fix.Attempts`, "fix attempt 2 of 3") is a
+different number.
+_Avoid_: retry (a retry sounds like a new request; an attempt re-runs the same visit)
 
 **Fork**:
 A new run, with its own ID, that re-runs one node of an existing run from the
@@ -101,12 +109,14 @@ _Avoid_: policy error, breach
 ## Best-of-N
 
 **Fanout**:
-Giving one goal N independent attempts at once so the best can be kept.
+Working on one goal in N independent ways at once so the best result can be kept.
 _Avoid_: parallel runs, best-of-N (fine in prose, not as an identifier)
 
 **Candidate**:
-One of the N attempts a fanout creates, each in its own workspace.
-_Avoid_: attempt, variant, branch (a candidate may have a branch; it is not one)
+One of the N independent tries at a goal that a fanout sets up, each in its own
+workspace.
+_Avoid_: attempt (an attempt is one execution of a node), variant, branch (a
+candidate may have a branch; it is not one)
 
 **Winner**:
 The candidate join selects; there is no winner when every candidate's tests failed.
