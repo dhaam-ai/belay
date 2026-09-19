@@ -142,12 +142,22 @@ func continueRun(cmd *cobra.Command, runID string) error {
 // run or the dispatch, so a dry run lists the same refusals a real resume
 // would.
 //
-// resolve built the plan from belay.yaml as it is now, and the file may have
-// changed since the run began. Whatever decides the shape of a run is pinned
-// in the run's manifest when the run is created, and a resume must build the
-// graph from that pin, not from belay.yaml (internal/nodes explains why).
-// This is where a resume reads the pins and rebuilds or refuses accordingly,
-// before the dispatcher runs anything.
+// It only refuses. resolve built the plan from belay.yaml as it is now, and
+// the file may have changed since the run began. Whatever decides the shape
+// of a run is pinned in the run's manifest when the run is created, and a
+// resume must walk the graph those pins describe, not the one belay.yaml
+// describes today (internal/nodes explains why). Rebuilding the registry and
+// the route from the pins is resolveRegistry's job. This is where a pin that
+// this belay or this plan cannot honour becomes a blocker.
+//
+// It is not state.Store.Preflight, which continueRun calls later, only for a
+// real resume and before it can record an approval, and which the dispatcher
+// calls before it opens the journal. That one refuses, with an error, a run
+// this belay may not read at all (a capability it lacks, or a schema version
+// it cannot read, in state.json), and it writes: it saves a manifest below
+// the current schema version at that version. This one writes nothing, runs
+// for a dry run too, and reports what it finds as blockers, beside the
+// plan's others.
 //
 // Today it checks nothing: no manifest pins anything yet. An error means the
 // check itself could not be made, such as a manifest that cannot be read. A

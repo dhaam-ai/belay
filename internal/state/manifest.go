@@ -664,6 +664,13 @@ func (s *Store) SaveManifest(m Manifest) error {
 // A manifest at a version above this belay's is left untouched, and is not
 // this function's refusal to make: the caller loaded it, or chose not to,
 // and LoadManifest is where that error belongs.
+//
+// It is not the CLI's resumePreflight (internal/cli), which `belay resume`
+// runs earlier, dry run included: that one writes nothing, and turns a pin
+// in the manifest the resuming configuration cannot honour into a blocker
+// reported beside the others. Preflight is the last check before a write,
+// refuses with an error, and saves the manifest itself when it is below the
+// current schema version.
 func (s *Store) Preflight() error {
 	if _, err := s.LoadState(); err != nil {
 		return err

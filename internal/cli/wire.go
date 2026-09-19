@@ -503,6 +503,14 @@ func (p *runPlan) resolveReplayAgent() {
 // belay shows a person, together. Whatever options nodes.Default is given,
 // nodes.Route must be given too, or belay shows one graph and walks another.
 //
+// It is where a resume will rebuild both from the chosen run's manifest, once
+// a manifest pins anything that shapes the graph (internal/nodes says why a
+// run's graph must not follow belay.yaml as it is when the run is resumed).
+// Nothing is pinned yet, so today it builds both from belay.yaml as loaded,
+// before a resume has chosen its run; the first pinned option must make a
+// resume call it again with the chosen run's pins. It never refuses a run:
+// a pin this plan cannot honour is resumePreflight's to report.
+//
 // The route is set even when the registry cannot be built, so that a dry run
 // refusing to start still shows the route it would have taken.
 func (p *runPlan) resolveRegistry() {
