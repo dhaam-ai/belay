@@ -143,9 +143,10 @@ func wire(cfg config.Config, opts []Option) *wiring {
 //	plan → approve → code → write → test → fix → review → END
 //
 // with test failures and failed quality gates both routing back through fix,
-// bounded by graph.give_up. When fanout is enabled the graph also carries
-// fanout and join, which turn N candidate workspaces into one winner. Each
-// Option adds to or changes that graph.
+// bounded by graph.give_up. When fanout is enabled the registry also carries
+// fanout and join, off the route: no node routes into fanout yet, so no run
+// reaches either, and nothing runs a candidate (ADR-0019 is reserved for
+// that). Each Option adds to or changes that graph.
 //
 // The approve gate is registered whatever graph.approval says, although a run
 // with it off never reaches the gate (see Route). The flag is read from
