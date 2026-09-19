@@ -45,7 +45,12 @@ graph.node_timeout. Start a new one instead.
 
 A run a newer belay wrote cannot be continued by this one: upgrade belay. While
 such a run is in the workspace, belay will not choose a run for you, since it
-cannot tell whether that run is the one still waiting; name the run instead.`,
+cannot tell whether that run is the one still waiting; name the run instead.
+
+A run belay cannot read, because its manifest.json is missing or damaged,
+cannot be continued either. Name it, and belay says what is wrong with it and
+where it is; give no run id, and belay passes over it and chooses from the
+others.`,
 	Example: `  belay resume
   belay resume 20260905T153301Z-1f2e3d4c5b6a
   belay --dry-run resume`,

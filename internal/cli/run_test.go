@@ -193,6 +193,12 @@ func TestResumeHelpReadsAsEnglish(t *testing.T) {
 		// picked up by resume; resume's own help must agree.
 		"Ctrl-C",
 		"runs that step again",
+		// A run whose manifest.json belay cannot read is reported, not
+		// hidden: named, belay says what is wrong with it and where it is;
+		// unnamed, belay passes over it rather than refusing to choose.
+		"damaged",
+		"says what is wrong with it",
+		"passes over it",
 	} {
 		if !strings.Contains(out, phrase) {
 			t.Errorf("belay resume --help never mentions %q", phrase)

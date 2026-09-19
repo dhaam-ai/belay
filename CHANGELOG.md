@@ -55,7 +55,8 @@ that only `pkg/belay` carries a compatibility promise. Everything under
   which lists the same run and says what is wrong with it. Naming such a run
   now says belay cannot continue it, why in the same words `belay runs` uses,
   and where the run directory is. belay still never picks one when you do not
-  name a run.
+  name a run: it passes over it and chooses from the others. `belay resume
+  --help` says both.
 - **`belay timeline` no longer reports the approval gate as a loop.** The gate
   pausing for you and running again when you resumed the run is two journal
   records for one visit, and the timeline counted them as two: every run with
