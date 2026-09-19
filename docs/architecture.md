@@ -4,7 +4,7 @@ Belay is a durable, resumable orchestrator for autonomous coding agents. This do
 
 ## Overview
 
-Belay runs a graph of coding phases, in this order:
+Belay runs a graph of nodes, in this order:
 
 ```
 plan -> approve -> code -> write -> test -> fix -> review
@@ -12,12 +12,12 @@ plan -> approve -> code -> write -> test -> fix -> review
 
 Failed tests and failed quality gates both route back through fix, so the graph has cycles, and a run whose tests and gate pass never runs fix. Two more nodes, fanout and join, exist for best-of-N candidates, but no node routes to fanout, so no run reaches either one (see Fanout/Join below).
 
-Each node in the graph is a pure function that returns a result; the dispatcher persists the result to an append-only journal. If belay crashes, the next invocation resumes from the last completed node.
+Each node returns a result, and the dispatcher persists it: the result's changes to state.json, then the node's completion to an append-only journal. If belay crashes, `belay resume` continues after the last completed node, running again the one that was cut off.
 
 The four product pillars are:
 
 1. **Durable + Resumable**: Crash-resume from the last completed node, not from the beginning.
-2. **Quality-Gated**: Code must pass linters (phase 6) or AI review (phase 7) before being marked done.
+2. **Quality-Gated**: Code must pass the quality gate, a linter or a SonarQube scan, before the run can finish.
 3. **Best-of-N Candidates** (not working yet): The aim is for fanout to give one goal N candidates and keep the best. The fanout and join nodes exist, but no run reaches them and nothing runs a candidate (see Fanout/Join).
 4. **CLI-Agnostic**: Agent backend is pluggable (Claude Code in v0.1; Codex and Gemini via AgentBackend interface).
 
@@ -25,7 +25,7 @@ The four product pillars are:
 
 ### Layer 1: State & Persistence
 
-**State**: The run's persistent state lives in `.belay/runs/<run-id>/manifest.json`, a JSON file written after every node completes (see `internal/state/manifest.go`). It contains the goal, the current state (accumulated patches from all completed nodes), configuration, and budget tracking. The dispatcher reads it on resume to reconstruct what happened.
+**State**: A run keeps two JSON documents in `.belay/runs/<run-id>/`. `state.json` is the blackboard every node reads: the accumulated patches of the nodes that have finished, such as the plan, the files changed, the latest test and review results and the fix loop's count (see `internal/state/state.go`). `manifest.json` is the run's identity and lifecycle: its goal, status, current node and step count, the configuration it started with, and the budget spent so far (see `internal/state/manifest.go`). The dispatcher saves state.json when it accepts a node's result and manifest.json after the node's completion is journaled, and reads both on resume.
 
 **Journal**: An append-only NDJSON file (`.belay/runs/<run-id>/journal.ndjson`) records every state transition. Each line is a Record (see `internal/journal/record.go`):
 ```
@@ -33,20 +33,20 @@ The four product pillars are:
 {"seq":2,"attempt":1,"node":"plan","event":"node_started","ts":"2026-08-29T10:31:00.4Z"}
 {"seq":3,"attempt":1,"node":"plan","event":"node_finished","status":"ok","next":"approve","usage":{"input_tokens":0,"output_tokens":0,"usd":0,"estimated":false}}
 ```
-Records are written with O_APPEND|O_WRONLY, synced after every append, and never rewritten. A crash during one record can corrupt only that record; earlier records remain durable. The journal is the sole source of truth: it records what *completed*, not what was attempted (see ADR-0003).
+Records are written with O_APPEND|O_WRONLY, synced after every append, and never rewritten. A crash during one record can corrupt only that record; earlier records remain durable. The journal is the sole source of truth for where a run is: it records every node's start and finish, and a node counts as done only once its `node_finished` record is written (see ADR-0003).
 
 **Resume**: On startup (or `belay resume`), the dispatcher calls `journal.ResolveStart(records)` to read the journal and compute the next node to run (see `internal/journal/journal.go`). The algorithm uses a decision table that handles:
 - A normal run ending in `node_finished`: resume at that node's `next` field
 - A node that started and never finished (a crash mid-node), or a `node_finished` that closed an interrupted attempt (status `aborted`, `next` naming the node itself): re-run that node at the next attempt
 - A paused run (ending in `run_paused`): refuse unless explicitly resumed with `belay resume`
 - A run ending in a terminal state (`run_completed`, `run_failed`, `run_aborted`): refuse to resume (it is finished)
-- A half-written final record (crash mid-append): discard and heal the journal, resuming at the prior node's `next`
+- A half-written final record (crash mid-append): `journal.Open` discards it and heals the file before `ResolveStart` reads the journal, so the decision is made from the last complete record
 
-The manifest is recomputed by replaying all journal records up to the resume point, so a crash cannot leave stale state behind.
+Nothing is recomputed from the journal. On resume the dispatcher reads state.json and manifest.json as they were last saved, and the journal decides only where to resume. The write order is what keeps the blackboard right: a node's changes reach state.json before its completion reaches the journal (see *Why Patch-Then-Journal Matters* below), so the journal never records a finished node whose changes are missing. The manifest has no such protection. It is saved after the journal record, so a crash between the two leaves it one node behind, its step count and budget snapshot missing that node, and nothing corrects it today: the budget ledger is restored from that snapshot. Rebuilding the ledger from the usage in the journal's `node_finished` records is planned.
 
 ### Layer 2: Node Execution
 
-**Pure Functions**: Each graph node (plan, code, review, etc.) is a Node interface that takes a RunContext → Result (see `internal/graph/node.go`). Nodes never touch the filesystem, never write to the journal, and never modify state directly. A node is entirely deterministic given frozen inputs and mocked adapters, making it table-testable.
+**Nodes**: Each graph node (plan, code, review, etc.) implements the Node interface, which takes a RunContext and returns a Result (see `internal/graph/node.go`). A node never writes state.json, manifest.json or the journal: every change it makes to the blackboard travels in its Result's Patch. It is not kept off the filesystem, though. Through its RunContext it writes artifacts and per-step evidence under the run directory (the plan, diffs, reports, the prompt it sent and the reply it got); the agent a node calls edits the workspace; and the write, test and review nodes read the workspace or run tools in it. Given a frozen RunContext and fake adapters, a node is table-testable.
 
 **Result Contract**: Every node returns `Result{Next string, Status journal.Status, Patch state.Patch, Usage belay.Usage, Note string}` (see `internal/graph/dispatcher.go`):
 - `Next`: the name of the node to run after this one (e.g., "approve" after "plan"), or "END" to finish the run
@@ -66,14 +66,13 @@ All adapters are injected at dispatcher creation time, making the entire graph b
 
 ### Layer 3: Dispatcher & Graph
 
-**Dispatcher.Run()**: The main orchestration loop (see `internal/graph/dispatcher.go`) for each step:
-1. Resolve the next node using `journal.ResolveStart`, skipping nodes already persisted
-2. Set a timeout on the node (from config.Graph.NodeTimeout, usually 15 minutes)
-3. Call the node's Run(ctx, rc) method
-4. Validate the Result (check Patch is well-formed, Next names a valid node, Status is known)
-5. **Apply the Patch to state**, then **write node_finished to the journal** (this order is critical; see below)
-6. Update Usage tracking and check budget constraints
-7. Return control to step 1 for the next node
+**Dispatcher.Run()**: The main orchestration loop (see `internal/graph/dispatcher.go`). It asks `journal.ResolveStart` once, on entry, where to start (see Resume above); after that, the next node is the one the last Result named. For each step:
+1. Check the budget ceiling and `graph.max_steps`, before anything is spent
+2. Run the node with a timeout (`graph.node_timeout`, 15 minutes by default)
+3. Validate the Result: its Status is set, and a successful Result names its Next
+4. **Apply the Patch to state**, then **write node_finished to the journal** (this order is critical; see below)
+5. Save the manifest: the step count, the next node, and the budget ledger with this node's Usage added
+6. Continue with the node the Result named, where a name no node has fails the run; a Result that pauses, fails or finishes the run ends the loop instead
 
 **Why Patch-Then-Journal Matters (ADR-0002)**: The dispatcher applies patches and journals *after*, not before. If it journalled first:
 - A crash between journal and patch means a durable record exists with a Next node but no state to reach it
@@ -82,7 +81,7 @@ All adapters are injected at dispatcher creation time, making the entire graph b
 
 By applying first, a crash can leave an applied patch with no journal record (resume runs the node twice, idempotent because Patch is absolute), but a crash can never leave a journal record whose patch did not land.
 
-**Graph Definition**: The graph is built in code, not read from config. `nodes.Default` (`internal/nodes/wire.go`) registers plan, approve, code, write, test, fix and review, and `nodes.Route` gives the order a run walks them in. No edge list exists: each node names its successor in its Result's `Next`, and the dispatcher looks that name up in the registry. A name no node has fails the run with `graph.ErrUnknownNode`, and `graph.End` finishes it. belay.yaml changes the graph in two ways only: `graph.approval` decides whether plan routes to approve or straight to code, and `fanout.enabled` registers fanout and join, off the route.
+**Graph Definition**: The graph is built in code, not read from config. `nodes.Default` (`internal/nodes/wire.go`) registers plan, approve, code, write, test, fix and review, and `nodes.Route` gives the order a run walks them in, leaving approve off when `graph.approval` is false. No edge list exists: each node names its successor in its Result's `Next`, and the dispatcher looks that name up in the registry. A name no node has fails the run with `graph.ErrUnknownNode`, and `graph.End` finishes it. belay.yaml changes the graph in two ways only: `graph.approval` decides whether plan routes to approve or straight to code (approve stays registered either way, so a run started with the gate can still be resumed at it), and `fanout.enabled` registers fanout and join, off the route.
 
 **Fanout/Join**: The fanout and join nodes exist and are unit-tested (`internal/nodes/fanout`, `internal/nodes/join`), but no run reaches them:
 1. No node returns Next="fanout". `nodes.Default` registers fanout and join only when `fanout.enabled` is true, and even then `nodes.Route` leaves them off the route, so turning fanout on changes nothing a run does.
@@ -104,7 +103,7 @@ Running candidates is planned, and ADR-0019 is reserved for it.
 
 The critical invariant: two conforming adapters produce reports that serialize to identical JSON key sets, regardless of content. This makes reports comparable and testable across implementations.
 
-The graph acts only on `Gate`: if GateFail, the run branches to the `fix` node (bounded by a loop counter); if GatePass, the run proceeds to the next phase; if GateError, the run aborts (the tool could not reach a verdict, not "the code is bad").
+The graph acts only on `Gate`: if GateFail, the run branches to the `fix` node (bounded by a loop counter); if GatePass, the run finishes; if GateError, the run fails (the tool could not reach a verdict, not "the code is bad").
 
 **Budget Ledger** (see `internal/budget/budget.go`): Day-one constraint (ADR-0007). Every node's Usage is added to a cumulative budget. Before each node the dispatcher checks the total against `budget.max_usd` and `budget.max_tokens` in belay.yaml. Once either is exceeded, `budget.on_exceed` decides: `abort`, the default, ends the run with an error wrapping belay.ErrBudgetExceeded; `warn` logs the overrun and carries on.
 
@@ -142,7 +141,7 @@ Dispatcher (orchestrates graph)
   └→ Journal (persist all records)
 ```
 
-## State Machine & Phases
+## State Machine & Nodes
 
 The run progresses through a directed graph of nodes (see `internal/graph/node.go` for each). Each node:
 1. **Receives** RunContext with current state, config, adapters, and run metadata
@@ -150,15 +149,15 @@ The run progresses through a directed graph of nodes (see `internal/graph/node.g
 3. **Persists** the Result (dispatcher writes to journal and applies Patch)
 4. **Advances** to the next node named in Result.Next, or END if terminal
 
-**Phase Descriptions**:
+**Node Descriptions**:
 
-- **plan** (Agent): Uses the agent to propose a plan from the goal. Returns a plan summary and branches to approve.
+- **plan** (Agent): Uses the agent to propose a plan from the goal. Returns a plan summary and branches to approve, or straight to code when `graph.approval` is false.
 - **approve** (Human Gate): Awaits human approval before proceeding. Returns paused if not approved, or continues to code.
 - **code** (Agent): Uses the agent to implement the plan. Branches to write.
-- **write** (Agent): Commits code changes (writes files, formats). Branches to test.
+- **write**: Checks the files the agent reported changing against the workspace, refusing any path outside it, and records them in state.Code.ChangedFiles with a diff artifact. It never modifies the workspace: the agent has already edited the files in place. Branches to test.
 - **test** (TestRunner): Executes the test suite. If all tests pass, branches to review; if any fail, branches to fix.
-- **fix** (Agent): Uses the agent to fix failing tests, and adds the files the repair reports changing to the run's list of changed files (state.Code.ChangedFiles). Branches back to test (bounded by attempt counter graph.give_up to prevent infinite loops).
-- **review** (Linter or Reviewer): Runs static analysis or AI review. If gate passes, branches to END; if gate fails, branches to fix.
+- **fix** (Agent): Uses the agent to fix failing tests, and adds the files the repair reports changing to the run's list of changed files (state.Code.ChangedFiles). Branches back to test. Reached again after `graph.give_up` repairs, it fails the run instead of repairing, so the loop cannot run forever.
+- **review** (Linter or Reviewer): Runs the quality gate, a linter or a SonarQube scan. If gate passes, branches to END; if gate fails, branches to fix.
 - **fanout** (Isolator): Creates one isolated workspace per candidate, one after another, and records them. It runs none of them. Branches to join. No node branches to fanout, so no run reaches it.
 - **join**: Picks a winner among the candidates whose tests passed, by `fanout.select`, and records it in state.Winner. It copies nothing back; promotion is manual (ADR-0004). Branches to END, or fails the run when no candidate passed. Only fanout branches to join, so no run reaches it either.
 
@@ -210,20 +209,20 @@ Five pluggable interfaces in `pkg/belay` allow third-party implementations:
 
 **Recovery on Crash**: If belay crashes mid-run:
 1. The journal file may have a half-written final record (torn tail)
-2. On restart, `journal.ResolveStart` detects the incomplete record, discards it, and heals the file atomically
-3. The dispatcher resumes at the node whose completion was the last durable record
-4. Node patches are idempotent (absolute sets, not deltas), so re-running a completed node is safe
+2. On restart, `journal.Open` discards the incomplete record and rewrites the file atomically without it
+3. `journal.ResolveStart` names where to resume: the `next` of the last `node_finished` record, or, when the last node started and never finished (or its attempt was closed as interrupted), that node again at the next attempt
+4. Node patches are absolute sets, not deltas, so re-running a node whose patch landed before the crash but whose completion was never journaled is safe
 
 **User Recovery**: Users can:
 - `belay resume <run-id>`: continue a paused or crashed run (refusing runs already in terminal states)
 - `belay timeline <run-id>`: inspect the journal and manifest to diagnose failures
-- Manually edit the working directory and retry if the failure was external (e.g., a network issue that is now resolved)
+- `belay run` again once an external cause is fixed (e.g., a network outage): a run that failed cannot be continued, so the retry is a new run, and it starts from the working directory as the failed run left it
 
 ## Performance & Concurrency
 
 Nothing runs candidates, in parallel or otherwise. The fanout node creates candidate workspaces one after another in one goroutine and runs none of them; its package doc explains why running candidates concurrently belongs to the dispatcher, not to a node.
 
-The dispatcher is single-threaded; it processes phases sequentially. This simplifies state management and makes the replay-resume model easy to reason about.
+The dispatcher is single-threaded; it runs one node at a time. This simplifies state management and makes resuming easy to reason about.
 
 ## Testing & Conformance
 
