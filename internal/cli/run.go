@@ -237,7 +237,7 @@ func driveRun(cmd *cobra.Command, u *ui, plan *runPlan, store *state.Store, resu
 		u.say("  recording saved to %s", path)
 	}
 
-	return reportOutcome(u, store.Layout(), outcome, runErr)
+	return reportOutcome(u, outcomeView{layout: store.Layout(), outcome: outcome, runErr: runErr})
 }
 
 // stopOnSignal cancels ctx when the person running belay asks it to stop, and
@@ -291,13 +291,33 @@ func announceStart(u *ui, plan *runPlan, layout state.Layout, want string) {
 	u.say("")
 }
 
+// outcomeView is everything belay's closing report reads about how one
+// dispatch of a run ended: which run it was, what the dispatcher returned,
+// and the error it gave as the reason a run stopped short.
+//
+// It is one value rather than a list of parameters so that the report can
+// learn something new about a run, such as where the run's work went, by
+// gaining a field, instead of by changing the signature of every function
+// that reads it.
+type outcomeView struct {
+	// layout locates the run's files. The report names the plan, the
+	// journal and the command that continues the run.
+	layout state.Layout
+	// outcome is what the dispatcher returned.
+	outcome graph.Outcome
+	// runErr is the dispatcher's error. It is part of how the run went, such
+	// as graph.ErrMaxSteps, not a failure to find out.
+	runErr error
+}
+
 // reportOutcome turns an Outcome into the last thing a person reads, and into the
 // process's exit status.
 //
 // Every branch answers the same three questions in the same order: where the
 // run is, what it cost, and what to do next. A person who has read one of
 // these has read all of them.
-func reportOutcome(u *ui, layout state.Layout, outcome graph.Outcome, runErr error) error {
+func reportOutcome(u *ui, view outcomeView) error {
+	outcome, runErr := view.outcome, view.runErr
 	u.say("")
 	u.say("%s", outcomeHeadline(outcome, runErr))
 	u.say("  where:  %s", whereText(outcome.Node))
@@ -305,7 +325,7 @@ func reportOutcome(u *ui, layout state.Layout, outcome graph.Outcome, runErr err
 	// The label sits on the first line only: repeating "next:" down a
 	// paragraph turns one instruction into four, which is exactly the
 	// reading a person then has to undo.
-	for i, line := range nextSteps(layout, outcome, runErr) {
+	for i, line := range nextSteps(view) {
 		switch {
 		case line == "":
 			u.say("")
@@ -399,7 +419,8 @@ func spendText(outcome graph.Outcome) string {
 
 // nextSteps is the wayfinding line: the exact command that continues from
 // here, written out so nobody has to remember or reconstruct it.
-func nextSteps(layout state.Layout, outcome graph.Outcome, runErr error) []string {
+func nextSteps(view outcomeView) []string {
+	layout, outcome, runErr := view.layout, view.outcome, view.runErr
 	resume := "belay resume " + layout.RunID()
 
 	switch {

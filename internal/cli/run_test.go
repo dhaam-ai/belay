@@ -457,7 +457,7 @@ func TestReportOutcomeMapsExitCodesAndExplainsItself(t *testing.T) {
 			var out bytes.Buffer
 			u := &ui{out: &out, err: &out}
 
-			err := reportOutcome(u, layout, tc.outcome, tc.runErr)
+			err := reportOutcome(u, outcomeView{layout: layout, outcome: tc.outcome, runErr: tc.runErr})
 
 			switch {
 			case tc.wantCode == graph.ExitOK && err != nil:
