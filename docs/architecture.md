@@ -165,7 +165,7 @@ The run progresses through a directed graph of nodes (see `internal/graph/node.g
 **Terminal States**:
 - StatusOK with Next="END": run completed successfully
 - StatusFailed: a node returned an error or returned StatusFailed
-- StatusAborted: budget exceeded, max steps reached, a node timeout, or the caller's context cancelled. `belay run` and `belay resume` set the dispatcher's `SuspendOnCancel`, so for them a cancellation (Ctrl-C, SIGTERM) closes the interrupted attempt as aborted, naming the node itself as `next`, and pauses the run; `belay resume` re-runs that node
+- StatusAborted: budget exceeded, max steps reached, a node timeout, or the caller's context cancelled. `belay run` and `belay resume` set the dispatcher's `PauseOnCancel`, so for them a cancellation (Ctrl-C, SIGTERM) closes the interrupted attempt as aborted, naming the node itself as `next`, and pauses the run; `belay resume` re-runs that node
 - StatusPaused: human approval gate not granted; use `belay resume` to continue
 
 If a node returns an error or an invalid Result, the dispatcher stops the run and records the failure. The user inspects the journal with `belay timeline`, fixes the underlying issue, and starts a new run: `belay resume` refuses a run that has failed.

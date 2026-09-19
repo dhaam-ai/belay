@@ -30,7 +30,7 @@ const (
 	// ExitAborted reports a run stopped by one of the dispatcher's guards
 	// rather than by the work itself: the budget ceiling, the MaxSteps cap,
 	// a node timeout, or cancellation of the caller's context. A
-	// cancellation that Options.SuspendOnCancel turns into a pause exits
+	// cancellation that Options.PauseOnCancel turns into a pause exits
 	// with it too: the invocation still stopped short of where the graph
 	// would have taken it, and a script must be able to tell that from a
 	// pause the graph chose. Outcome.Status says the run can be resumed.
@@ -71,7 +71,7 @@ var (
 	// ErrInvalidOptions means NewDispatcher was given an unusable Options.
 	ErrInvalidOptions = errors.New("graph: invalid dispatcher options")
 	// ErrInterrupted means the caller cancelled the run and
-	// Options.SuspendOnCancel paused it rather than ending it. It wraps
+	// Options.PauseOnCancel paused it rather than ending it. It wraps
 	// context.Canceled as well. The run is resumable: Resume re-runs the
 	// node that was interrupted.
 	ErrInterrupted = errors.New("graph: run interrupted; resuming re-runs the interrupted node")
@@ -149,7 +149,7 @@ type Options struct {
 	// caller holding them should pass exec.NewRedactor(...).Redact here.
 	// Defaults to a no-op, which still collapses whitespace and truncates.
 	Redact func(string) string
-	// SuspendOnCancel pauses the run, rather than ending it, when ctx is
+	// PauseOnCancel pauses the run, rather than ending it, when ctx is
 	// cancelled, so Resume can continue it. An attempt the cancellation
 	// interrupted is closed as one to run again, and Resume re-runs its
 	// node at the next attempt; a cancellation between nodes pauses the
@@ -159,7 +159,7 @@ type Options struct {
 	// It is off by default, so a caller that never set it still gets the
 	// run ended as aborted. `belay run` and `belay resume` set it, because
 	// their help promises that Ctrl-C leaves a run `belay resume` picks up.
-	SuspendOnCancel bool
+	PauseOnCancel bool
 
 	// Adapters, passed through to every RunContext. Any may be nil when the
 	// configuration selects none; a node that needs a nil adapter is
@@ -213,12 +213,12 @@ type Options struct {
 // node_finished is always appended before the run_completed, run_failed,
 // run_paused or run_aborted that ends the run.
 //
-// # Cancellation: end the run, or suspend it
+// # Cancellation: end the run, or pause it
 //
 // A cancelled context stops the run either way. What differs is whether it can
 // be continued. By default the dispatcher ends it as aborted, as it always
 // has, so a caller that never asked for anything else sees no change. With
-// Options.SuspendOnCancel it pauses the run instead: the interrupted attempt is
+// Options.PauseOnCancel it pauses the run instead: the interrupted attempt is
 // closed with the record heal writes for an attempt a crash left open
 // (journal.Record.Interrupted), run_paused follows it, and Resume re-runs the
 // node at the next attempt. That is the crash-recovery path with the journal
@@ -235,7 +235,7 @@ type Options struct {
 // A cancellation that arrives between nodes pauses the run before the next
 // one starts, with no attempt opened. Resume then starts that node afresh.
 //
-// Only cancellation suspends. A node timeout is the dispatcher's own guard and
+// Only cancellation pauses. A node timeout is the dispatcher's own guard and
 // still ends the run, as the budget ceiling and the step cap do: they are
 // verdicts on the run, and a resume would only meet them again.
 //
@@ -263,7 +263,7 @@ type Dispatcher struct {
 	now      func() time.Time
 	redact   func(string) string
 
-	suspendOnCancel bool
+	pauseOnCancel bool
 
 	agent    belay.AgentBackend
 	runner   belay.TestRunner
@@ -294,7 +294,7 @@ func NewDispatcher(opts Options) (*Dispatcher, error) {
 		now:      opts.Now,
 		redact:   opts.Redact,
 
-		suspendOnCancel: opts.SuspendOnCancel,
+		pauseOnCancel: opts.PauseOnCancel,
 
 		agent:    opts.Agent,
 		runner:   opts.Runner,
@@ -461,9 +461,9 @@ func (d *Dispatcher) heal(jrnl *journal.Journal, records []journal.Record, start
 // interruptedAttempt is the node_finished that closes an attempt the
 // dispatcher will run again: aborted, naming its own node as Next, with no
 // usage recorded (journal.Record.Interrupted). heal writes it for an attempt a
-// crash left open, and suspend for one a cancellation cut short. Building both
-// here keeps them the one shape that ResolveStart resumes at the next attempt
-// and owedRunMarker owes nothing for.
+// crash left open, and pauseInsideNode for one a cancellation cut short.
+// Building both here keeps them the one shape that ResolveStart resumes at the
+// next attempt and owedRunMarker owes nothing for.
 func interruptedAttempt(node string, attempt int, elapsed time.Duration, note string) journal.Record {
 	return journal.Record{
 		Event: journal.EventNodeFinished, Node: node, Attempt: attempt,
@@ -607,7 +607,7 @@ func (d *Dispatcher) loop(
 		// or, if it never looks at its context, do its work only to have it
 		// thrown away. This comes after the two guards: a run they would
 		// end is ended now, not paused to meet them again on resume.
-		if d.suspendOnCancel && errors.Is(ctx.Err(), context.Canceled) {
+		if d.pauseOnCancel && errors.Is(ctx.Err(), context.Canceled) {
 			return d.pauseInterrupted(jrnl, man, ledger, current, steps)
 		}
 
@@ -760,8 +760,8 @@ func (d *Dispatcher) settle(
 		return d.terminal(jrnl, man, ledger, node, attempt, steps, exec.elapsed,
 			journal.StatusAborted, journal.EventRunAborted, state.RunStatusAborted, ExitAborted,
 			d.note(err.Error()), err, logger)
-	case exec.canceled && d.suspendOnCancel:
-		return d.suspend(jrnl, man, ledger, node, attempt, steps, exec.elapsed, logger)
+	case exec.canceled && d.pauseOnCancel:
+		return d.pauseInsideNode(jrnl, man, ledger, node, attempt, steps, exec.elapsed, logger)
 	case exec.canceled:
 		err := fmt.Errorf("%w: %q canceled: %w", ErrNodeAborted, node, context.Canceled)
 		return d.terminal(jrnl, man, ledger, node, attempt, steps, exec.elapsed,
@@ -863,16 +863,17 @@ func (d *Dispatcher) settle(
 	}
 }
 
-// suspend pauses a run whose context was cancelled while node was running, so
-// that Resume can re-run the node. It closes the interrupted attempt with the
-// record heal writes for one a crash left open, then appends run_paused: the
-// order journal.Validate requires. A crash between the two leaves that record
-// last, which owedRunMarker owes nothing for, so the run is still resumable.
+// pauseInsideNode pauses a run whose context was cancelled while the node was
+// running, so that Resume can re-run it. It closes the interrupted attempt
+// with the record heal writes for one a crash left open, then appends
+// run_paused: the order journal.Validate requires. A crash between the two
+// leaves that record last, which owedRunMarker owes nothing for, so the run is
+// still resumable.
 //
 // Whatever the node returned is discarded. A node cut off part-way cannot
 // vouch for its Result, and re-running it from the blackboard it started from
 // is what the Node contract already makes safe.
-func (d *Dispatcher) suspend(
+func (d *Dispatcher) pauseInsideNode(
 	jrnl *journal.Journal, man *state.Manifest, ledger *budget.Ledger,
 	node string, attempt, steps int, elapsed time.Duration, logger *slog.Logger,
 ) (*Outcome, error) {
@@ -890,7 +891,7 @@ func (d *Dispatcher) suspend(
 
 // pauseInterrupted ends this dispatch of a run its caller cancelled, pausing
 // the run at node so that Resume continues it from there. It must not be
-// called while a node_started is open; suspend closes one first.
+// called while a node_started is open; pauseInsideNode closes one first.
 func (d *Dispatcher) pauseInterrupted(
 	jrnl *journal.Journal, man *state.Manifest, ledger *budget.Ledger, node string, steps int,
 ) (Outcome, error) {

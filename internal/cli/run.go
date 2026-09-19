@@ -220,12 +220,12 @@ func (p *runPlan) prepareWorkTree(layout state.Layout, manifest *state.Manifest)
 // finish rather than killing belay part-way through saving the recording.
 //
 // A Ctrl-C during the dispatch pauses the run rather than ending it (see
-// suspendOnCancel), which is what both commands' help promises.
+// pauseOnCancel), which is what both commands' help promises.
 func driveRun(cmd *cobra.Command, u *ui, plan *runPlan, store *state.Store, resuming bool) error {
 	ctx, stop := stopOnSignal(cmd.Context(), u)
 	defer stop()
 
-	view, err := dispatchOnce(ctx, plan, store, resuming, suspendOnCancel)
+	view, err := dispatchOnce(ctx, plan, store, resuming, pauseOnCancel)
 	if err != nil {
 		return &ExitError{Code: graph.ExitFailed, Message: "belay: " + err.Error(), Err: err}
 	}
@@ -238,7 +238,7 @@ func driveRun(cmd *cobra.Command, u *ui, plan *runPlan, store *state.Store, resu
 //
 // Each mut changes the dispatcher's Options, in order, after runPlan.options
 // has built them. It is for what a caller decides about this dispatch rather
-// than about the run's wiring: driveRun passes suspendOnCancel, and a caller
+// than about the run's wiring: driveRun passes pauseOnCancel, and a caller
 // that dispatches a run differently, such as one that stops after a single
 // node, passes its own. runPlan.options stays the one place the wiring every
 // run shares is built, and a mut only departs from it.
@@ -272,7 +272,7 @@ func dispatchOnce(ctx context.Context, plan *runPlan, store *state.Store, resumi
 	return outcomeView{layout: store.Layout(), outcome: outcome, runErr: runErr}, nil
 }
 
-// suspendOnCancel is the change driveRun makes to the dispatcher's Options:
+// pauseOnCancel is the change driveRun makes to the dispatcher's Options:
 // when the person running belay presses Ctrl-C, or the process is sent
 // SIGTERM, the run is paused where it stands and `belay resume` continues it,
 // re-running the step that was interrupted. Without it the dispatcher ends
@@ -283,7 +283,7 @@ func dispatchOnce(ctx context.Context, plan *runPlan, store *state.Store, resumi
 // it answers how this invocation stops, not how the run is wired. driveRun
 // owns the signal handling, so it owns what a signal does to the run. A
 // caller that dispatches runs no person is watching chooses for itself.
-func suspendOnCancel(o *graph.Options) { o.SuspendOnCancel = true }
+func pauseOnCancel(o *graph.Options) { o.PauseOnCancel = true }
 
 // afterCompletion does what belay does once a dispatch has returned, before
 // it reports how the run went. Its steps run in this order, every time:
@@ -317,7 +317,7 @@ func afterCompletion(u *ui, plan *runPlan, view outcomeView) {
 // The first SIGINT or SIGTERM cancels the run's context: the dispatcher
 // finishes the durable write it is in the middle of, pauses the run and
 // returns, so the run stops with its state intact and `belay resume` picks it
-// up (see suspendOnCancel). If the second signal kills belay before that, the
+// up (see pauseOnCancel). If the second signal kills belay before that, the
 // run is left as a crash leaves it, which resume also continues. signal.Stop then hands the
 // next signal back to Go's default handler, which ends the process at once —
 // somebody holding Ctrl-C must never be left wondering whether belay is

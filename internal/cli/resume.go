@@ -158,7 +158,7 @@ func (p *runPlan) resumePreflight(store *state.Store) error {
 // plan: the run is paused at the approve gate because the gate asked.
 //
 // A run is also paused at approve when Ctrl-C lands while the gate is running
-// (see suspendOnCancel). Nobody was shown the plan then, or told that
+// (see pauseOnCancel). Nobody was shown the plan then, or told that
 // resuming approves it, so resuming must run the gate again, which asks,
 // instead of approving on the person's behalf. The manifest cannot tell the
 // two apart; the journal can. The gate's own pause is the run's last

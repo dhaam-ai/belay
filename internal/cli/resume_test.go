@@ -676,7 +676,7 @@ func TestResumeApprovesOnlyAPlanTheGateAskedAbout(t *testing.T) {
 			store := seedRunDir(t, plan, "add tests")
 
 			opts := plan.options(store)
-			opts.SuspendOnCancel = true
+			opts.PauseOnCancel = true
 			dispatcher, err := graph.NewDispatcher(opts)
 			if err != nil {
 				t.Fatalf("graph.NewDispatcher: %v", err)
@@ -818,7 +818,7 @@ func TestResumeCommandDoesNotApproveAPlanCtrlCInterrupted(t *testing.T) {
 	store := seedRunDir(t, plan, "add tests")
 
 	opts := plan.options(store)
-	opts.SuspendOnCancel = true
+	opts.PauseOnCancel = true
 	dispatcher, err := graph.NewDispatcher(opts)
 	if err != nil {
 		t.Fatalf("graph.NewDispatcher: %v", err)

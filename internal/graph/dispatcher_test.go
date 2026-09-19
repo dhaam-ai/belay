@@ -136,16 +136,16 @@ func (h *harness) dispatcher(t *testing.T, nodes ...graph.Node) *graph.Dispatche
 	return d
 }
 
-// suspendingDispatcher is dispatcher with Options.SuspendOnCancel set to
-// suspend, which is how `belay run` and `belay resume` build theirs.
-func (h *harness) suspendingDispatcher(t *testing.T, suspend bool, nodes ...graph.Node) *graph.Dispatcher {
+// pausingDispatcher is dispatcher with Options.PauseOnCancel set to pause,
+// which is how `belay run` and `belay resume` build theirs.
+func (h *harness) pausingDispatcher(t *testing.T, pause bool, nodes ...graph.Node) *graph.Dispatcher {
 	t.Helper()
 	reg := graph.NewRegistry()
 	reg.MustRegister(nodes...)
 	d, err := graph.NewDispatcher(graph.Options{
 		Store: h.store, Registry: reg, Config: h.cfg,
-		Now:             func() time.Time { return time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC) },
-		SuspendOnCancel: suspend,
+		Now:           func() time.Time { return time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC) },
+		PauseOnCancel: pause,
 	})
 	if err != nil {
 		t.Fatalf("NewDispatcher() error = %v", err)
@@ -1138,14 +1138,14 @@ func (n *interruptingNode) Run(ctx context.Context, rc *graph.RunContext) (graph
 // TestDispatcher_CancellationEndsOrSuspendsTheRun is the Ctrl-C contract.
 // By default a cancelled context ends the run as aborted, which Resume then
 // refuses; that row is a guard for every caller of the dispatcher that never
-// asked for anything else. With Options.SuspendOnCancel the run is paused
+// asked for anything else. With Options.PauseOnCancel the run is paused
 // instead: the interrupted attempt is closed as one that will be run again,
 // its Result is thrown away, and Resume re-runs the node at the next attempt
 // and carries on to the end.
 func TestDispatcher_CancellationEndsOrSuspendsTheRun(t *testing.T) {
 	tests := []struct {
 		name          string
-		suspend       bool
+		pause         bool
 		finish        bool
 		wantErr       []error
 		wantStatus    state.RunStatus
@@ -1163,8 +1163,8 @@ func TestDispatcher_CancellationEndsOrSuspendsTheRun(t *testing.T) {
 			wantResumeErr: graph.ErrRunEnded,
 		},
 		{
-			name:       "SuspendOnCancel pauses the run at the interrupted node",
-			suspend:    true,
+			name:       "PauseOnCancel pauses the run at the interrupted node",
+			pause:      true,
 			wantErr:    []error{graph.ErrInterrupted, context.Canceled},
 			wantStatus: state.RunStatusPaused,
 			wantTimeline: []string{
@@ -1173,8 +1173,8 @@ func TestDispatcher_CancellationEndsOrSuspendsTheRun(t *testing.T) {
 			},
 		},
 		{
-			name:       "SuspendOnCancel discards what a node finishing anyway returned",
-			suspend:    true,
+			name:       "PauseOnCancel discards what a node finishing anyway returned",
+			pause:      true,
 			finish:     true,
 			wantErr:    []error{graph.ErrInterrupted, context.Canceled},
 			wantStatus: state.RunStatusPaused,
@@ -1192,7 +1192,7 @@ func TestDispatcher_CancellationEndsOrSuspendsTheRun(t *testing.T) {
 			defer cancel()
 
 			code := &interruptingNode{name: graph.NodeCode, cancel: cancel, finish: tt.finish}
-			d := h.suspendingDispatcher(t, tt.suspend, ok(graph.NodePlan, graph.NodeCode), code)
+			d := h.pausingDispatcher(t, tt.pause, ok(graph.NodePlan, graph.NodeCode), code)
 
 			out, err := d.Run(ctx)
 			for _, want := range tt.wantErr {
@@ -1218,7 +1218,7 @@ func TestDispatcher_CancellationEndsOrSuspendsTheRun(t *testing.T) {
 			// A later process resumes, with a context nobody cancels.
 			plan2 := ok(graph.NodePlan, graph.NodeCode)
 			code2 := ok(graph.NodeCode, graph.End)
-			out, err = h.suspendingDispatcher(t, tt.suspend, plan2, code2).Resume(context.Background())
+			out, err = h.pausingDispatcher(t, tt.pause, plan2, code2).Resume(context.Background())
 			if tt.wantResumeErr != nil {
 				if !errors.Is(err, tt.wantResumeErr) {
 					t.Fatalf("Resume() error = %v, want one wrapping %v", err, tt.wantResumeErr)
@@ -1251,7 +1251,7 @@ func TestDispatcher_CancellationEndsOrSuspendsTheRun(t *testing.T) {
 
 // TestDispatcher_SuspendOnCancelDoesNotExcuseATimeout: a node that outlives
 // graph.node_timeout is stopped by a guard, not by the person running belay,
-// and SuspendOnCancel leaves that verdict alone.
+// and PauseOnCancel leaves that verdict alone.
 func TestDispatcher_SuspendOnCancelDoesNotExcuseATimeout(t *testing.T) {
 	cfg := config.Default()
 	cfg.Graph.NodeTimeout = config.NewDuration(20 * time.Millisecond)
@@ -1263,7 +1263,7 @@ func TestDispatcher_SuspendOnCancelDoesNotExcuseATimeout(t *testing.T) {
 		ignoreCtx: true,
 	}}}
 
-	out, err := h.suspendingDispatcher(t, true, slow).Run(context.Background())
+	out, err := h.pausingDispatcher(t, true, slow).Run(context.Background())
 	if !errors.Is(err, graph.ErrNodeTimeout) {
 		t.Fatalf("Run() error = %v, want one wrapping ErrNodeTimeout", err)
 	}
@@ -1277,7 +1277,7 @@ func TestDispatcher_SuspendOnCancelDoesNotExcuseATimeout(t *testing.T) {
 }
 
 // TestDispatcher_SuspendOnCancelStartsNoNodeOnceCancelled: once the caller
-// has cancelled, a suspending dispatcher starts nothing more. The run pauses
+// has cancelled, a pausing dispatcher starts nothing more. The run pauses
 // where it stands, with no attempt opened on a context that is already done
 // and none thrown away, and Resume starts that node at its first attempt.
 func TestDispatcher_SuspendOnCancelStartsNoNodeOnceCancelled(t *testing.T) {
@@ -1286,7 +1286,7 @@ func TestDispatcher_SuspendOnCancelStartsNoNodeOnceCancelled(t *testing.T) {
 	cancel()
 
 	plan := ok(graph.NodePlan, graph.End)
-	out, err := h.suspendingDispatcher(t, true, plan).Run(ctx)
+	out, err := h.pausingDispatcher(t, true, plan).Run(ctx)
 	if !errors.Is(err, graph.ErrInterrupted) || !errors.Is(err, context.Canceled) {
 		t.Fatalf("Run() error = %v, want one wrapping both ErrInterrupted and context.Canceled", err)
 	}
@@ -1306,7 +1306,7 @@ func TestDispatcher_SuspendOnCancelStartsNoNodeOnceCancelled(t *testing.T) {
 	}
 
 	plan2 := ok(graph.NodePlan, graph.End)
-	if _, err := h.suspendingDispatcher(t, true, plan2).Resume(context.Background()); err != nil {
+	if _, err := h.pausingDispatcher(t, true, plan2).Resume(context.Background()); err != nil {
 		t.Fatalf("Resume() error = %v, want nil", err)
 	}
 	if plan2.calls != 1 || plan2.attempts[0] != 1 {
@@ -1461,7 +1461,7 @@ func TestDispatcher_SavesTheManifestAtTheCurrentVersionBeforeItWritesAnything(t 
 }
 
 // TestDispatcher_AnInterruptedAttemptDoesNotConsumeAStep pins what an
-// interruption costs the run: nothing. Options.SuspendOnCancel promises the
+// interruption costs the run: nothing. Options.PauseOnCancel promises the
 // attempt number, the discarded Result and the re-run "a kill at the same
 // moment would have produced", and a kill costs no step — the crashed process
 // never got to write the manifest.
@@ -1478,7 +1478,7 @@ func TestDispatcher_AnInterruptedAttemptDoesNotConsumeAStep(t *testing.T) {
 		defer cancel()
 
 		code := &interruptingNode{name: graph.NodeCode, cancel: cancel}
-		_, err := h.suspendingDispatcher(t, true, ok(graph.NodePlan, graph.NodeCode), code).Run(ctx)
+		_, err := h.pausingDispatcher(t, true, ok(graph.NodePlan, graph.NodeCode), code).Run(ctx)
 		if !errors.Is(err, graph.ErrInterrupted) {
 			t.Fatalf("Run() error = %v, want one wrapping ErrInterrupted", err)
 		}
@@ -1490,7 +1490,7 @@ func TestDispatcher_AnInterruptedAttemptDoesNotConsumeAStep(t *testing.T) {
 		}
 
 		code2 := ok(graph.NodeCode, graph.End)
-		if _, err := h.suspendingDispatcher(t, true, ok(graph.NodePlan, graph.NodeCode), code2).
+		if _, err := h.pausingDispatcher(t, true, ok(graph.NodePlan, graph.NodeCode), code2).
 			Resume(context.Background()); err != nil {
 			t.Fatalf("Resume() error = %v, want nil", err)
 		}

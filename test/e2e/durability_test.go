@@ -666,7 +666,7 @@ func TestDurability_CtrlCSuspendsTheRun_ResumeReRunsTheInterruptedNode(t *testin
 	}}}
 	code := &durabilityNode{name: graph.NodeCode, steps: []durabilityStep{{interrupt: cancel}}}
 
-	out, err := h.suspendingDispatcher(plan, code).Run(ctx)
+	out, err := h.pausingDispatcher(plan, code).Run(ctx)
 	if !errors.Is(err, graph.ErrInterrupted) || !errors.Is(err, context.Canceled) {
 		t.Fatalf("Run() error = %v, want one wrapping both ErrInterrupted and context.Canceled", err)
 	}
@@ -695,7 +695,7 @@ func TestDurability_CtrlCSuspendsTheRun_ResumeReRunsTheInterruptedNode(t *testin
 	// Process 2: `belay resume`, with a context nobody cancels.
 	plan2 := durabilityOK(graph.NodePlan, graph.NodeCode)
 	code2 := durabilityOK(graph.NodeCode, graph.End)
-	out, err = h.suspendingDispatcher(plan2, code2).Resume(context.Background())
+	out, err = h.pausingDispatcher(plan2, code2).Resume(context.Background())
 	if err != nil {
 		t.Fatalf("Resume() error = %v, want nil", err)
 	}

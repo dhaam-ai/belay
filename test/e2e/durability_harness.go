@@ -98,17 +98,17 @@ func (h *durabilityHarness) dispatcher(nodes ...graph.Node) *graph.Dispatcher {
 	return d
 }
 
-// suspendingDispatcher is dispatcher with graph.Options.SuspendOnCancel set,
+// pausingDispatcher is dispatcher with graph.Options.PauseOnCancel set,
 // which is how `belay run` and `belay resume` build theirs: a cancelled
 // context pauses the run instead of ending it. The same rule applies: never
 // reuse the value it returns across a simulated crash or interruption.
-func (h *durabilityHarness) suspendingDispatcher(nodes ...graph.Node) *graph.Dispatcher {
+func (h *durabilityHarness) pausingDispatcher(nodes ...graph.Node) *graph.Dispatcher {
 	h.t.Helper()
 	reg := graph.NewRegistry()
 	reg.MustRegister(nodes...)
 	d, err := graph.NewDispatcher(graph.Options{
 		Store: state.NewStore(h.layout), Registry: reg, Config: h.cfg,
-		SuspendOnCancel: true,
+		PauseOnCancel: true,
 	})
 	if err != nil {
 		h.t.Fatalf("graph.NewDispatcher() error = %v", err)
