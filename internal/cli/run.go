@@ -478,6 +478,10 @@ func nextSteps(view outcomeView) []string {
 	resume := "belay resume " + layout.RunID()
 
 	switch {
+	case errors.Is(runErr, graph.ErrInterrupted):
+		// Paused, but by Ctrl-C and not by the graph: nothing is waiting
+		// for the person to read, and resume re-runs the interrupted step.
+		return []string{"pick up where it stopped with:", "", "    " + resume}
 	case errors.Is(runErr, graph.ErrRunPaused), outcome.Status == state.RunStatusPaused:
 		lines := []string{"read the plan, edit it if you want to, then run:", "", "    " + resume}
 		if outcome.Node == graph.NodeApprove {

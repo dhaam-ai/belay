@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/csv"
 	"errors"
+	"fmt"
 	"log/slog"
 	"os"
 	"path/filepath"
@@ -473,11 +474,12 @@ func TestReportOutcomeMapsExitCodesAndExplainsItself(t *testing.T) {
 	}
 
 	tests := []struct {
-		name     string
-		outcome  graph.Outcome
-		runErr   error
-		wantCode int
-		wantSaid []string
+		name        string
+		outcome     graph.Outcome
+		runErr      error
+		wantCode    int
+		wantSaid    []string
+		wantNotSaid []string
 	}{
 		{
 			name:     "completed",
@@ -508,6 +510,24 @@ func TestReportOutcomeMapsExitCodesAndExplainsItself(t *testing.T) {
 			runErr:   graph.ErrRunPaused,
 			wantCode: graph.ExitPaused,
 			wantSaid: []string{"This run is waiting for you", "belay resume 20260905T120000Z-abcdef123456"},
+		},
+		{
+			// Ctrl-C with belay run and belay resume: the run is paused at
+			// the step it was in, which is not a request to read the plan.
+			name: "interrupted by Ctrl-C says how to pick it up again",
+			outcome: graph.Outcome{
+				Status: state.RunStatusPaused, ExitCode: graph.ExitAborted,
+				Node: graph.NodeCode, Steps: 3,
+			},
+			runErr:   fmt.Errorf("%w: at %q: %w", graph.ErrInterrupted, graph.NodeCode, context.Canceled),
+			wantCode: graph.ExitAborted,
+			wantSaid: []string{
+				"belay stopped because you asked it to",
+				"code — asking the agent to write the change",
+				"pick up where it stopped with:",
+				"belay resume 20260905T120000Z-abcdef123456",
+			},
+			wantNotSaid: []string{"read the plan", "plan.md"},
 		},
 		{
 			name: "failed",
@@ -565,6 +585,11 @@ func TestReportOutcomeMapsExitCodesAndExplainsItself(t *testing.T) {
 			for _, phrase := range tc.wantSaid {
 				if !strings.Contains(got, phrase) {
 					t.Errorf("report never says %q; got:\n%s", phrase, got)
+				}
+			}
+			for _, phrase := range tc.wantNotSaid {
+				if strings.Contains(got, phrase) {
+					t.Errorf("report says %q, which is not what happened; got:\n%s", phrase, got)
 				}
 			}
 			// Nothing a person cannot act on.
