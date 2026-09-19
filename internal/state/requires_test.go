@@ -248,3 +248,64 @@ func TestLoad_ReportsAnUnknownVersionWhateverItsRequiresLooksLike(t *testing.T) 
 		})
 	}
 }
+
+// TestVersionErrors_SayToUpgradeOnlyForANewerVersion keeps the two refusals
+// a person meets for a run belay cannot read telling them what to do. A
+// version above this binary's was written by a newer belay, and the only fix
+// is to run that one, which the error must say as CapabilityError does. A
+// version below it that no migration covers was not written by any belay
+// this one can point to, so the error keeps saying only that the version is
+// not supported.
+func TestVersionErrors_SayToUpgradeOnlyForANewerVersion(t *testing.T) {
+	type versionError interface {
+		error
+		Newer() bool
+	}
+
+	tests := []struct {
+		name      string
+		err       versionError
+		wantNewer bool
+		want      []string
+		wantExact string
+	}{
+		{
+			name:      "state.json from a newer belay",
+			err:       &VersionError{Got: 99},
+			wantNewer: true,
+			want:      []string{"state.json", "99", "upgrade belay"},
+		},
+		{
+			name:      "manifest.json from a newer belay",
+			err:       &ManifestVersionError{Got: 99},
+			wantNewer: true,
+			want:      []string{"manifest.json", "99", "upgrade belay"},
+		},
+		{
+			name:      "state.json at an older version nothing migrates",
+			err:       &VersionError{Got: 0},
+			wantExact: "state: state.json schema version 0 is not supported (want 2)",
+		},
+		{
+			name:      "manifest.json at an older version nothing migrates",
+			err:       &ManifestVersionError{Got: 0},
+			wantExact: "state: manifest.json schema version 0 is not supported (want 2)",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := tt.err.Newer(); got != tt.wantNewer {
+				t.Errorf("Newer() = %v, want %v", got, tt.wantNewer)
+			}
+			msg := tt.err.Error()
+			for _, want := range tt.want {
+				if !strings.Contains(msg, want) {
+					t.Errorf("Error() = %q, want it to contain %q", msg, want)
+				}
+			}
+			if tt.wantExact != "" && msg != tt.wantExact {
+				t.Errorf("Error() = %q, want today's wording %q", msg, tt.wantExact)
+			}
+		})
+	}
+}

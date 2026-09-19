@@ -34,7 +34,8 @@
 // Both on-disk documents carry a schema_version field. LoadState and
 // LoadManifest reject a version they do not recognize with a typed error
 // (VersionError, ManifestVersionError) unless a migration has been
-// registered for it.
+// registered for it. A version above the current one was written by a
+// newer belay, so its error says to upgrade, as a *CapabilityError does.
 //
 // Both are at version 2, and the one registered migration takes either file
 // from version 1, which every release up to v0.1.4 wrote, to version 2 (see
@@ -123,13 +124,25 @@ type VersionError struct {
 	Got int
 }
 
-// Error implements error.
+// Error implements error. For a version above StateSchemaVersion it says to
+// upgrade belay, as CapabilityError does: a newer belay wrote the file, and
+// running that one is the only fix. A lower version no migration covers
+// was not written by any belay this one can point to, so it says only that
+// the version is not supported.
 func (e *VersionError) Error() string {
+	if e.Newer() {
+		return fmt.Sprintf("state: state.json schema version %d is newer than this belay reads (%d); upgrade belay to continue this run",
+			e.Got, StateSchemaVersion)
+	}
 	return fmt.Sprintf("state: state.json schema version %d is not supported (want %d)", e.Got, StateSchemaVersion)
 }
 
 // Unwrap reports ErrUnsupportedStateVersion.
 func (e *VersionError) Unwrap() error { return ErrUnsupportedStateVersion }
+
+// Newer reports whether the version found is above StateSchemaVersion,
+// which means a newer belay wrote the document.
+func (e *VersionError) Newer() bool { return e.Got > StateSchemaVersion }
 
 // Migration upgrades a raw state.json document exactly one schema
 // version forward. A migration for version N is registered at

@@ -38,13 +38,22 @@ type ManifestVersionError struct {
 	Got int
 }
 
-// Error implements error.
+// Error implements error. Like VersionError's, it says to upgrade belay
+// only for a version above ManifestSchemaVersion.
 func (e *ManifestVersionError) Error() string {
+	if e.Newer() {
+		return fmt.Sprintf("state: manifest.json schema version %d is newer than this belay reads (%d); upgrade belay to continue this run",
+			e.Got, ManifestSchemaVersion)
+	}
 	return fmt.Sprintf("state: manifest.json schema version %d is not supported (want %d)", e.Got, ManifestSchemaVersion)
 }
 
 // Unwrap reports ErrUnsupportedManifestVersion.
 func (e *ManifestVersionError) Unwrap() error { return ErrUnsupportedManifestVersion }
+
+// Newer reports whether the version found is above ManifestSchemaVersion,
+// which means a newer belay wrote the document.
+func (e *ManifestVersionError) Newer() bool { return e.Got > ManifestSchemaVersion }
 
 // ManifestMigration upgrades a raw manifest.json document exactly one
 // schema version forward, analogous to Migration.
