@@ -45,9 +45,11 @@ func TestScanRunsForResumeOrdersNewestFirst(t *testing.T) {
 	seedManifest(t, ws, "20260905T120000Z-aaaaaaaaaaaa", state.RunStatusCompleted, graph.End, "old and done", base)
 	seedManifest(t, ws, "20260905T130000Z-bbbbbbbbbbbb", state.RunStatusPaused, graph.NodeApprove, "waiting", base.Add(time.Hour))
 	seedManifest(t, ws, "20260905T140000Z-cccccccccccc", state.RunStatusRunning, graph.NodeTest, "crashed", base.Add(2*time.Hour))
-	// A directory with no manifest is skipped rather than reported: a run
-	// belay cannot read is a run it must not resume.
-	if err := os.MkdirAll(filepath.Join(ws, ".belay", "runs", "20260905T150000Z-dddddddddddd"), 0o750); err != nil {
+	// A directory with no manifest is kept, carrying the reason it cannot be
+	// read, so that naming it says what is wrong with it rather than that it
+	// does not exist. It has no readable update time, so it sorts last.
+	const damaged = "20260905T150000Z-dddddddddddd"
+	if err := os.MkdirAll(filepath.Join(ws, ".belay", "runs", damaged), 0o750); err != nil {
 		t.Fatalf("mkdir: %v", err)
 	}
 
@@ -64,9 +66,15 @@ func TestScanRunsForResumeOrdersNewestFirst(t *testing.T) {
 		"20260905T140000Z-cccccccccccc",
 		"20260905T130000Z-bbbbbbbbbbbb",
 		"20260905T120000Z-aaaaaaaaaaaa",
+		damaged,
 	}
 	if strings.Join(got, ",") != strings.Join(want, ",") {
 		t.Errorf("scanRunsForResume() = %v, want newest first %v", got, want)
+	}
+	for _, r := range runs {
+		if wantUnreadable := r.id == damaged; (r.unreadable != nil) != wantUnreadable {
+			t.Errorf("run %s: unreadable = %v, want a reason: %v", r.id, r.unreadable, wantUnreadable)
+		}
 	}
 }
 
@@ -323,6 +331,66 @@ func isCapabilityError(err error) bool {
 func isNewerVersionError(err error) bool {
 	var target *state.ManifestVersionError
 	return errors.As(err, &target) && target.Newer()
+}
+
+// TestResumeSaysADamagedRunIsDamaged: a run belay cannot read is not a run
+// that does not exist. `belay resume <id>` skipped it and reported "belay has
+// no run called <id>", which sends a person looking for a typo in an id they
+// copied from `belay runs` — where the same run is listed, with its damage.
+// It must say the run is there, what is wrong with it, and where to look.
+func TestResumeSaysADamagedRunIsDamaged(t *testing.T) {
+	const damaged = "20260905T130000Z-bbbbbbbbbbbb"
+
+	tests := []struct {
+		name     string
+		manifest []byte
+		want     []string
+	}{
+		{
+			name:     "manifest.json is not valid JSON",
+			manifest: []byte("{not json"),
+			want:     []string{"cannot continue run " + damaged, "manifest.json is damaged"},
+		},
+		{
+			name: "the run directory has no manifest.json",
+			want: []string{"cannot continue run " + damaged, "no manifest.json"},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ws := goWorkspace(t)
+			base := time.Date(2026, 9, 5, 12, 0, 0, 0, time.UTC)
+			// A readable run still waiting: the refusal must be about the run
+			// that was named, not about having nothing to continue.
+			seedManifest(t, ws, "20260905T120000Z-aaaaaaaaaaaa", state.RunStatusPaused, graph.NodeApprove, "waiting", base)
+			dir := filepath.Join(ws, ".belay", "runs", damaged)
+			if err := os.MkdirAll(dir, 0o750); err != nil {
+				t.Fatalf("mkdir: %v", err)
+			}
+			if tt.manifest != nil {
+				if err := os.WriteFile(filepath.Join(dir, "manifest.json"), tt.manifest, 0o600); err != nil {
+					t.Fatalf("write manifest: %v", err)
+				}
+			}
+
+			out, _, err := runCLI(t, "--dry-run", "resume", damaged, "--workspace", ws)
+			if err == nil {
+				t.Fatalf("belay resume continued a run it cannot read:\n%s", out)
+			}
+			var exit *ExitError
+			if !errors.As(err, &exit) || exit.Code != graph.ExitFailed {
+				t.Fatalf("error = %#v, want an ExitError with code %d", err, graph.ExitFailed)
+			}
+			for _, phrase := range append(tt.want, dir, "belay runs") {
+				if !strings.Contains(exit.Message, phrase) {
+					t.Errorf("message does not say %q; got %q", phrase, exit.Message)
+				}
+			}
+			if strings.Contains(exit.Message, "no run called") {
+				t.Errorf("message says the run does not exist; it does, and it is damaged: %q", exit.Message)
+			}
+		})
+	}
 }
 
 // TestResumeWithNoArgumentSaysWhichRunItChose is acceptance criterion 5,

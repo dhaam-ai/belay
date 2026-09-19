@@ -212,12 +212,16 @@ type resumableRun struct {
 	status  state.RunStatus
 	node    string
 	updated string
-	// newer is why this belay cannot read the run's manifest when a newer
-	// belay wrote it: a *state.CapabilityError, or a
-	// *state.ManifestVersionError whose version is newer (see
-	// needsNewerBelay). Every field but id is zero when it is set.
-	newer error
+	// unreadable is why this belay cannot read the run's manifest: a run a
+	// newer belay wrote (see needsNewerBelay), or a damaged one. Every field
+	// but id is zero when it is set.
+	unreadable error
 }
+
+// needsNewer reports whether this run is one a newer belay wrote, rather
+// than a damaged one. The two are refused differently, because only one of
+// them is a fault (ADR-0011).
+func (r resumableRun) needsNewer() bool { return needsNewerBelay(r.unreadable) }
 
 // describe names this run in one line, and says how belay came to be pointed
 // at it. Acting on an implicit target without saying so is how a person stops
@@ -274,9 +278,12 @@ func chooseRun(workspace, runID string) (resumableRun, error) {
 			if r.id != runID {
 				continue
 			}
-			if r.newer != nil {
+			if r.needsNewer() {
 				return resumableRun{}, fmt.Errorf(
-					"belay cannot continue run %s: it needs a newer belay.\n%w", r.id, r.newer)
+					"belay cannot continue run %s: it needs a newer belay.\n%w", r.id, r.unreadable)
+			}
+			if r.unreadable != nil {
+				return resumableRun{}, damagedRun(workspace, r)
 			}
 			if !resumable(r.status) {
 				return resumableRun{}, fmt.Errorf(
@@ -294,16 +301,20 @@ func chooseRun(workspace, runID string) (resumableRun, error) {
 	// person may not have meant, so belay refuses to choose at all. Naming a
 	// run still continues it.
 	for _, r := range runs {
-		if r.newer != nil {
+		if r.needsNewer() {
 			return resumableRun{}, fmt.Errorf(
 				"belay will not choose a run to continue: run %s needs a newer belay, and this belay cannot tell whether it is the one still waiting.\n%w\n"+
 					"To continue another run with this belay, name it: belay resume <run-id>",
-				r.id, r.newer)
+				r.id, r.unreadable)
 		}
 	}
 
+	// A damaged run is passed over rather than refused: belay cannot tell
+	// whether it was the one still waiting, and refusing to choose would make
+	// one broken directory stop every later `belay resume` in the workspace.
+	// `belay runs` is where it is reported, and naming it says what is wrong.
 	for _, r := range runs {
-		if resumable(r.status) {
+		if r.unreadable == nil && resumable(r.status) {
 			return r, nil
 		}
 	}
@@ -334,10 +345,53 @@ func nothingToResume(workspace string, runs []resumableRun) error {
 			"belay has not run in %s yet, so there is nothing to continue.\nStart one: belay run \"what you want built\"",
 			workspace)
 	}
+	ended, unreadable := 0, 0
+	for _, r := range runs {
+		if r.unreadable != nil {
+			unreadable++
+			continue
+		}
+		ended++
+	}
+	// A run belay cannot read has not "already ended" — belay has no idea how
+	// it ended — so it is counted and described separately rather than folded
+	// into a sentence that would be a guess.
+	switch {
+	case ended == 0:
+		return fmt.Errorf(
+			"belay found %d run(s) in %s, and cannot read any of them.\n"+
+				"See what is wrong with them: belay runs\nStart a new one: belay run \"what you want built\"",
+			unreadable, workspace)
+	case unreadable > 0:
+		return fmt.Errorf(
+			"belay found %d run(s) in %s, and every one of them has already ended; %d more cannot be read.\n"+
+				"See them with: belay runs\nStart a new one: belay run \"what you want built\"",
+			ended, workspace, unreadable)
+	default:
+		return fmt.Errorf(
+			"belay found %d run(s) in %s, and every one of them has already ended.\n"+
+				"See them with: belay runs\nStart a new one: belay run \"what you want built\"",
+			ended, workspace)
+	}
+}
+
+// damagedRun explains a run belay found but cannot read, for someone who
+// named it outright.
+//
+// It says the run is there, what is wrong with it in the words `belay runs`
+// uses for the same run, and where the directory is — because the one thing a
+// person can do about a damaged manifest is look at it. Reporting it as a run
+// that does not exist, which is what skipping it amounted to, sends them
+// hunting for a typo in an id they copied from `belay runs`.
+func damagedRun(workspace string, r resumableRun) error {
+	where := filepath.Join(workspace, ".belay", "runs", r.id)
+	if layout, err := state.NewLayout(workspace, r.id); err == nil {
+		where = layout.RunDir()
+	}
 	return fmt.Errorf(
-		"belay found %d run(s) in %s, and every one of them has already ended.\n"+
-			"See them with: belay runs\nStart a new one: belay run \"what you want built\"",
-		len(runs), workspace)
+		"belay cannot continue run %s: %s.\nIt is at %s, and `belay runs` lists it with everything else.\n"+
+			"belay resume needs that file to know where the run stopped, so start a new run instead: belay run \"what you want built\"\n%w",
+		r.id, runsUnreadableReason(r.unreadable), where, r.unreadable)
 }
 
 // unknownRun explains a run id belay cannot find, and lists what it does have.
@@ -348,8 +402,8 @@ func unknownRun(workspace, runID string, runs []resumableRun) error {
 	ids := make([]string, 0, len(runs))
 	for _, r := range runs {
 		sentence := statusSentence(r.status, r.node)
-		if r.newer != nil {
-			sentence = "needs a newer belay"
+		if r.unreadable != nil {
+			sentence = runsUnreadableReason(r.unreadable)
 		}
 		ids = append(ids, "  "+r.id+" — "+sentence)
 	}
@@ -366,15 +420,16 @@ func unknownRun(workspace, runID string, runs []resumableRun) error {
 // This deliberately does not go through the listing `belay runs` renders:
 // choosing what to resume needs a manifest's status and current node, and a
 // command that decides which run to spend money on should not depend on a
-// display type. A run whose manifest cannot be read is skipped rather than
-// reported, because a damaged run is one belay must not resume, and `belay
-// runs` is the command that exists to show it.
+// display type.
 //
-// A run a newer belay wrote is the exception. It is not damaged: it is a run
-// someone is using with another belay, so it is kept, named by its directory
-// and carrying the error, and chooseRun refuses it with that error rather
-// than acting as if it were not there. Having no readable update time, it
-// sorts after every run that has one.
+// A run whose manifest cannot be read is kept, named by its directory and
+// carrying the error. belay must not resume it, but "must not resume" is not
+// "is not there": skipping it made `belay resume <id>` answer "belay has no
+// run called <id>" for an id a person had just read off `belay runs`. So it
+// is kept, chooseRun refuses it by name with what is wrong, and no implicit
+// choice ever lands on it. A run a newer belay wrote is the same shape and
+// not a fault at all (ADR-0011); needsNewerBelay tells the two apart. Neither
+// has a readable update time, so both sort after every run that has one.
 func scanRunsForResume(workspace string) ([]resumableRun, error) {
 	dir := filepath.Join(workspace, ".belay", "runs")
 	entries, err := os.ReadDir(dir)
@@ -396,9 +451,7 @@ func scanRunsForResume(workspace string) ([]resumableRun, error) {
 		}
 		manifest, err := state.LoadManifest(layout.ManifestPath())
 		if err != nil {
-			if needsNewerBelay(err) {
-				found = append(found, resumableRun{id: entry.Name(), newer: err})
-			}
+			found = append(found, resumableRun{id: entry.Name(), unreadable: err})
 			continue
 		}
 		found = append(found, resumableRun{

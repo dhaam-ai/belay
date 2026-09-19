@@ -35,6 +35,14 @@ that only `pkg/belay` carries a compatibility promise. Everything under
 
 ### Fixed
 
+- **`belay resume <run-id>` says a damaged run is damaged, instead of saying
+  it does not exist.** A run whose manifest.json belay cannot read was skipped
+  when choosing a run, and naming it answered "belay has no run called
+  <run-id>" — for an id a person had usually just copied from `belay runs`,
+  which lists the same run and says what is wrong with it. Naming such a run
+  now says belay cannot continue it, why in the same words `belay runs` uses,
+  and where the run directory is. belay still never picks one when you do not
+  name a run.
 - **`belay timeline` no longer reports the approval gate as a loop.** The gate
   pausing for you and running again when you resumed the run is two journal
   records for one visit, and the timeline counted them as two: every run with
