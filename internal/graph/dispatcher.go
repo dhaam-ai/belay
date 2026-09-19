@@ -228,9 +228,15 @@ type Options struct {
 // not (see settle) — but the journal says the run was asked to stop, and the
 // manifest says paused rather than running.
 //
-// Pausing needs no event or status of its own. An older belay reads the
-// journal as a run paused at that node, which its resume already continues,
-// so the run needs no capability in its manifest's requires list.
+// Pausing needs no event or status of its own, and no capability in the
+// run's requires list. A capability keeps out a belay that would misread the
+// run, and no release can misread this one. v0.1.x refuses schema version 2
+// outright (ADR-0011), and the release that brings version 2 brings with it
+// the two rules a paused attempt depends on: journal.ResolveStart re-runs an
+// interrupted attempt at the next attempt number instead of reusing the
+// number, and `belay resume` approves only a plan the gate paused to ask
+// about, never one a Ctrl-C stopped at the gate. Without those, a resume
+// would continue the run, and continue it wrongly.
 //
 // A cancellation that arrives between nodes pauses the run before the next
 // one starts, with no attempt opened. Resume then starts that node afresh.
