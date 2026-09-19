@@ -41,6 +41,11 @@ that only `pkg/belay` carries a compatibility promise. Everything under
 
 ### Fixed
 
+- **The README's quickstart shows what belay really prints.** Its dry-run
+  example showed a ceiling of 1,000,000 tokens, 5 agent turns a step and a
+  closing line belay never printed, and left out what reaching the ceiling
+  does and when belay gives up. It is now exactly what `belay run --dry-run`
+  prints for the quickstart's own belay.yaml, and a test keeps it that way.
 - **belay no longer says its write step saves the agent's changes.** The
   closing report described the write step as "saving the agent's changes
   into your repository", and `belay run --help` said belay "saves the

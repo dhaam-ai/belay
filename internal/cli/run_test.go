@@ -14,6 +14,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/google/go-cmp/cmp"
 	"github.com/spf13/cobra"
 	"github.com/spf13/pflag"
 
@@ -209,6 +210,82 @@ func TestResumeHelpReadsAsEnglish(t *testing.T) {
 		if !strings.Contains(out, phrase) {
 			t.Errorf("belay resume --help never mentions %q", phrase)
 		}
+	}
+}
+
+// TestReadmeDryRunExampleIsWhatADryRunPrints keeps README.md's dry-run
+// "Example output" exactly what `belay run --dry-run` prints for the
+// belay.yaml the quickstart tells a person to paste, read from the README
+// itself, with the API key its third step sets. The example once showed
+// 1,000,000 tokens and 5 turns a step, a line belay never printed, and none
+// of the lines saying what reaching the ceiling does or when belay gives up,
+// while belay printed the defaults, 2,000,000 and 30.
+//
+// Nothing about the machine reaches the output: the workspace is a temporary
+// directory, printed as /path/to/your/project; XDG_CONFIG_HOME points at an
+// empty directory, so no user config is read; and the credentials line and
+// its warning read only whether each variable is set, which this test sets.
+//
+// Regenerate the example with -update (see updateReadme), never by hand.
+func TestReadmeDryRunExampleIsWhatADryRunPrints(t *testing.T) {
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	t.Setenv(anthropicKeyEnv, "sk-ant-readme-example")
+	t.Setenv(claudeOAuthTokenEnv, "")
+	t.Setenv(sonarTokenEnv, "")
+
+	path := filepath.Join("..", "..", "README.md")
+	raw, err := os.ReadFile(path) //nolint:gosec // this repository's own README, at a fixed relative path
+	if err != nil {
+		t.Fatalf("read README.md: %v", err)
+	}
+	readme := string(raw)
+
+	const goal = "add a --json flag to the CLI output"
+	if !strings.Contains(readme, `belay run --dry-run "`+goal+`"`) {
+		t.Fatalf("README.md no longer runs belay run --dry-run %q; the example below it would describe a different goal", goal)
+	}
+	_, quickstart, found := strings.Cut(readme, "### 2. Create a belay.yaml")
+	if !found {
+		t.Fatal(`README.md has no "### 2. Create a belay.yaml" section to take the configuration from`)
+	}
+	_, quickstart, found = strings.Cut(quickstart, "```yaml\n")
+	if !found {
+		t.Fatal("README.md's belay.yaml step has no yaml block")
+	}
+	config, _, found := strings.Cut(quickstart, "```\n")
+	if !found {
+		t.Fatal("README.md's belay.yaml block has no closing fence")
+	}
+
+	ws := goWorkspace(t)
+	writeConfig(t, ws, config)
+	out, _, err := runCLI(t, "run", "--dry-run", "--workspace", ws, goal)
+	if err != nil {
+		t.Fatalf("belay run --dry-run with the README's belay.yaml: %v\n%s", err, out)
+	}
+	printed := strings.ReplaceAll(out, ws, "/path/to/your/project")
+
+	const opening = "Example output:\n\n```\n"
+	head, rest, found := strings.Cut(readme, opening)
+	if !found {
+		t.Fatalf("README.md has no %q block", strings.TrimSpace(opening))
+	}
+	example, tail, found := strings.Cut(rest, "```\n")
+	if !found {
+		t.Fatal("README.md's example dry-run output has no closing fence")
+	}
+
+	if *updateReadme {
+		// #nosec G703 -- path is the constant relative path to this
+		// repository's own README, and -update is a maintainer's flag.
+		if err := os.WriteFile(path, []byte(head+opening+printed+"```\n"+tail), 0o600); err != nil {
+			t.Fatalf("rewrite README.md: %v", err)
+		}
+		t.Log("README.md's example dry-run output rewritten from what belay run --dry-run prints")
+		return
+	}
+	if diff := cmp.Diff(printed, example); diff != "" {
+		t.Errorf("README.md's example is not what belay run --dry-run prints (-printed +README):\n%s", diff)
 	}
 }
 

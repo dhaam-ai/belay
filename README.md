@@ -191,11 +191,11 @@ belay run --dry-run "add a --json flag to the CLI output"
 
 This shows:
 - The goal you entered
-- Your budget and cost ceiling
-- What tools belay found (tests, linters)
-- What agent backend it will call
-- How many steps the graph will take
-- Where it would write files
+- The most it could spend, and what reaching that ceiling does
+- The configuration files it read, the agent it will call, and the tests and linter it found
+- Which credentials are set, without their values
+- The route through the graph, and when belay gives up
+- Where it would record the run
 - **But does not create anything or spend money.**
 
 Example output:
@@ -208,29 +208,29 @@ what you asked for
 
 where belay would work
   /path/to/your/project
-  belay found: Go project with tests
+  belay found: go
 
 the most it could spend
-  $5.00 or 1,000,000 tokens, whichever comes first
+  $5.00 or 2,000,000 tokens, whichever comes first
+  belay stops the run before the next step
 
 settings it would use
   read from    /path/to/your/project/belay.yaml
-  agent        claude-code, model sonnet, calling the agent for real, up to 5 turns per step
-  tests        go test -json -count=1 ./... (auto-detected)
-  quality gate golangci-lint (auto-detected), failing on major issues or worse
+  agent        claude-code, model sonnet, calling the agent for real, up to 30 turns per step
+  tests        go-test
+  quality gate golangci-lint, failing the run on major issues or worse
   credentials  ANTHROPIC_API_KEY is set; CLAUDE_CODE_OAUTH_TOKEN is not set; SONAR_TOKEN is not set
 
 the route it would take
   plan → approve → code → write → test → fix → review → done
-  graph.approval is true, so belay will stop after planning and wait for you
+  approve stops the run so you can read the plan before any code is written
+  it gives up after 3 rounds of the test-and-fix loop, or 50 steps in all
 
 what it would create
   /path/to/your/project/.belay/runs/<run-id>
   holding manifest.json, state.json, journal.ndjson and the plan
 
-belay would proceed with this run.
-
-Nothing was created and nothing was spent.
+Nothing was created and nothing was spent. Run the same command without --dry-run to start.
 ```
 
 ### 5. Start a real run

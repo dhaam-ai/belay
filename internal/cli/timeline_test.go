@@ -750,15 +750,16 @@ func timelineReadmeRun() []journal.Record {
 		records
 }
 
-// updateReadme rewrites README.md's example timeline output instead of
-// asserting against it. The example is generated output, so it is regenerated
-// rather than hand-edited:
+// updateReadme rewrites README.md's generated examples instead of asserting
+// against them: the timeline output (TestReadmeTimelineExampleIsWhatTimelinePrints)
+// and the dry run's output (TestReadmeDryRunExampleIsWhatADryRunPrints). They
+// are generated output, so they are regenerated rather than hand-edited:
 //
-//	go test ./internal/cli/ -run TestReadmeTimelineExample -update
+//	go test ./internal/cli/ -run 'TestReadme' -update
 //
 // Read the diff afterwards: every changed line should be one this change
 // meant to change.
-var updateReadme = flag.Bool("update", false, "rewrite README.md's example timeline output")
+var updateReadme = flag.Bool("update", false, "rewrite README.md's generated examples")
 
 // TestReadmeTimelineExampleIsWhatTimelinePrints keeps README.md's "Example
 // timeline output" exactly what belay timeline prints for timelineReadmeRun.
