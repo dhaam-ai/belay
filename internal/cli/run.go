@@ -20,6 +20,7 @@ import (
 	"github.com/dhaam-ai/belay/internal/detect"
 	"github.com/dhaam-ai/belay/internal/graph"
 	"github.com/dhaam-ai/belay/internal/state"
+	"github.com/dhaam-ai/belay/pkg/belay"
 )
 
 // runFlags holds the settings `belay run` and `belay resume` share. Both
@@ -527,6 +528,14 @@ func nextSteps(view outcomeView) []string {
 		return []string{
 			"one step ran longer than graph.node_timeout allows. this run has ended.",
 			"raise graph.node_timeout in belay.yaml, and start a new run:", "", "    " + newRun,
+		}
+	case errors.Is(runErr, belay.ErrBudgetExceeded):
+		// Crossing either ceiling ends a run with the same error, which
+		// does not say which one, so both settings are named.
+		return []string{
+			"the run went past its budget ceiling, so belay stopped it. this run has ended.",
+			"raise budget.max_usd or budget.max_tokens in belay.yaml, whichever it reached, and start a new run:",
+			"", "    " + newRun,
 		}
 	case outcome.Status == state.RunStatusCompleted:
 		return []string{"review the change in your repository, then commit it"}

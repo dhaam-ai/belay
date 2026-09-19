@@ -645,16 +645,20 @@ func TestReportOutcomeMapsExitCodesAndExplainsItself(t *testing.T) {
 			wantNotSaid: []string{"belay resume"},
 		},
 		{
+			// The same shape as the step cap and the timeout: which setting
+			// stopped the run, and the command that starts the next one.
+			// Either budget ceiling ends a run with the same error, so both
+			// settings are named.
 			name: "aborted by the budget ceiling",
 			outcome: graph.Outcome{
 				Status: state.RunStatusAborted, ExitCode: graph.ExitAborted,
 				Node: graph.NodeFix, Steps: 9,
 			},
-			runErr:   fmt.Errorf("graph: budget ceiling reached before %q: %w", graph.NodeFix, belay.ErrBudgetExceeded),
+			runErr:   fmt.Errorf("graph: budget ceiling reached before %q: %w", graph.NodeFix, &belay.BudgetError{SpentUSD: 5.02, LimitUSD: 5}),
 			wantCode: graph.ExitAborted,
 			wantSaid: []string{
-				"stopped itself", "this run has ended",
-				"belay timeline 20260905T120000Z-abcdef123456",
+				"stopped itself", "budget ceiling", "this run has ended",
+				"budget.max_usd", "budget.max_tokens", `belay run "what you want built"`,
 			},
 			wantNotSaid: []string{"belay resume"},
 		},

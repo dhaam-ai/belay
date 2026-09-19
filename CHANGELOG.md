@@ -162,9 +162,10 @@ that only `pkg/belay` carries a compatibility promise. Everything under
 - **belay no longer tells you to resume a run it cannot resume.** After
   `graph.max_steps`, `graph.node_timeout`, or the budget ceiling with
   `budget.on_exceed: abort`, the closing report offered `belay resume
-  <id>`, which refuses such a run. It now says the run has ended. After
-  the step cap or a timeout it names the setting to raise and the command
-  that starts a new run; otherwise it points at `belay timeline`.
+  <id>`, which refuses such a run. It now says the run has ended, names the
+  setting to raise — `budget.max_usd` or `budget.max_tokens` for the budget
+  ceiling — and gives the command that starts a new run. A run aborted
+  any other way is pointed at `belay timeline`.
   docs/troubleshooting.md and docs/architecture.md also suggested `belay
   resume` for runs that had completed or failed, and no longer do.
 - **A crash while belay recovers from a crash no longer ends the run.**
