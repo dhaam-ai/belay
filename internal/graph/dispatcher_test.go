@@ -134,6 +134,23 @@ func (h *harness) dispatcher(t *testing.T, nodes ...graph.Node) *graph.Dispatche
 	return d
 }
 
+// suspendingDispatcher is dispatcher with Options.SuspendOnCancel set to
+// suspend, which is how `belay run` and `belay resume` build theirs.
+func (h *harness) suspendingDispatcher(t *testing.T, suspend bool, nodes ...graph.Node) *graph.Dispatcher {
+	t.Helper()
+	reg := graph.NewRegistry()
+	reg.MustRegister(nodes...)
+	d, err := graph.NewDispatcher(graph.Options{
+		Store: h.store, Registry: reg, Config: h.cfg,
+		Now:             func() time.Time { return time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC) },
+		SuspendOnCancel: suspend,
+	})
+	if err != nil {
+		t.Fatalf("NewDispatcher() error = %v", err)
+	}
+	return d
+}
+
 // seedJournal appends records directly, standing in for a previous process.
 func (h *harness) seedJournal(t *testing.T, recs ...journal.Record) {
 	t.Helper()
@@ -1080,6 +1097,174 @@ func TestDispatcher_CrashAfterClosingAnInterruptedAttemptStillReRunsIt(t *testin
 		"code#1 started", "code#1 finished ok -> END",
 		"run_completed",
 	}
+	if got := h.timeline(t); !equalStrings(got, want) {
+		t.Errorf("timeline =\n  %v\nwant\n  %v", got, want)
+	}
+}
+
+// interruptingNode stands in for a person pressing Ctrl-C while it runs: it
+// cancels the run's context, waits for the cancellation to reach it, and
+// returns what a node that honours its context returns then. With finish
+// set it ignores the cancellation instead and reports success, as a node
+// that never looks at its context would.
+type interruptingNode struct {
+	name   string
+	cancel context.CancelFunc
+	finish bool
+	calls  int
+}
+
+func (n *interruptingNode) Name() string { return n.name }
+
+func (n *interruptingNode) Run(ctx context.Context, _ *graph.RunContext) (graph.Result, error) {
+	n.calls++
+	n.cancel()
+	<-ctx.Done()
+	if n.finish {
+		return Result{
+			Next: graph.End, Status: journal.StatusOK,
+			Patch: state.Patch{Fix: &state.Fix{Attempts: 9}},
+		}, nil
+	}
+	return Result{}, ctx.Err()
+}
+
+// TestDispatcher_CancellationEndsOrSuspendsTheRun is the Ctrl-C contract.
+// By default a cancelled context ends the run as aborted, which Resume then
+// refuses; that row is a guard for every caller of the dispatcher that never
+// asked for anything else. With Options.SuspendOnCancel the run is paused
+// instead: the interrupted attempt is closed as one that will be run again,
+// its Result is thrown away, and Resume re-runs the node at the next attempt
+// and carries on to the end.
+func TestDispatcher_CancellationEndsOrSuspendsTheRun(t *testing.T) {
+	tests := []struct {
+		name          string
+		suspend       bool
+		finish        bool
+		wantErr       []error
+		wantStatus    state.RunStatus
+		wantTimeline  []string
+		wantResumeErr error
+	}{
+		{
+			name:       "guard: by default the run ends as aborted",
+			wantErr:    []error{graph.ErrNodeAborted, context.Canceled},
+			wantStatus: state.RunStatusAborted,
+			wantTimeline: []string{
+				"run_started", "plan#1 started", "plan#1 finished ok -> code",
+				"code#1 started", "code#1 finished aborted", "run_aborted",
+			},
+			wantResumeErr: graph.ErrRunEnded,
+		},
+		{
+			name:       "SuspendOnCancel pauses the run at the interrupted node",
+			suspend:    true,
+			wantErr:    []error{graph.ErrInterrupted, context.Canceled},
+			wantStatus: state.RunStatusPaused,
+			wantTimeline: []string{
+				"run_started", "plan#1 started", "plan#1 finished ok -> code",
+				"code#1 started", "code#1 finished aborted -> code", "run_paused",
+			},
+		},
+		{
+			name:       "SuspendOnCancel discards what a node finishing anyway returned",
+			suspend:    true,
+			finish:     true,
+			wantErr:    []error{graph.ErrInterrupted, context.Canceled},
+			wantStatus: state.RunStatusPaused,
+			wantTimeline: []string{
+				"run_started", "plan#1 started", "plan#1 finished ok -> code",
+				"code#1 started", "code#1 finished aborted -> code", "run_paused",
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			h := newRun(t, config.Default(), "stop when asked")
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+
+			code := &interruptingNode{name: graph.NodeCode, cancel: cancel, finish: tt.finish}
+			d := h.suspendingDispatcher(t, tt.suspend, ok(graph.NodePlan, graph.NodeCode), code)
+
+			out, err := d.Run(ctx)
+			for _, want := range tt.wantErr {
+				if !errors.Is(err, want) {
+					t.Errorf("Run() error = %v, want one wrapping %v", err, want)
+				}
+			}
+			if out.Status != tt.wantStatus || out.ExitCode != graph.ExitAborted || out.Node != graph.NodeCode {
+				t.Errorf("Outcome = {%v, exit %d, node %q}, want {%v, exit %d, node %q}",
+					out.Status, out.ExitCode, out.Node, tt.wantStatus, graph.ExitAborted, graph.NodeCode)
+			}
+			if got := h.timeline(t); !equalStrings(got, tt.wantTimeline) {
+				t.Errorf("timeline =\n  %v\nwant\n  %v", got, tt.wantTimeline)
+			}
+			man := h.manifest(t)
+			if man.Status != tt.wantStatus || man.CurrentNode != graph.NodeCode {
+				t.Errorf("manifest = {%v, %q}, want {%v, %q}", man.Status, man.CurrentNode, tt.wantStatus, graph.NodeCode)
+			}
+			if got := h.state(t).Fix.Attempts; got != 0 {
+				t.Errorf("state.Fix.Attempts = %d, want 0: an interrupted node's patch must not land", got)
+			}
+
+			// A later process resumes, with a context nobody cancels.
+			plan2 := ok(graph.NodePlan, graph.NodeCode)
+			code2 := ok(graph.NodeCode, graph.End)
+			out, err = h.suspendingDispatcher(t, tt.suspend, plan2, code2).Resume(context.Background())
+			if tt.wantResumeErr != nil {
+				if !errors.Is(err, tt.wantResumeErr) {
+					t.Fatalf("Resume() error = %v, want one wrapping %v", err, tt.wantResumeErr)
+				}
+				if code2.calls != 0 {
+					t.Errorf("code ran %d times resuming an ended run, want 0", code2.calls)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("Resume() error = %v, want nil", err)
+			}
+			if out.Status != state.RunStatusCompleted {
+				t.Fatalf("Resume() Outcome.Status = %v, want completed", out.Status)
+			}
+			if plan2.calls != 0 {
+				t.Errorf("plan ran %d times on resume, want 0: it finished before the interruption", plan2.calls)
+			}
+			if code2.calls != 1 || code2.attempts[0] != 2 {
+				t.Errorf("code ran %d times at attempts %v on resume, want 1 call at attempt 2", code2.calls, code2.attempts)
+			}
+			want := append(append([]string{}, tt.wantTimeline...),
+				"run_resumed", "code#2 started", "code#2 finished ok -> END", "run_completed")
+			if got := h.timeline(t); !equalStrings(got, want) {
+				t.Errorf("timeline after resume =\n  %v\nwant\n  %v", got, want)
+			}
+		})
+	}
+}
+
+// TestDispatcher_SuspendOnCancelDoesNotExcuseATimeout: a node that outlives
+// graph.node_timeout is stopped by a guard, not by the person running belay,
+// and SuspendOnCancel leaves that verdict alone.
+func TestDispatcher_SuspendOnCancelDoesNotExcuseATimeout(t *testing.T) {
+	cfg := config.Default()
+	cfg.Graph.NodeTimeout = config.NewDuration(20 * time.Millisecond)
+	h := newRun(t, cfg, "too slow")
+
+	slow := &fakeNode{name: graph.NodePlan, steps: []nodeStep{{
+		res:       Result{Next: graph.End, Status: journal.StatusOK},
+		sleep:     150 * time.Millisecond,
+		ignoreCtx: true,
+	}}}
+
+	out, err := h.suspendingDispatcher(t, true, slow).Run(context.Background())
+	if !errors.Is(err, graph.ErrNodeTimeout) {
+		t.Fatalf("Run() error = %v, want one wrapping ErrNodeTimeout", err)
+	}
+	if out.Status != state.RunStatusAborted {
+		t.Errorf("Outcome.Status = %v, want aborted", out.Status)
+	}
+	want := []string{"run_started", "plan#1 started", "plan#1 finished aborted", "run_aborted"}
 	if got := h.timeline(t); !equalStrings(got, want) {
 		t.Errorf("timeline =\n  %v\nwant\n  %v", got, want)
 	}

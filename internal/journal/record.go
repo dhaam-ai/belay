@@ -257,8 +257,9 @@ type Record struct {
 // Node as Next.
 //
 // The dispatcher writes that shape when it closes an attempt it will re-run,
-// and at no other time: today, when a crash left the attempt open. An abort
-// that ends the run names no Next, which is how the two are told apart.
+// and at no other time: when a crash left the attempt open, and when a caller
+// cancelled the run and asked for it to be suspended rather than ended. An
+// abort that ends the run names no Next, which is how the two are told apart.
 //
 // The shape was chosen over a new Status so that a journal written this way
 // reads, to anything that does not call Interrupted, as what it is: the

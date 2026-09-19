@@ -98,6 +98,24 @@ func (h *durabilityHarness) dispatcher(nodes ...graph.Node) *graph.Dispatcher {
 	return d
 }
 
+// suspendingDispatcher is dispatcher with graph.Options.SuspendOnCancel set,
+// which is how `belay run` and `belay resume` build theirs: a cancelled
+// context pauses the run instead of ending it. The same rule applies: never
+// reuse the value it returns across a simulated crash or interruption.
+func (h *durabilityHarness) suspendingDispatcher(nodes ...graph.Node) *graph.Dispatcher {
+	h.t.Helper()
+	reg := graph.NewRegistry()
+	reg.MustRegister(nodes...)
+	d, err := graph.NewDispatcher(graph.Options{
+		Store: state.NewStore(h.layout), Registry: reg, Config: h.cfg,
+		SuspendOnCancel: true,
+	})
+	if err != nil {
+		h.t.Fatalf("graph.NewDispatcher() error = %v", err)
+	}
+	return d
+}
+
 // seedJournal appends recs through the real journal.Append, standing in for
 // whatever a previous process durably wrote before this test takes over: the
 // bytes on disk are exactly what belay's own journal writer produces, never
@@ -228,6 +246,12 @@ type durabilityStep struct {
 	// durabilityCrash instead of returning, and must be paired with
 	// durabilityRunExpectingCrash at the call site.
 	crash bool
+	// interrupt, when set, stands in for a person pressing Ctrl-C while this
+	// call runs: Run calls it to cancel the run's context, waits for the
+	// cancellation to arrive, and returns the context's error, as a node that
+	// honours its context does. Unlike crash, the process lives on and the
+	// dispatcher decides what to write.
+	interrupt context.CancelFunc
 }
 
 // durabilityOK returns a durabilityNode with one scripted step: succeed and
@@ -254,7 +278,7 @@ type durabilityNode struct {
 
 func (n *durabilityNode) Name() string { return n.name }
 
-func (n *durabilityNode) Run(_ context.Context, rc *graph.RunContext) (graph.Result, error) {
+func (n *durabilityNode) Run(ctx context.Context, rc *graph.RunContext) (graph.Result, error) {
 	n.calls++
 	n.attempts = append(n.attempts, rc.Attempt)
 	n.seenFix = append(n.seenFix, rc.State.Fix)
@@ -267,6 +291,11 @@ func (n *durabilityNode) Run(_ context.Context, rc *graph.RunContext) (graph.Res
 	st := n.steps[idx]
 	if st.crash {
 		panic(durabilityCrash{node: n.name, attempt: rc.Attempt})
+	}
+	if st.interrupt != nil {
+		st.interrupt()
+		<-ctx.Done()
+		return graph.Result{}, ctx.Err()
 	}
 	return st.res, nil
 }
