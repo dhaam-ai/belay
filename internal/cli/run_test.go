@@ -14,6 +14,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/dhaam-ai/belay/internal/graph"
+	"github.com/dhaam-ai/belay/internal/journal"
 	"github.com/dhaam-ai/belay/internal/nodes/approve"
 	"github.com/dhaam-ai/belay/internal/state"
 )
@@ -730,5 +731,96 @@ func TestDriveRunResumesPastTheApprovalGate(t *testing.T) {
 		if !strings.Contains(got, phrase) {
 			t.Errorf("the resume never says %q; got:\n%s", phrase, got)
 		}
+	}
+}
+
+// finishes is a node that ends the run the moment it runs.
+type finishes struct{ name string }
+
+func (n finishes) Name() string { return n.name }
+
+func (finishes) Run(context.Context, *graph.RunContext) (graph.Result, error) {
+	return graph.Result{Status: journal.StatusOK, Next: graph.End, Note: "done"}, nil
+}
+
+// TestDispatchOnceAppliesEachOptionsChange pins the seam a caller uses to
+// dispatch a run differently from belay run and belay resume: every change
+// it passes reaches the dispatcher, in the order it was passed, on top of the
+// Options every run shares.
+func TestDispatchOnceAppliesEachOptionsChange(t *testing.T) {
+	ws := goWorkspace(t)
+	plan, err := resolve(resolveRequest{workspace: ws, logger: quietLogger()})
+	if err != nil {
+		t.Fatalf("resolve: %v", err)
+	}
+	reached := false
+	shared := graph.NewRegistry()
+	shared.MustRegister(planWriter{body: "# Plan\n\nwrite a test\n"}, approve.New(), endsTheRun{reached: &reached})
+	plan.registry = shared
+	store := seedRunDir(t, plan, "add tests")
+
+	// The first change swaps in a graph that ends at its first node; the
+	// second sees what the first did, which is only so if they run in order.
+	short := graph.NewRegistry()
+	short.MustRegister(finishes{name: graph.NodePlan})
+	var secondSaw *graph.Registry
+	view, err := dispatchOnce(context.Background(), plan, store, false,
+		func(o *graph.Options) { o.Registry = short },
+		func(o *graph.Options) { secondSaw = o.Registry },
+	)
+	if err != nil {
+		t.Fatalf("dispatchOnce: %v", err)
+	}
+
+	if view.outcome.Status != state.RunStatusCompleted || view.outcome.Steps != 1 {
+		t.Errorf("outcome = %+v (error %v), want the changed graph to complete in one step",
+			view.outcome, view.runErr)
+	}
+	if secondSaw != short {
+		t.Error("the second change did not see the first change's registry; changes must apply in order")
+	}
+	if view.layout.RunID() != store.Layout().RunID() {
+		t.Errorf("view names run %q, want %q", view.layout.RunID(), store.Layout().RunID())
+	}
+	if plan.registry != shared {
+		t.Error("a change for one dispatch leaked into the plan every later dispatch is built from")
+	}
+}
+
+// TestAfterCompletionCannotChangeTheExitStatus pins afterCompletion's
+// contract with a step that fails: the recording cannot be saved, because
+// its directory would have to go where a file already is. belay says so on
+// stderr, still reports the run, and exits as the run ended, which here is a
+// pause and therefore success.
+func TestAfterCompletionCannotChangeTheExitStatus(t *testing.T) {
+	ws := goWorkspace(t)
+	writeConfig(t, ws, "version: 1\nagent:\n  mode: record\n")
+	var out, errOut bytes.Buffer
+	u := &ui{out: &out, err: &errOut}
+	unwritable := filepath.Join(ws, "go.mod", "cassette.json")
+
+	plan, err := resolve(resolveRequest{workspace: ws, logger: newLogger(u), cassette: unwritable})
+	if err != nil {
+		t.Fatalf("resolve: %v", err)
+	}
+	if plan.recorder == nil {
+		t.Fatal("agent.mode record did not arm the recorder, so this test would save nothing")
+	}
+	reached := false
+	registry := graph.NewRegistry()
+	registry.MustRegister(planWriter{body: "# Plan\n\nwrite a test\n"}, approve.New(), endsTheRun{reached: &reached})
+	plan.registry = registry
+	store := seedRunDir(t, plan, "add tests")
+
+	cmd := &cobra.Command{}
+	cmd.SetContext(context.Background())
+	if err := driveRun(cmd, u, plan, store, false); err != nil {
+		t.Errorf("driveRun = %v, want nil: the run paused, and a failed save must not change that", err)
+	}
+	if !strings.Contains(errOut.String(), "belay cannot create the directory for "+unwritable) {
+		t.Errorf("stderr = %q, want it to say the recording was not saved", errOut.String())
+	}
+	if !strings.Contains(out.String(), "belay paused after 2 steps, and is waiting for you.") {
+		t.Errorf("the run was not reported after the failed save; stdout:\n%s", out.String())
 	}
 }

@@ -210,17 +210,52 @@ func (p *runPlan) prepareWorkTree(layout state.Layout, manifest *state.Manifest)
 	return nil
 }
 
-// driveRun runs the dispatcher over an existing run and reports how it ended.
-// `belay run` and `belay resume` differ only in the resuming flag, so the two
-// commands cannot narrate the same events differently.
+// driveRun dispatches an existing run once, does what follows a dispatch,
+// and reports how the run ended. `belay run` and `belay resume` differ only
+// in the resuming flag, so the two commands cannot narrate the same events
+// differently.
+//
+// Ctrl-C is handled from before the dispatch until the report is written, so
+// a first Ctrl-C after the dispatch has returned still lets afterCompletion
+// finish rather than killing belay part-way through saving the recording.
 func driveRun(cmd *cobra.Command, u *ui, plan *runPlan, store *state.Store, resuming bool) error {
-	dispatcher, err := graph.NewDispatcher(plan.options(store))
+	ctx, stop := stopOnSignal(cmd.Context(), u)
+	defer stop()
+
+	view, err := dispatchOnce(ctx, plan, store, resuming)
 	if err != nil {
 		return &ExitError{Code: graph.ExitFailed, Message: "belay: " + err.Error(), Err: err}
 	}
+	afterCompletion(u, plan, view)
+	return reportOutcome(u, view)
+}
 
-	ctx, stop := stopOnSignal(cmd.Context(), u)
-	defer stop()
+// dispatchOnce builds the dispatcher for an existing run and dispatches it
+// once: Resume when resuming, Run otherwise.
+//
+// Each mut changes the dispatcher's Options, in order, after runPlan.options
+// has built them. It is for a caller that dispatches a run differently from
+// `belay run` and `belay resume`, such as one that stops after a single node.
+// runPlan.options stays the one place the wiring every run shares is built,
+// and a mut only departs from it.
+//
+// The error is not how the run went. It is set only when no dispatcher could
+// be built, so nothing ran and there is nothing to report. How the run went,
+// a failed run included, is in the returned outcomeView.
+//
+// dispatchOnce neither saves nor says anything once the dispatch returns:
+// afterCompletion and reportOutcome are the caller's to run, so a caller can
+// dispatch a run more than once, through a pause and on, and report once.
+func dispatchOnce(ctx context.Context, plan *runPlan, store *state.Store, resuming bool,
+	mut ...func(*graph.Options)) (outcomeView, error) {
+	opts := plan.options(store)
+	for _, change := range mut {
+		change(&opts)
+	}
+	dispatcher, err := graph.NewDispatcher(opts)
+	if err != nil {
+		return outcomeView{}, err
+	}
 
 	// Run and Resume differ in exactly one thing: whether a run parked at
 	// an approval gate may be stepped past. Calling both would step past a
@@ -230,14 +265,33 @@ func driveRun(cmd *cobra.Command, u *ui, plan *runPlan, store *state.Store, resu
 		dispatch = dispatcher.Resume
 	}
 	outcome, runErr := dispatch(ctx)
+	return outcomeView{layout: store.Layout(), outcome: outcome, runErr: runErr}, nil
+}
 
+// afterCompletion does what belay does once a dispatch has returned, before
+// it reports how the run went. Its steps run in this order, every time:
+//
+//  1. Save the recording, when agent.mode is "record". This happens whatever
+//     the outcome: a run that failed or was stopped still made the calls it
+//     recorded.
+//
+// A new step goes into this list at the position its inputs require, with
+// the reason for that position beside it.
+//
+// No step can change the process's exit status, and the signature is what
+// guarantees it: afterCompletion returns nothing, and reportOutcome derives
+// the status from view, which afterCompletion is given a copy of. A step that
+// fails says so on stderr, and the steps after it still run. A run that
+// finished has finished whether or not a step after it worked; reporting it
+// as failed would tell a script to redo work that is already done.
+//
+//nolint:revive // view is unused until a step depends on how the run ended; it is the steps' contract.
+func afterCompletion(u *ui, plan *runPlan, view outcomeView) {
 	if path, err := plan.saveCassette(); err != nil {
 		u.note("belay: %v", err)
 	} else if path != "" {
 		u.say("  recording saved to %s", path)
 	}
-
-	return reportOutcome(u, outcomeView{layout: store.Layout(), outcome: outcome, runErr: runErr})
 }
 
 // stopOnSignal cancels ctx when the person running belay asks it to stop, and
