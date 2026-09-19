@@ -98,8 +98,8 @@ type TimelineEntry struct {
 	// Iterations is the total number of visits to Node across the whole run.
 	Iterations int
 	// Attempt is the journal's attempt counter for this visit. It is greater
-	// than 1 only when a previous attempt of this same visit died without
-	// finishing — a crash recovery, not a loop iteration.
+	// than 1 only when an earlier attempt at this same visit was cut short
+	// (crash or Ctrl-C) and run again — a re-run, not a loop iteration.
 	Attempt int
 	// Outcome is what happened, in the reader's vocabulary.
 	Outcome TimelineOutcome
@@ -128,7 +128,8 @@ type TimelineEntry struct {
 func (e TimelineEntry) Repeated() bool { return e.Iterations > 1 }
 
 // Rerun reports whether this entry is a second or later attempt at the same
-// visit to the node, meaning an earlier attempt died mid-execution.
+// visit to the node, meaning an earlier attempt was cut short (crash or
+// Ctrl-C).
 func (e TimelineEntry) Rerun() bool { return e.Attempt > 1 }
 
 // TimelineMarker is a run-level event between two node executions: the
