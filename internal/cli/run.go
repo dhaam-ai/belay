@@ -495,6 +495,7 @@ func spendText(outcome graph.Outcome) string {
 func nextSteps(view outcomeView) []string {
 	layout, outcome, runErr := view.layout, view.outcome, view.runErr
 	resume := "belay resume " + layout.RunID()
+	newRun := `belay run "what you want built"`
 
 	switch {
 	case errors.Is(runErr, graph.ErrInterrupted):
@@ -513,21 +514,26 @@ func nextSteps(view outcomeView) []string {
 			"belay cannot tell where this run left off, so it will not guess.",
 			"start a fresh run; the journal of this one is at " + layout.JournalPath(),
 		}
+	// A run that ended as aborted cannot be resumed: belay resume refuses
+	// it. Only a run that is paused or was interrupted is offered the
+	// command, so the report never names one that would refuse.
 	case errors.Is(runErr, graph.ErrMaxSteps):
 		return []string{
-			"the graph kept going round without finishing, so belay stopped it.",
-			"raise graph.max_steps in belay.yaml, or take a smaller bite:",
-			"", "    " + resume,
+			"the graph kept going round without finishing, so belay stopped it. this run has ended.",
+			"raise graph.max_steps in belay.yaml, or ask for less, and start a new run:",
+			"", "    " + newRun,
 		}
 	case errors.Is(runErr, graph.ErrNodeTimeout):
 		return []string{
-			"one step ran longer than graph.node_timeout allows.",
-			"raise it in belay.yaml, then:", "", "    " + resume,
+			"one step ran longer than graph.node_timeout allows. this run has ended.",
+			"raise graph.node_timeout in belay.yaml, and start a new run:", "", "    " + newRun,
 		}
 	case outcome.Status == state.RunStatusCompleted:
 		return []string{"review the change in your repository, then commit it"}
 	case outcome.Status == state.RunStatusAborted:
-		return []string{"pick up where it stopped with:", "", "    " + resume}
+		return []string{
+			"this run has ended. see what happened with:", "", "    belay timeline " + layout.RunID(),
+		}
 	case outcome.Status == state.RunStatusFailed:
 		return []string{
 			"see what happened with:", "", "    belay timeline " + layout.RunID(),

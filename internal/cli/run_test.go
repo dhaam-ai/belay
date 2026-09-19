@@ -21,6 +21,7 @@ import (
 	"github.com/dhaam-ai/belay/internal/journal"
 	"github.com/dhaam-ai/belay/internal/nodes/approve"
 	"github.com/dhaam-ai/belay/internal/state"
+	"github.com/dhaam-ai/belay/pkg/belay"
 )
 
 // runCLI executes the command tree the way a shell would, with both streams
@@ -540,6 +541,9 @@ func TestReportOutcomeMapsExitCodesAndExplainsItself(t *testing.T) {
 			wantSaid: []string{"could not finish", "review — running the quality gate", "belay timeline"},
 		},
 		{
+			// A run that ended as aborted cannot be resumed: belay resume
+			// refuses it as "already stopped for good". So the report must
+			// not offer the command, but say what to do instead.
 			name: "aborted by the step cap",
 			outcome: graph.Outcome{
 				Status: state.RunStatusAborted, ExitCode: graph.ExitAborted,
@@ -547,7 +551,38 @@ func TestReportOutcomeMapsExitCodesAndExplainsItself(t *testing.T) {
 			},
 			runErr:   graph.ErrMaxSteps,
 			wantCode: graph.ExitAborted,
-			wantSaid: []string{"stopped itself", "kept going round without finishing", "graph.max_steps"},
+			wantSaid: []string{
+				"stopped itself", "kept going round without finishing", "graph.max_steps",
+				"this run has ended", `belay run "what you want built"`,
+			},
+			wantNotSaid: []string{"belay resume"},
+		},
+		{
+			name: "aborted by the node timeout",
+			outcome: graph.Outcome{
+				Status: state.RunStatusAborted, ExitCode: graph.ExitAborted,
+				Node: graph.NodeTest, Steps: 5,
+			},
+			runErr:   graph.ErrNodeTimeout,
+			wantCode: graph.ExitAborted,
+			wantSaid: []string{
+				"graph.node_timeout", "this run has ended", `belay run "what you want built"`,
+			},
+			wantNotSaid: []string{"belay resume"},
+		},
+		{
+			name: "aborted by the budget ceiling",
+			outcome: graph.Outcome{
+				Status: state.RunStatusAborted, ExitCode: graph.ExitAborted,
+				Node: graph.NodeFix, Steps: 9,
+			},
+			runErr:   fmt.Errorf("graph: budget ceiling reached before %q: %w", graph.NodeFix, belay.ErrBudgetExceeded),
+			wantCode: graph.ExitAborted,
+			wantSaid: []string{
+				"stopped itself", "this run has ended",
+				"belay timeline 20260905T120000Z-abcdef123456",
+			},
+			wantNotSaid: []string{"belay resume"},
 		},
 		{
 			name: "aborted with no resume point",
