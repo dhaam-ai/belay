@@ -535,23 +535,14 @@ func (d *Dispatcher) loop(
 				fmt.Errorf("graph: journal node_started for %q: %w", current, err)
 		}
 
-		logger := d.logger.With(
-			slog.String("node", current), slog.Int("step", step), slog.Int("attempt", attempt))
+		rc := d.runContext(man, st, ledger, current, step, attempt)
+		// Held apart from rc: the node receives rc by pointer, and what the
+		// dispatcher logs after the node returns must not depend on what
+		// the node did to it.
+		logger := rc.Logger
 		logger.Info("belay/graph: node started")
 
-		layout := d.store.Layout()
-		exec := d.execute(ctx, node, &RunContext{
-			Goal: man.Goal, State: st, Config: d.cfg, Layout: layout,
-			// Supplied, not derived: six nodes previously reconstructed
-			// the workspace by walking up from the run directory, which
-			// yields belay's own tree for a zero Layout.
-			Workspace: layout.WorkspaceDir(),
-			RunID:     man.RunID,
-			Budget:    ledger.Snapshot(d.cfg.Budget.MaxUSD),
-			NodeName:  current, Step: step, Attempt: attempt, Logger: logger,
-			Agent: d.agent, Runner: d.runner, Linter: d.linter,
-			Reviewer: d.reviewer, Isolator: d.isolator,
-		})
+		exec := d.execute(ctx, node, rc)
 
 		man.Step = step
 		steps++
@@ -565,6 +556,42 @@ func (d *Dispatcher) loop(
 		}
 
 		current, attempt = exec.res.Next, 1
+	}
+}
+
+// runContext builds the RunContext for one execution of node: the only place
+// one is assembled, so everything a node is allowed to see is decided here.
+//
+// It reads and returns; it writes nothing. That keeps it out of the ordering
+// contract on Dispatcher: building a node's view of the run is not a durable
+// effect, so a crash while doing it loses nothing and leaves nothing to heal.
+//
+// Config is d.cfg, the configuration this process loaded. On a resume that is
+// read from disk again and can differ from what the run started with. A value
+// that must stay the same for the whole of a run belongs on man, which was
+// written when the run was created, and a field carrying one should be filled
+// from man rather than from d.cfg; internal/nodes states the same rule for
+// the shape of the graph.
+//
+// It does not decide which node runs, or check the budget or the step cap:
+// the loop has done all three before a node needs a context.
+func (d *Dispatcher) runContext(
+	man *state.Manifest, st state.State, ledger *budget.Ledger, node string, step, attempt int,
+) *RunContext {
+	layout := d.store.Layout()
+	return &RunContext{
+		Goal: man.Goal, State: st, Config: d.cfg, Layout: layout,
+		// Supplied, not derived: six nodes previously reconstructed the
+		// workspace by walking up from the run directory, which yields
+		// belay's own tree for a zero Layout.
+		Workspace: layout.WorkspaceDir(),
+		RunID:     man.RunID,
+		Budget:    ledger.Snapshot(d.cfg.Budget.MaxUSD),
+		NodeName:  node, Step: step, Attempt: attempt,
+		Logger: d.logger.With(
+			slog.String("node", node), slog.Int("step", step), slog.Int("attempt", attempt)),
+		Agent: d.agent, Runner: d.runner, Linter: d.linter,
+		Reviewer: d.reviewer, Isolator: d.isolator,
 	}
 }
 
