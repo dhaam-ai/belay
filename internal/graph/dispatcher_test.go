@@ -1249,30 +1249,136 @@ func TestDispatcher_CancellationEndsOrPausesTheRun(t *testing.T) {
 	}
 }
 
+// outlivesItsDeadline stands in for a node that runs past graph.node_timeout
+// and is then caught by a Ctrl-C as well: it waits for its own deadline, and
+// only once that has fired does it cancel the run's context and return. Both
+// have happened by the time the dispatcher looks, in that order, with no
+// sleep to make it so.
+type outlivesItsDeadline struct {
+	name   string
+	cancel context.CancelFunc
+}
+
+func (n outlivesItsDeadline) Name() string { return n.name }
+
+func (n outlivesItsDeadline) Run(ctx context.Context, _ *graph.RunContext) (graph.Result, error) {
+	<-ctx.Done()
+	n.cancel()
+	return Result{Next: graph.End, Status: journal.StatusOK}, nil
+}
+
 // TestDispatcher_PauseOnCancelDoesNotExcuseATimeout: a node that outlives
 // graph.node_timeout is stopped by a guard, not by the person running belay,
-// and PauseOnCancel leaves that verdict alone.
+// and PauseOnCancel leaves that verdict alone — including when the person
+// running belay also pressed Ctrl-C while the node overran. The timeout is
+// checked first; a cancellation that arrives while a node outlives its
+// deadline does not turn the dispatcher's verdict into a pause that resuming
+// would only meet again.
 func TestDispatcher_PauseOnCancelDoesNotExcuseATimeout(t *testing.T) {
-	cfg := config.Default()
-	cfg.Graph.NodeTimeout = config.NewDuration(20 * time.Millisecond)
-	h := newRun(t, cfg, "too slow")
-
-	slow := &fakeNode{name: graph.NodePlan, steps: []nodeStep{{
-		res:       Result{Next: graph.End, Status: journal.StatusOK},
-		sleep:     150 * time.Millisecond,
-		ignoreCtx: true,
-	}}}
-
-	out, err := h.pausingDispatcher(t, true, slow).Run(context.Background())
-	if !errors.Is(err, graph.ErrNodeTimeout) {
-		t.Fatalf("Run() error = %v, want one wrapping ErrNodeTimeout", err)
+	tests := []struct {
+		name string
+		node func(cancel context.CancelFunc) graph.Node
+	}{
+		{
+			name: "the run's context left alone",
+			node: func(context.CancelFunc) graph.Node {
+				return &fakeNode{name: graph.NodePlan, steps: []nodeStep{{
+					res:       Result{Next: graph.End, Status: journal.StatusOK},
+					sleep:     150 * time.Millisecond,
+					ignoreCtx: true,
+				}}}
+			},
+		},
+		{
+			name: "the run's context cancelled after the deadline",
+			node: func(cancel context.CancelFunc) graph.Node {
+				return outlivesItsDeadline{name: graph.NodePlan, cancel: cancel}
+			},
+		},
 	}
-	if out.Status != state.RunStatusAborted {
-		t.Errorf("Outcome.Status = %v, want aborted", out.Status)
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := config.Default()
+			cfg.Graph.NodeTimeout = config.NewDuration(20 * time.Millisecond)
+			h := newRun(t, cfg, "too slow")
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+
+			out, err := h.pausingDispatcher(t, true, tt.node(cancel)).Run(ctx)
+			if !errors.Is(err, graph.ErrNodeTimeout) {
+				t.Fatalf("Run() error = %v, want one wrapping ErrNodeTimeout", err)
+			}
+			if out.Status != state.RunStatusAborted {
+				t.Errorf("Outcome.Status = %v, want aborted", out.Status)
+			}
+			want := []string{"run_started", "plan#1 started", "plan#1 finished aborted", "run_aborted"}
+			if got := h.timeline(t); !equalStrings(got, want) {
+				t.Errorf("timeline =\n  %v\nwant\n  %v", got, want)
+			}
+		})
 	}
-	want := []string{"run_started", "plan#1 started", "plan#1 finished aborted", "run_aborted"}
-	if got := h.timeline(t); !equalStrings(got, want) {
-		t.Errorf("timeline =\n  %v\nwant\n  %v", got, want)
+}
+
+// TestDispatcher_GuardsComeBeforeTheCancellationPause: a run the budget
+// ceiling or graph.max_steps would end is ended, even when its context was
+// cancelled before the next node. Pausing it instead would hand `belay
+// resume` a run that can only meet the same guard again — and, for the budget,
+// a person who pressed Ctrl-C would be told the run is waiting for them when
+// it has in fact spent everything it may.
+func TestDispatcher_GuardsComeBeforeTheCancellationPause(t *testing.T) {
+	tests := []struct {
+		name    string
+		cfg     config.Config
+		seed    func(*state.Manifest)
+		wantErr error
+	}{
+		{
+			name:    "already over the budget ceiling",
+			cfg:     budgetCfg(5.00, 0),
+			seed:    func(m *state.Manifest) { m.Budget = state.Budget{LimitUSD: 5.00, SpentUSD: 7.50} },
+			wantErr: belay.ErrBudgetExceeded,
+		},
+		{
+			name: "already at graph.max_steps",
+			cfg: func() config.Config {
+				cfg := config.Default()
+				cfg.Graph.MaxSteps = 3
+				return cfg
+			}(),
+			seed:    func(m *state.Manifest) { m.Step = 3 },
+			wantErr: graph.ErrMaxSteps,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			h := newRun(t, tt.cfg, "stop when asked")
+			man := h.manifest(t)
+			tt.seed(&man)
+			if err := h.store.SaveManifest(man); err != nil {
+				t.Fatalf("SaveManifest() error = %v", err)
+			}
+			ctx, cancel := context.WithCancel(context.Background())
+			cancel()
+
+			plan := ok(graph.NodePlan, graph.End)
+			out, err := h.pausingDispatcher(t, true, plan).Run(ctx)
+			if !errors.Is(err, tt.wantErr) {
+				t.Fatalf("Run() error = %v, want one wrapping %v", err, tt.wantErr)
+			}
+			if errors.Is(err, graph.ErrInterrupted) {
+				t.Errorf("Run() error = %v: the guard's verdict was turned into a pause", err)
+			}
+			if out.Status != state.RunStatusAborted || out.ExitCode != graph.ExitAborted {
+				t.Errorf("Outcome = {%v, exit %d}, want {aborted, exit %d}", out.Status, out.ExitCode, graph.ExitAborted)
+			}
+			if plan.calls != 0 {
+				t.Errorf("plan ran %d times, want 0", plan.calls)
+			}
+			want := []string{"run_started", "run_aborted"}
+			if got := h.timeline(t); !equalStrings(got, want) {
+				t.Errorf("timeline =\n  %v\nwant\n  %v", got, want)
+			}
+		})
 	}
 }
 
