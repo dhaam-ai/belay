@@ -179,7 +179,7 @@ func createRun(plan *runPlan, spec runSpec) (*state.Store, error) {
 	}
 	now := time.Now().UTC()
 	manifest := state.NewManifest(now, spec.RunID, spec.Workspace, spec.Goal, plan.config)
-	if err := plan.prepareWorkTree(layout, &manifest); err != nil {
+	if err := plan.prepareWorkspace(layout, &manifest); err != nil {
 		return nil, err
 	}
 	if err := state.SaveManifest(layout.ManifestPath(), manifest); err != nil {
@@ -188,15 +188,15 @@ func createRun(plan *runPlan, spec runSpec) (*state.Store, error) {
 	return state.NewStore(layout), nil
 }
 
-// prepareWorkTree readies the tree a new run will change, and records in the
-// run's manifest whatever a later resume must know about that tree. createRun
+// prepareWorkspace readies the workspace a new run will change, and records in
+// the run's manifest whatever a later resume must know about it. createRun
 // calls it once, after the run's state is written and before its manifest is.
 //
-// Today it does nothing. Every run changes the workspace it was started in,
-// so there is no tree to make and nothing to record. The step exists so that
-// a run which works somewhere else, such as a worktree of its own, has one
-// place to make that tree before the manifest pins it, instead of a new write
-// wedged in among createRun's.
+// Today it does nothing. Every run changes the workspace it was started in, so
+// there is nothing to create and nothing to record. The step exists so that a
+// run which works somewhere else — an isolator's workspace, such as a git
+// worktree — has one place to create it before the manifest pins it, instead
+// of a new write wedged in among createRun's.
 //
 // What it grows to do must keep to the order around it. It runs after
 // state.json, so a failure here leaves a directory with no manifest, which
@@ -206,7 +206,7 @@ func createRun(plan *runPlan, spec runSpec) (*state.Store, error) {
 // safe to repeat when createRun is called again for the same run id.
 //
 //nolint:revive // layout and manifest are unused until a run can work outside its workspace; they are the step's contract.
-func (p *runPlan) prepareWorkTree(layout state.Layout, manifest *state.Manifest) error {
+func (p *runPlan) prepareWorkspace(layout state.Layout, manifest *state.Manifest) error {
 	return nil
 }
 
