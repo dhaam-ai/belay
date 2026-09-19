@@ -645,7 +645,7 @@ func TestDurability_PausedRunRefusesPlainRun_ThenAdvancesUnderResume(t *testing.
 	}
 }
 
-// TestDurability_CtrlCSuspendsTheRun_ResumeReRunsTheInterruptedNode is the
+// TestDurability_CtrlCPausesTheRun_ResumeReRunsTheInterruptedNode is the
 // promise `belay run --help` makes: press Ctrl-C whenever you like, and
 // `belay resume` picks the run up from the last completed step.
 //
@@ -654,7 +654,7 @@ func TestDurability_PausedRunRefusesPlainRun_ThenAdvancesUnderResume(t *testing.
 // attempt and pauses the run. A fresh dispatcher (process 2, `belay resume`)
 // then re-runs code, which never finished, and not plan, which did, and takes
 // the run to the end.
-func TestDurability_CtrlCSuspendsTheRun_ResumeReRunsTheInterruptedNode(t *testing.T) {
+func TestDurability_CtrlCPausesTheRun_ResumeReRunsTheInterruptedNode(t *testing.T) {
 	h := newDurabilityRun(t, config.Default(), "stop when I say so")
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()

@@ -1135,14 +1135,14 @@ func (n *interruptingNode) Run(ctx context.Context, rc *graph.RunContext) (graph
 	return Result{}, ctx.Err()
 }
 
-// TestDispatcher_CancellationEndsOrSuspendsTheRun is the Ctrl-C contract.
+// TestDispatcher_CancellationEndsOrPausesTheRun is the Ctrl-C contract.
 // By default a cancelled context ends the run as aborted, which Resume then
 // refuses; that row is a guard for every caller of the dispatcher that never
 // asked for anything else. With Options.PauseOnCancel the run is paused
 // instead: the interrupted attempt is closed as one that will be run again,
 // its Result is thrown away, and Resume re-runs the node at the next attempt
 // and carries on to the end.
-func TestDispatcher_CancellationEndsOrSuspendsTheRun(t *testing.T) {
+func TestDispatcher_CancellationEndsOrPausesTheRun(t *testing.T) {
 	tests := []struct {
 		name          string
 		pause         bool
@@ -1249,10 +1249,10 @@ func TestDispatcher_CancellationEndsOrSuspendsTheRun(t *testing.T) {
 	}
 }
 
-// TestDispatcher_SuspendOnCancelDoesNotExcuseATimeout: a node that outlives
+// TestDispatcher_PauseOnCancelDoesNotExcuseATimeout: a node that outlives
 // graph.node_timeout is stopped by a guard, not by the person running belay,
 // and PauseOnCancel leaves that verdict alone.
-func TestDispatcher_SuspendOnCancelDoesNotExcuseATimeout(t *testing.T) {
+func TestDispatcher_PauseOnCancelDoesNotExcuseATimeout(t *testing.T) {
 	cfg := config.Default()
 	cfg.Graph.NodeTimeout = config.NewDuration(20 * time.Millisecond)
 	h := newRun(t, cfg, "too slow")
@@ -1276,11 +1276,11 @@ func TestDispatcher_SuspendOnCancelDoesNotExcuseATimeout(t *testing.T) {
 	}
 }
 
-// TestDispatcher_SuspendOnCancelStartsNoNodeOnceCancelled: once the caller
+// TestDispatcher_PauseOnCancelStartsNoNodeOnceCancelled: once the caller
 // has cancelled, a pausing dispatcher starts nothing more. The run pauses
 // where it stands, with no attempt opened on a context that is already done
 // and none thrown away, and Resume starts that node at its first attempt.
-func TestDispatcher_SuspendOnCancelStartsNoNodeOnceCancelled(t *testing.T) {
+func TestDispatcher_PauseOnCancelStartsNoNodeOnceCancelled(t *testing.T) {
 	h := newRun(t, config.Default(), "stopped before it began")
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
