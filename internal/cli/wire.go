@@ -353,8 +353,11 @@ func (p *runPlan) resolveGate(execer *exec.Runner) {
 			p.warn("%s is not set, so the SonarQube scan will not be able to authenticate.", sonarTokenEnv)
 		}
 	case config.ReviewModeAI:
+		// docs/config.md describes the mode and this refusal; the two say
+		// the same thing. The reviewer exists (internal/nodes/aireview);
+		// what is missing is the wiring that would construct it here.
 		p.block(
-			"review.mode is \"ai\", and the agent-driven reviewer is not built yet.",
+			"review.mode is \"ai\": belay would ask SonarQube for its verdict through the Sonar MCP server, but that reviewer is not wired in yet.",
 			"set review.mode to \"lint\" or \"sonar\" in belay.yaml",
 		)
 	default:

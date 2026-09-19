@@ -164,10 +164,12 @@ func (c Config) reviewErrors() []error {
 	// review.ai.mcp.mode "cloud" and no url, and must stay valid.
 	//
 	// "cloud" needs the url as much as "server" does: the reviewer has no
-	// built-in endpoint for it (aireview.ErrMissingURL argues why), so
-	// without one it would fail at the review step, after the run had
-	// spent on everything before it. Refusing here fails before anything
-	// is spent.
+	// built-in endpoint for it (aireview.ErrMissingURL argues why). No run
+	// reaches that reviewer today, because belay run refuses review.mode
+	// "ai" before it starts: the reviewer is not wired in. The rule is
+	// here for the day it is, so that a missing url fails when the
+	// configuration loads rather than at the review step, after the run
+	// has spent on everything before it.
 	if c.Review.Mode == ReviewModeAI {
 		switch c.Review.AI.MCP.Mode {
 		case MCPModeServer:

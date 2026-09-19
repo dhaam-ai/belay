@@ -218,7 +218,13 @@ func TestResolveBlocksWhenNothingToTest(t *testing.T) {
 	}
 }
 
-func TestResolveBlocksOnUnbuiltReviewMode(t *testing.T) {
+// TestResolveBlocksOnUnwiredReviewMode pins the refusal of review.mode "ai"
+// to what docs/config.md says about it: the reviewer asks SonarQube through
+// the Sonar MCP server, and belay has not wired it in. The refusal once
+// called it "the agent-driven reviewer" and "not built yet", which is neither
+// what the mode is nor why belay refuses it: internal/nodes/aireview exists
+// and is tested, and nothing in belay run constructs it.
+func TestResolveBlocksOnUnwiredReviewMode(t *testing.T) {
 	ws := goWorkspace(t)
 	// The url is there because review.mode "ai" with the default mcp mode,
 	// "cloud", requires one to load at all; this test is about the refusal
@@ -229,8 +235,16 @@ func TestResolveBlocksOnUnbuiltReviewMode(t *testing.T) {
 	if err != nil {
 		t.Fatalf("resolve: %v", err)
 	}
-	if !strings.Contains(blockerText(plan), "not built yet") {
-		t.Errorf("review.mode ai should be refused in plain words; got:\n%s", blockerText(plan))
+	got := blockerText(plan)
+	for _, want := range []string{"SonarQube", "Sonar MCP server", "not wired in yet", `set review.mode to "lint" or "sonar"`} {
+		if !strings.Contains(got, want) {
+			t.Errorf("the refusal of review.mode ai does not say %q; got:\n%s", want, got)
+		}
+	}
+	for _, wrong := range []string{"agent-driven", "not built"} {
+		if strings.Contains(got, wrong) {
+			t.Errorf("the refusal of review.mode ai says %q, which is not why belay refuses it; got:\n%s", wrong, got)
+		}
 	}
 }
 

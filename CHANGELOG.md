@@ -103,11 +103,15 @@ that only `pkg/belay` carries a compatibility promise. Everything under
 - **`review.ai.mcp.url` is now required for `review.ai.mcp.mode: cloud`
   when `review.mode` is `ai`.** `cloud`, the default mode, has no built-in
   address, so the AI reviewer needs the URL as much as `server` does, but
-  the loader required it only for `server`. A configuration without it
-  loaded cleanly and would have failed at the review step, after the run
-  had spent on everything before it. It is now refused when belay loads
-  the configuration. Under any other `review.mode` the URL may still be
-  left empty, so the default configuration is unaffected.
+  the loader required it only for `server`. No run was at risk: `belay run`
+  and `belay resume` refuse `review.mode: ai` before they start, because
+  that reviewer is not wired in yet. What changes is where such a
+  configuration stops: it now fails when belay loads it, with an error
+  naming `review.ai.mcp.url`, instead of loading and meeting that refusal.
+  The refusal itself now says what the mode is, as docs/config.md does; it
+  used to call the reviewer "agent-driven" and "not built yet". Under any
+  other `review.mode` the URL may still be left empty, so the default
+  configuration is unaffected.
 - **`--config` help no longer says the file replaces belay.yaml.** It said
   belay reads the file "instead of" the belay.yaml it would find, but belay
   reads your user config and the workspace's belay.yaml as well, and merges

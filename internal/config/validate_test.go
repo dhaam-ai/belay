@@ -233,8 +233,9 @@ func TestValidateRules(t *testing.T) {
 		{
 			// cloud is the default mode, and the reviewer dials
 			// review.ai.mcp.url for it exactly as for server: without one
-			// it fails with aireview.ErrMissingURL at the review step,
-			// after the run has spent on everything before it.
+			// it fails with aireview.ErrMissingURL. belay run does not
+			// wire that reviewer in yet, so the loader is where the url
+			// is required, ready for when it does.
 			name: "ai review against sonarqube cloud without a url",
 			mutate: func(c *Config) {
 				c.Review.Mode = ReviewModeAI
