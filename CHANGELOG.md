@@ -25,6 +25,18 @@ that only `pkg/belay` carries a compatibility promise. Everything under
 
 ### Fixed
 
+- **A run a newer belay wrote now says it needs a newer belay.** A run
+  whose manifest.json requires something this belay does not have, or is
+  at a schema version above the one it reads, is not damaged, but
+  `belay runs` listed it as "manifest.json is damaged" or "unsupported
+  manifest version", and `belay resume` acted as if it were not there:
+  named, it said there was no such run, and left to choose, it continued
+  an older run instead. `belay runs` now lists it as "needs a newer belay",
+  with what it requires. `belay resume` refuses it with an error that says
+  what it requires and to upgrade belay, and while such a run is in the
+  workspace, `belay resume` with no run id will not choose a run for you;
+  name the run instead. A version older than any belay reads keeps its
+  "unsupported" wording.
 - **Files changed in the fix loop are now recorded with the rest of the
   run's change.** belay keeps a list of the files a run changed, taken from
   the files the agent reports after writing the code. When a test or the

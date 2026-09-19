@@ -34,7 +34,7 @@ manifest.json and state.json move to schema version 2, and both carry a `require
 - **Each file declares its own requirements.** `Store.ApplyPatch` reads and saves state.json without opening manifest.json, so a field in either file must be listed in that file's own `requires`. A field in state.json whose capability appears only in manifest.json is unprotected.
 
 ### Follow-ups
-- Before the first slice sets `requires`, teach the CLI to say "needs a newer belay" for a `*CapabilityError`. Today `belay runs` reports such a run as "manifest.json is damaged", and `belay resume` skips it as if it did not exist.
+- Before the first slice sets `requires`, teach the CLI to say "needs a newer belay" for a `*CapabilityError`. When this was written, `belay runs` reported such a run as "manifest.json is damaged", and `belay resume` skipped it as if it did not exist. Done: `belay runs` lists such a run, and one at a newer schema version, as "needs a newer belay", and `belay resume` refuses it by name with the error, which says to upgrade.
 - The first slice that adds a capability also adds a test that a run using its field lists the capability, so a missing `requires` entry fails a test instead of relying on review.
 
 ## Alternatives Considered
