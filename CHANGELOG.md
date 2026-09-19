@@ -25,6 +25,14 @@ that only `pkg/belay` carries a compatibility promise. Everything under
 
 ### Fixed
 
+- **`review.ai.mcp.url` is now required for `review.ai.mcp.mode: cloud`
+  when `review.mode` is `ai`.** `cloud`, the default mode, has no built-in
+  address, so the AI reviewer needs the URL as much as `server` does, but
+  the loader required it only for `server`. A configuration without it
+  loaded cleanly and would have failed at the review step, after the run
+  had spent on everything before it. It is now refused when belay loads
+  the configuration. Under any other `review.mode` the URL may still be
+  left empty, so the default configuration is unaffected.
 - **`--config` help no longer says the file replaces belay.yaml.** It said
   belay reads the file "instead of" the belay.yaml it would find, but belay
   reads your user config and the workspace's belay.yaml as well, and merges

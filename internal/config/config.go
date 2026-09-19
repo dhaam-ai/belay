@@ -274,7 +274,8 @@ type AI struct {
 type MCP struct {
 	// Mode selects the transport.
 	Mode MCPMode `yaml:"mode"`
-	// URL addresses an already-running server. Required by MCPModeServer.
+	// URL addresses the server over HTTP. MCPModeCloud and MCPModeServer
+	// require it while Review.Mode is ReviewModeAI.
 	URL string `yaml:"url"`
 	// Image is the server container image used by MCPModeDocker.
 	Image string `yaml:"image"`

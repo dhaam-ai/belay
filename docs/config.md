@@ -249,7 +249,7 @@ How to reach the MCP server:
 **Type**: String  
 **Default**: `""` (empty)
 
-The MCP endpoint's URL for the `"cloud"` and `"server"` modes; `"docker"` ignores it. The loader requires it for `"server"`. `"cloud"` needs it too, but without it the reviewer fails only when it runs.
+The MCP endpoint's URL for the `"cloud"` and `"server"` modes; `"docker"` ignores it. While `review.mode` is `"ai"`, the loader requires it for both: belay has no built-in address for SonarQube Cloud's endpoint, so `"cloud"` needs it as much as `"server"` does. Under any other `review.mode` it may stay empty.
 
 ##### `review.ai.mcp.image`
 

@@ -220,7 +220,10 @@ func TestResolveBlocksWhenNothingToTest(t *testing.T) {
 
 func TestResolveBlocksOnUnbuiltReviewMode(t *testing.T) {
 	ws := goWorkspace(t)
-	writeConfig(t, ws, "version: 1\nreview:\n  mode: \"ai\"\n")
+	// The url is there because review.mode "ai" with the default mcp mode,
+	// "cloud", requires one to load at all; this test is about the refusal
+	// that follows loading.
+	writeConfig(t, ws, "version: 1\nreview:\n  mode: \"ai\"\n  ai:\n    mcp:\n      url: \"https://mcp.example.test\"\n")
 
 	plan, err := resolve(resolveRequest{workspace: ws, logger: quietLogger()})
 	if err != nil {
