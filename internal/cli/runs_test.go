@@ -168,6 +168,18 @@ func TestRunsScanListsDamagedRunsAsUnreadable(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read fixture: %v", err)
 	}
+	// requiring returns a manifest that is healthy in every way except that
+	// it requires capabilities this belay does not know, as a newer belay
+	// would write it (ADR-0011).
+	requiring := func(id string, capabilities ...string) []byte {
+		m := runsManifest(id, state.RunStatusPaused, runsBase)
+		m.Requires = capabilities
+		raw, err := json.Marshal(m)
+		if err != nil {
+			t.Fatalf("marshal manifest: %v", err)
+		}
+		return raw
+	}
 
 	tests := []struct {
 		name       string
@@ -200,10 +212,34 @@ func TestRunsScanListsDamagedRunsAsUnreadable(t *testing.T) {
 			wantReason: "manifest.json is damaged",
 		},
 		{
-			name:       "unknown schema version",
+			// A newer belay wrote it. Nothing is damaged, and the remedy
+			// is to run that belay, so the reason says so.
+			name:       "schema version from a newer belay",
 			id:         "run-future",
 			manifest:   []byte(`{"schema_version": 99, "run_id": "run-future"}`),
-			wantReason: "unsupported manifest version 99",
+			wantReason: "needs a newer belay",
+		},
+		{
+			// Older than any version this belay migrates: no belay it can
+			// point to wrote it, so the reason stays what it was.
+			name:       "schema version older than any this belay reads",
+			id:         "run-ancient",
+			manifest:   []byte(`{"schema_version": 0, "run_id": "run-ancient"}`),
+			wantReason: "unsupported manifest version 0",
+		},
+		{
+			name:       "requires a capability this belay lacks",
+			id:         "run-branch",
+			manifest:   requiring("run-branch", "output.branch"),
+			wantReason: "needs a newer belay (output.branch)",
+		},
+		{
+			// Capability names come from the file, so they are cleaned
+			// like every other string the listing prints.
+			name:       "requires several capabilities, one with an escape in its name",
+			id:         "run-several",
+			manifest:   requiring("run-several", "plan.regenerate", "output.branch", "evil\x1b[2Jname"),
+			wantReason: "needs a newer belay (evil[2Jname, output.branch, plan.regenerate)",
 		},
 		{
 			name:       "directory name is not a usable run id",
