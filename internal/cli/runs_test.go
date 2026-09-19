@@ -228,18 +228,20 @@ func TestRunsScanListsDamagedRunsAsUnreadable(t *testing.T) {
 			wantReason: "unsupported manifest version 0",
 		},
 		{
+			// A name no belay has: "output.branch" stood in for one
+			// until this binary gained it.
 			name:       "requires a capability this belay lacks",
 			id:         "run-branch",
-			manifest:   requiring("run-branch", "output.branch"),
-			wantReason: "needs a newer belay (output.branch)",
+			manifest:   requiring("run-branch", "from.the.future"),
+			wantReason: "needs a newer belay (from.the.future)",
 		},
 		{
 			// Capability names come from the file, so they are cleaned
 			// like every other string the listing prints.
 			name:       "requires several capabilities, one with an escape in its name",
 			id:         "run-several",
-			manifest:   requiring("run-several", "plan.regenerate", "output.branch", "evil\x1b[2Jname"),
-			wantReason: "needs a newer belay (evil[2Jname, output.branch, plan.regenerate)",
+			manifest:   requiring("run-several", "plan.regenerate", "from.the.future", "evil\x1b[2Jname"),
+			wantReason: "needs a newer belay (evil[2Jname, from.the.future, plan.regenerate)",
 		},
 		{
 			name:       "directory name is not a usable run id",

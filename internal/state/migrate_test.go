@@ -203,12 +203,81 @@ func TestLoad_MigratesAVersion1Run(t *testing.T) {
 					if key == "schema_version" {
 						continue
 					}
-					if diff := cmp.Diff(want, got[key]); diff != "" {
+					if diff := cmp.Diff(want, withoutAddedEmptyKeys(want, got[key])); diff != "" {
 						t.Errorf("%s did not survive the migration (-version 1 +resumed):\n%s", key, diff)
 					}
 				}
 			})
 		}
+	}
+}
+
+// withoutAddedEmptyKeys returns got — a field of a resumed document —
+// with every object key absent from want, the same field as the
+// version-1 document wrote it, removed, provided that key carries an
+// empty value.
+//
+// It is what keeps "every field must come through unchanged" meaning what
+// it says once the current schema has fields version 1 never had. A
+// candidate gained an "ephemeral" key, and a later slice will add more;
+// each one appears in a resumed document at its zero value because the
+// struct has the field, not because the migration decided anything. A key
+// carrying content is another matter entirely — a migration inventing a
+// value is rewriting a run nobody asked it to rewrite — so a non-empty
+// addition is left in place and fails the comparison.
+func withoutAddedEmptyKeys(want, got any) any {
+	wantObj, wantOK := want.(map[string]any)
+	gotObj, gotOK := got.(map[string]any)
+	if wantOK && gotOK {
+		out := make(map[string]any, len(gotObj))
+		for key, value := range gotObj {
+			inV1, known := wantObj[key]
+			switch {
+			case known:
+				out[key] = withoutAddedEmptyKeys(inV1, value)
+			case !emptyJSON(value):
+				out[key] = value
+			}
+		}
+		return out
+	}
+
+	wantList, wantOK := want.([]any)
+	gotList, gotOK := got.([]any)
+	if wantOK && gotOK && len(wantList) == len(gotList) {
+		out := make([]any, len(gotList))
+		for i := range gotList {
+			out[i] = withoutAddedEmptyKeys(wantList[i], gotList[i])
+		}
+		return out
+	}
+
+	return got
+}
+
+// emptyJSON reports whether v is the zero value of whatever JSON type it
+// decoded as.
+func emptyJSON(v any) bool {
+	switch value := v.(type) {
+	case nil:
+		return true
+	case bool:
+		return !value
+	case float64:
+		return value == 0
+	case string:
+		return value == ""
+	case []any:
+		return len(value) == 0
+	case map[string]any:
+		for _, nested := range value {
+			if !emptyJSON(nested) {
+				return false
+			}
+		}
+		return true
+	default:
+		return false
 	}
 }
 

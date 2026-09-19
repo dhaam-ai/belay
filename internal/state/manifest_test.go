@@ -484,10 +484,116 @@ func TestManifest_JSONKeySetMatchesSpec(t *testing.T) {
 	want := []string{
 		"schema_version", "requires", "run_id", "created_at", "updated_at", "workspace", "goal",
 		"status", "current_node", "step", "config_digest", "config_snapshot", "budget", "agent",
+		"output",
 	}
 	assertExactJSONKeys(t, m, want)
 	assertExactJSONKeys(t, m.Budget, []string{"limit_usd", "spent_usd", "tokens_in", "tokens_out", "estimated"})
 	assertExactJSONKeys(t, m.Agent, []string{"backend", "model", "mode"})
+	assertExactJSONKeys(t, m.Output, []string{
+		"mode", "repo", "branch", "base", "base_ref", "work_tree", "prefix", "pull_request",
+	})
+}
+
+// TestOutput_Branched is the one question every reader of an Output asks,
+// and the zero value is the case that matters: a manifest written before
+// this field existed decodes with Mode "", and must keep its in-place
+// meaning. Reading the question as "not in_place" would send every such run
+// into a promote node it was never started with.
+func TestOutput_Branched(t *testing.T) {
+	for _, tt := range []struct {
+		name string
+		out  Output
+		want bool
+	}{
+		{name: "the zero Output is in place", out: Output{}, want: false},
+		{name: "in_place", out: Output{Mode: OutputInPlace}, want: false},
+		{name: "branch", out: Output{Mode: OutputBranch, Branch: "belay/run-1"}, want: true},
+		{name: "a mode this belay does not know is not a branch", out: Output{Mode: "container"}, want: false},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := tt.out.Branched(); got != tt.want {
+				t.Errorf("Output{Mode: %q}.Branched() = %v, want %v", tt.out.Mode, got, tt.want)
+			}
+		})
+	}
+}
+
+// TestManifest_SetOutputRecordsTheCapabilityABranchRunNeeds is ADR-0011
+// applied to the first control field belay has: a run whose output is a
+// branch does something entirely different from one editing the checkout,
+// so a belay that would drop the field must refuse the run rather than
+// resume it in place. Only the document whose run depends on the field
+// declares the capability, so an in-place run still requires nothing.
+func TestManifest_SetOutputRecordsTheCapabilityABranchRunNeeds(t *testing.T) {
+	for _, tt := range []struct {
+		name string
+		out  Output
+		want []string
+	}{
+		{
+			name: "a branch run requires the capability",
+			out:  Output{Mode: OutputBranch, Branch: "belay/run-1", Base: "abc123"},
+			want: []string{CapabilityOutputBranch},
+		},
+		{name: "an in-place run requires nothing", out: Output{Mode: OutputInPlace}, want: []string{}},
+		{name: "the zero Output requires nothing", out: Output{}, want: []string{}},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			m := NewManifest(time.Now(), "run-1", "/work", "goal", config.Default())
+			m.SetOutput(tt.out)
+
+			if diff := cmp.Diff(tt.out, m.Output); diff != "" {
+				t.Errorf("Output mismatch (-want +got):\n%s", diff)
+			}
+			if diff := cmp.Diff(tt.want, m.Requires); diff != "" {
+				t.Errorf("Requires mismatch (-want +got):\n%s", diff)
+			}
+
+			// Pinning the same output twice must not accumulate: a
+			// manifest is rewritten after every node, and a requires
+			// list that grew each time would eventually stop matching
+			// the golden and confuse anyone reading it.
+			m.SetOutput(tt.out)
+			if diff := cmp.Diff(tt.want, m.Requires); diff != "" {
+				t.Errorf("Requires after a second SetOutput (-want +got):\n%s", diff)
+			}
+		})
+	}
+}
+
+// TestManifest_SetOutputKeepsCapabilitiesSortedAndUnique guards the list's
+// own contract while a run acquires more than one capability, which the
+// slices after this one will.
+func TestManifest_SetOutputKeepsCapabilitiesSortedAndUnique(t *testing.T) {
+	m := NewManifest(time.Now(), "run-1", "/work", "goal", config.Default())
+	m.Requires = []string{"policy", "baseline", "policy"}
+	m.SetOutput(Output{Mode: OutputBranch, Branch: "belay/run-1"})
+
+	want := []string{"baseline", CapabilityOutputBranch, "policy"}
+	if diff := cmp.Diff(want, m.Requires); diff != "" {
+		t.Errorf("Requires mismatch (-want +got):\n%s", diff)
+	}
+}
+
+// TestManifestWithoutOutputDecodesAsInPlace reads a manifest.json captured
+// from NewManifest before the output block existed. Every run started by a
+// released belay looks like this, and each one must keep editing the
+// workspace in place after an upgrade.
+func TestManifestWithoutOutputDecodesAsInPlace(t *testing.T) {
+	raw, err := os.ReadFile(filepath.Join("testdata", "manifest-before-output.json")) //nolint:gosec // fixed testdata path
+	if err != nil {
+		t.Fatalf("read fixture: %v", err)
+	}
+	m, err := decodeManifest(raw)
+	if err != nil {
+		t.Fatalf("decodeManifest: %v", err)
+	}
+	if m.Output.Branched() {
+		t.Errorf("a manifest with no output block decoded as %+v, want an in-place run", m.Output)
+	}
+	if diff := cmp.Diff(Output{}, m.Output); diff != "" {
+		t.Errorf("Output mismatch (-want +got):\n%s", diff)
+	}
 }
 
 func TestManifestGolden(t *testing.T) {

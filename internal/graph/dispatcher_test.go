@@ -1504,7 +1504,9 @@ func TestDispatcher_RefusesARunItMayNotReadBeforeWritingToIt(t *testing.T) {
 				h.seedJournal(t, tt.seed...)
 			}
 			editRunDocument(t, h.layout.StatePath(), func(doc map[string]json.RawMessage) {
-				doc["requires"] = json.RawMessage(`["output.branch"]`)
+				// A name no belay has: "output.branch" stood in for one
+				// until this binary gained it.
+				doc["requires"] = json.RawMessage(`["from.the.future"]`)
 			})
 
 			plan := ok(graph.NodePlan, graph.End)

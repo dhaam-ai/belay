@@ -50,5 +50,15 @@
     "backend": "claude-code",
     "model": "sonnet",
     "mode": "live"
+  },
+  "output": {
+    "mode": "",
+    "repo": "",
+    "branch": "",
+    "base": "",
+    "base_ref": "",
+    "work_tree": "",
+    "prefix": "",
+    "pull_request": false
   }
 }

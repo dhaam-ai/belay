@@ -45,11 +45,26 @@ func (e *CapabilityError) Unwrap() error { return ErrUnknownCapability }
 
 // knownCapabilities is every capability this binary honours.
 //
-// It is empty because no field belay writes today changes what a run does
-// in a way an older binary could get wrong. The change that adds such a
-// field adds its name here, and sets it in requires on every document that
-// carries the field.
-var knownCapabilities = map[string]bool{}
+// A change that adds a control field — one whose loss changes what a run
+// does — adds its name here, and sets it in requires on every document
+// whose run depends on the field.
+var knownCapabilities = map[string]bool{
+	CapabilityOutputBranch: true,
+}
+
+// addCapability returns requires with name in it, sorted and without
+// duplicates.
+//
+// Sorted and deduplicated because the list is rewritten every time its
+// document is saved: a list that grew or reordered on each save would
+// make every manifest.json differ from the last for no reason anyone
+// reading the run could explain.
+func addCapability(requires []string, name string) []string {
+	out := slices.Clone(requires)
+	out = append(out, name)
+	slices.Sort(out)
+	return slices.Compact(out)
+}
 
 // checkRequires reads the requires list of raw, a document named file that
 // is already at its current schema version, and returns a

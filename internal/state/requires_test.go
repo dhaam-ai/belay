@@ -153,6 +153,20 @@ func TestLoad_AcceptsADocumentThatRequiresNothing(t *testing.T) {
 	}
 }
 
+// TestLoad_AcceptsARunThatRequiresBranchOutput is the other half of the
+// refusal above: the capability this belay does have must load, or every
+// branch-mode run it starts would be one it then refuses to resume.
+func TestLoad_AcceptsARunThatRequiresBranchOutput(t *testing.T) {
+	for _, d := range requiresDocuments() {
+		t.Run(d.file, func(t *testing.T) {
+			path := writeRequiresDocument(t, d.file, d.doc(`,"requires":["`+CapabilityOutputBranch+`"]`))
+			if err := d.load(path); err != nil {
+				t.Errorf("load a %s requiring %q: %v", d.file, CapabilityOutputBranch, err)
+			}
+		})
+	}
+}
+
 func TestUnknownCapabilities(t *testing.T) {
 	known := map[string]bool{"output.branch": true}
 	tests := []struct {

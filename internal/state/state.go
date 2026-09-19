@@ -186,6 +186,11 @@ type State struct {
 	// Winner is the ID of the fanout candidate selected to proceed, or
 	// empty if fanout has not run or has not yet selected one.
 	Winner string `json:"winner"`
+	// Promotion is what the promote node put on the run's branch, or the
+	// zero Promotion for a run that has not promoted anything. It is a
+	// record, not control state: promote asks the repository what it
+	// already holds rather than reading this back.
+	Promotion Promotion `json:"promotion"`
 	// History is the ordered log of completed node executions. Empty,
 	// never nil, for a run that has not completed a node yet.
 	History []HistoryEntry `json:"history"`
@@ -370,6 +375,40 @@ type Candidate struct {
 	// IssueCount is the candidate's review issue count, at or above
 	// whatever severity the run's selection strategy cares about.
 	IssueCount int `json:"issue_count"`
+	// Ephemeral mirrors the belay.Workspace.Ephemeral of the workspace
+	// the isolator created for this candidate, so whatever cleans up
+	// afterwards knows which directories belay may destroy.
+	//
+	// False is the safe value, and it is deliberately the zero one: a
+	// candidate recorded before this field existed, or one an isolator
+	// handed back as the source tree unchanged ("no isolation"), reads as
+	// not ephemeral, and nothing destroys a tree it cannot prove belay
+	// made. The cost of getting it wrong in that direction is a directory
+	// left behind; in the other, it is the user's own checkout.
+	Ephemeral bool `json:"ephemeral"`
+}
+
+// Promotion is what a run's promote node put on its branch: the record a
+// person reads afterwards to see what the run produced, and what `belay
+// runs` and a pull request are built from.
+//
+// It is written by the promote node's Patch and never read back by it.
+// The node works out what to do by asking the repository what it already
+// contains, so a Promotion this binary wrote is a report, and losing it
+// costs a reader information rather than changing what a re-run does.
+type Promotion struct {
+	// Branch is the branch the change was promoted onto.
+	Branch string `json:"branch"`
+	// Base is the commit the branch started from, so Base..Commit is the
+	// run's whole contribution.
+	Base string `json:"base"`
+	// Commit is the branch's tip after the promotion.
+	Commit string `json:"commit"`
+	// Candidate is the ID of the fanout candidate that was merged, or
+	// empty when the run promoted its own work.
+	Candidate string `json:"candidate"`
+	// Files is how many files differ between Base and Commit.
+	Files int `json:"files"`
 }
 
 // HistoryEntry records one completed node execution on the blackboard.

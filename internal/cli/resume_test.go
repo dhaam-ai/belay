@@ -242,10 +242,12 @@ func TestResumeRefusesARunThatNeedsANewerBelay(t *testing.T) {
 		wantAs       func(error) bool
 	}{
 		{
+			// A name no belay has: "output.branch" stood in for one
+			// until this binary gained it.
 			name:         "named, requiring a capability this belay lacks",
-			capabilities: []string{"output.branch"},
+			capabilities: []string{"from.the.future"},
 			named:        true,
-			want:         []string{"cannot continue run " + newer, "needs a newer belay", `"output.branch"`, "upgrade belay"},
+			want:         []string{"cannot continue run " + newer, "needs a newer belay", `"from.the.future"`, "upgrade belay"},
 			wantAs:       isCapabilityError,
 		},
 		{
@@ -256,8 +258,8 @@ func TestResumeRefusesARunThatNeedsANewerBelay(t *testing.T) {
 		},
 		{
 			name:         "not named, requiring a capability this belay lacks",
-			capabilities: []string{"output.branch"},
-			want:         []string{newer, "needs a newer belay", `"output.branch"`, "upgrade belay", "belay resume <run-id>"},
+			capabilities: []string{"from.the.future"},
+			want:         []string{newer, "needs a newer belay", `"from.the.future"`, "upgrade belay", "belay resume <run-id>"},
 			wantAs:       isCapabilityError,
 		},
 		{
@@ -388,7 +390,7 @@ func TestResumeListsAnUnreadableRunForWhatItIs(t *testing.T) {
 	)
 	ws := goWorkspace(t)
 	seedManifest(t, ws, "20260905T120000Z-aaaaaaaaaaaa", state.RunStatusPaused, graph.NodeApprove, "waiting", base)
-	seedNewerRun(t, ws, newer, base.Add(time.Hour), "output.branch")
+	seedNewerRun(t, ws, newer, base.Add(time.Hour), "from.the.future")
 	dir := filepath.Join(ws, ".belay", "runs", damaged)
 	if err := os.MkdirAll(dir, 0o750); err != nil {
 		t.Fatalf("mkdir: %v", err)

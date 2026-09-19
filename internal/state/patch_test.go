@@ -79,6 +79,12 @@ func TestPatch_Apply_Idempotent(t *testing.T) {
 		{"candidates", Patch{Candidates: &candidates}},
 		{"winner", Patch{Winner: &winner}},
 		{
+			"promotion",
+			Patch{Promotion: &Promotion{
+				Branch: "belay/run-1", Base: "abc123", Commit: "def456", Candidate: "c1", Files: 3,
+			}},
+		},
+		{
 			"history append",
 			Patch{History: &HistoryEntry{Seq: 7, Node: "code", Attempt: 1, Status: "ok", Next: "test", Time: time.Unix(0, 0).UTC()}},
 		},
@@ -253,6 +259,34 @@ func TestPatch_Apply_CandidatesPreservesNonNilEmpty(t *testing.T) {
 	}
 	if st.Candidates == nil {
 		t.Error("Patch.Apply turned a non-nil empty Candidates slice into nil")
+	}
+}
+
+// TestPatch_Apply_PromotionIsAnAbsoluteSet is the promote node's half of
+// the crash contract. The node computes what the repository ended up
+// holding rather than what its attempt did, so a re-run after a crash
+// builds the same Promotion; applying it twice must therefore land on the
+// same State, and a nil Promotion must leave a recorded one alone rather
+// than clearing it.
+func TestPatch_Apply_PromotionIsAnAbsoluteSet(t *testing.T) {
+	promoted := Promotion{Branch: "belay/run-1", Base: "abc123", Commit: "def456", Candidate: "c2", Files: 4}
+
+	st := baseTestState()
+	if err := (Patch{Promotion: &promoted}).Apply(&st); err != nil {
+		t.Fatalf("first Apply: %v", err)
+	}
+	if diff := cmp.Diff(promoted, st.Promotion); diff != "" {
+		t.Fatalf("Promotion mismatch after the first Apply (-want +got):\n%s", diff)
+	}
+
+	// A second, different node's patch that says nothing about the
+	// promotion must not erase it.
+	goal := "unrelated"
+	if err := (Patch{Goal: &goal}).Apply(&st); err != nil {
+		t.Fatalf("Apply with a nil Promotion: %v", err)
+	}
+	if diff := cmp.Diff(promoted, st.Promotion); diff != "" {
+		t.Errorf("a nil Patch.Promotion changed State.Promotion (-want +got):\n%s", diff)
 	}
 }
 
