@@ -338,3 +338,63 @@ func TestRebuild(t *testing.T) {
 		})
 	}
 }
+
+// TestLedger_Largest: the most any one Record call has cost, in each
+// dimension. A dispatcher charges it for an attempt a crash left open, whose
+// real cost nobody lived to report, so it must see every call the run made,
+// including those a resume rebuilt from the journal, and nothing that was
+// not a call.
+func TestLedger_Largest(t *testing.T) {
+	tests := []struct {
+		name   string
+		ledger func() *Ledger
+		want   belay.Usage
+	}{
+		{
+			name:   "a ledger that recorded nothing has no largest call",
+			ledger: New,
+			want:   belay.Usage{},
+		},
+		{
+			name: "each dimension is the largest any single call recorded",
+			ledger: func() *Ledger {
+				l := New()
+				l.Record("plan", belay.Usage{InputTokens: 900, OutputTokens: 10, USD: 0.50})
+				l.Record("code", belay.Usage{InputTokens: 100, OutputTokens: 700, USD: 2.00})
+				l.Record("approve", belay.Usage{})
+				return l
+			},
+			want: belay.Usage{InputTokens: 900, OutputTokens: 700, USD: 2.00},
+		},
+		{
+			// Two calls of one node are two calls, not one bigger one:
+			// a charge for one lost attempt must not grow with the number
+			// of attempts that came before it.
+			name: "calls are not summed per node",
+			ledger: func() *Ledger {
+				l := New()
+				l.Record("fix", belay.Usage{InputTokens: 10, OutputTokens: 10, USD: 1.00})
+				l.Record("fix", belay.Usage{InputTokens: 10, OutputTokens: 10, USD: 1.00})
+				return l
+			},
+			want: belay.Usage{InputTokens: 10, OutputTokens: 10, USD: 1.00},
+		},
+		{
+			name: "a rebuilt ledger knows the calls the journal recorded, and not the floor",
+			ledger: func() *Ledger {
+				return Rebuild(
+					[]NodeUsage{{Node: "code", Usage: belay.Usage{InputTokens: 50, OutputTokens: 60, USD: 1.25, Estimated: true}}},
+					Snapshot{SpentUSD: 40, TokensIn: 5000, TokensOut: 5000},
+				)
+			},
+			want: belay.Usage{InputTokens: 50, OutputTokens: 60, USD: 1.25, Estimated: true},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if diff := cmp.Diff(tt.want, tt.ledger().Largest()); diff != "" {
+				t.Errorf("Largest() mismatch (-want +got):\n%s", diff)
+			}
+		})
+	}
+}

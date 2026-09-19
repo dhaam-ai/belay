@@ -389,7 +389,7 @@ func (d *Dispatcher) dispatch(ctx context.Context, resuming bool) (Outcome, erro
 	// record is appended. start is computed above, from the records as the
 	// crash left them, because it is the only thing that still knows which
 	// attempt died.
-	healed, err := d.heal(jrnl, read.Records, &start)
+	healed, err := d.heal(jrnl, read.Records, &start, ledger)
 	if err != nil {
 		return Outcome{ExitCode: ExitFailed}, err
 	}
@@ -418,7 +418,8 @@ func (d *Dispatcher) dispatch(ctx context.Context, resuming bool) (Outcome, erro
 //     retrying without closing the dead attempt would brick the run's journal
 //     on its first crash. heal closes it as aborted, naming the same node in
 //     Next so that a crash during recovery itself still resolves back here,
-//     at the attempt after the one it closed (journal.Record.Interrupted).
+//     at the attempt after the one it closed (journal.Record.Interrupted),
+//     and charges ledger for it: see interruptedCharge.
 //
 //   - A terminal node_finished with no run-level marker after it: the process
 //     died between ending a node and recording that the run ended. Left alone,
@@ -429,7 +430,9 @@ func (d *Dispatcher) dispatch(ctx context.Context, resuming bool) (Outcome, erro
 // start is updated in place. It is never re-derived from the healed records:
 // the pre-heal decision is what still carries the dead attempt's number, and
 // the attempt after a crash must be that number plus one.
-func (d *Dispatcher) heal(jrnl *journal.Journal, records []journal.Record, start *journal.Result) (bool, error) {
+func (d *Dispatcher) heal(
+	jrnl *journal.Journal, records []journal.Record, start *journal.Result, ledger *budget.Ledger,
+) (bool, error) {
 	if len(records) == 0 {
 		return false, nil
 	}
@@ -437,13 +440,19 @@ func (d *Dispatcher) heal(jrnl *journal.Journal, records []journal.Record, start
 
 	switch last.Event {
 	case journal.EventNodeStarted:
-		note := fmt.Sprintf("interrupted: no completion record for attempt %d (the process died inside this node); re-running", last.Attempt)
-		if _, err := jrnl.Append(interruptedAttempt(last.Node, last.Attempt, 0, belay.Usage{}, note)); err != nil {
+		charge := interruptedCharge(ledger)
+		note := fmt.Sprintf("interrupted: no completion record for attempt %d (the process died inside this node); "+
+			"charged $%.2f, estimated, since what it spent is unknown; re-running", last.Attempt, charge.USD)
+		// Journal first, then Record: the record is what a later resume
+		// rebuilds the ledger from, so a crash between the two costs this
+		// dispatch the charge but never the next one.
+		if _, err := jrnl.Append(interruptedAttempt(last.Node, last.Attempt, 0, charge, note)); err != nil {
 			return false, fmt.Errorf("graph: close interrupted %q: %w", last.Node, err)
 		}
+		ledger.Record(last.Node, charge)
 		d.logger.Warn("belay/graph: recovered an interrupted node",
 			slog.String("node", last.Node), slog.Int("crashed_attempt", last.Attempt),
-			slog.Int("next_attempt", start.Attempt))
+			slog.Int("next_attempt", start.Attempt), slog.Float64("charged_usd", charge.USD))
 		return true, nil
 
 	case journal.EventNodeFinished:
@@ -472,15 +481,49 @@ func (d *Dispatcher) heal(jrnl *journal.Journal, records []journal.Record, start
 // here keeps them the one shape that ResolveStart resumes at the next attempt
 // and owedRunMarker owes nothing for.
 //
-// usage is what the attempt is charged. pauseInsideNode passes the node's own
-// report, because a node cut short by a cancellation has still spent whatever
-// its backend said it spent.
+// usage is what the attempt is charged, and the two callers know different
+// things. pauseInsideNode passes the node's own report, because a node cut
+// short by a cancellation has still spent whatever its backend said it spent.
+// heal has no report at all, because the process that could have made one
+// died, and passes interruptedCharge.
 func interruptedAttempt(node string, attempt int, elapsed time.Duration, usage belay.Usage, note string) journal.Record {
 	return journal.Record{
 		Event: journal.EventNodeFinished, Node: node, Attempt: attempt,
 		DurationMS: elapsed.Milliseconds(), Status: journal.StatusAborted, Next: node,
 		Usage: journalUsage(usage), Note: note,
 	}
+}
+
+// interruptedCharge is what heal charges an attempt a crash left open: the
+// most any single node execution of this run has recorded, in each dimension
+// (budget.Ledger.Largest), marked as estimated. ADR-0007 records the decision.
+//
+// The attempt's real cost is unknowable. The process that would have
+// reported it was killed, and an agent may have spent any amount before the
+// kill, so there is no right answer, only a choice of which way to be wrong.
+// Charging nothing, as heal once did, is wrong in the direction that breaks
+// the budget ceiling: a run killed during a paid step and resumed pays for
+// that step twice and counts it once. Charging too much only stops a run
+// early. So the charge leans high, and it is taken from the run's own
+// evidence, the costliest step it has actually paid for, rather than from a
+// price table that would be a second source of truth for what a backend
+// costs.
+//
+// Estimated is always set on a non-zero charge. It is sticky in the ledger, so
+// every total that includes the charge says it is partly a guess, which is
+// the truth.
+//
+// When the run has recorded nothing yet, the charge is zero. With no step
+// paid for there is no evidence to charge from, and inventing a figure would
+// be a guess dressed as a measurement. That leaves one gap open: a run killed
+// during its first paid step can go past its ceiling by what that step cost.
+func interruptedCharge(ledger *budget.Ledger) belay.Usage {
+	charge := ledger.Largest()
+	if charge.InputTokens == 0 && charge.OutputTokens == 0 && charge.USD == 0 {
+		return belay.Usage{}
+	}
+	charge.Estimated = true
+	return charge
 }
 
 // owedRunMarker maps a node_finished that ended the run onto the run-level

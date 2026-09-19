@@ -237,6 +237,14 @@ that only `pkg/belay` carries a compatibility promise. Everything under
   from manifest.json and let the run spend that step's cost again, past
   `budget.max_usd`. A resume now adds up the cost of every step in the
   journal, and never starts below the total manifest.json saved.
+- **A step cut short by a kill -9 is no longer free.** When belay is killed
+  in the middle of a step, nothing is left to say what that step spent, and
+  `belay resume` used to count it as nothing, so a run killed during a paid
+  step paid for it twice and counted it once. The step is now charged the
+  most any one step of the run has cost so far, and the run's cost is shown
+  as estimated from then on. A run killed in its first paid step, before
+  anything was spent, is still charged nothing, because there is nothing to
+  go on. ADR-0007 explains the choice.
 
 ## v0.1.4 — 2026-09-17
 

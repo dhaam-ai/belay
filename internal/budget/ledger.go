@@ -114,6 +114,9 @@ type Ledger struct {
 	nodes map[string]*totals
 	order []string // node names in first-seen order, for a stable Breakdown
 	total totals
+	// largest holds, in each dimension, the most any single Record call
+	// contributed. See Largest.
+	largest totals
 }
 
 // New returns an empty Ledger with no recorded usage, for a fresh run.
@@ -148,6 +151,10 @@ func (l *Ledger) Record(node string, u belay.Usage) {
 	}
 	t.add(u)
 	l.total.add(u)
+
+	var call totals
+	call.add(u)
+	l.largest.atLeast(call)
 }
 
 // Total returns the ledger's cumulative usage across every node recorded
@@ -156,6 +163,25 @@ func (l *Ledger) Total() belay.Usage {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	return l.total.usage()
+}
+
+// Largest returns the most any single Record call has contributed, in each
+// dimension separately: the largest input token count any one call recorded,
+// the largest output token count, and the largest USD amount, which need not
+// all come from the same call. Estimated is set if any call that set one of
+// those figures was itself estimated.
+//
+// It exists for the one charge belay has to make without a report: an
+// attempt a crash left open, whose process died before it could say what it
+// spent. A dispatcher charges that attempt Largest, as the most any step of
+// this run has shown it can cost. Two calls for one node count as two calls,
+// never one larger one, so the charge for a lost attempt does not grow with
+// the attempts that came before it. Rebuild's floor is not a call, and is not
+// considered.
+func (l *Ledger) Largest() belay.Usage {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.largest.usage()
 }
 
 // NodeUsage pairs a node name with its accumulated belay.Usage, as

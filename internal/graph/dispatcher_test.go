@@ -420,6 +420,92 @@ func TestDispatcher_CrashResume_ReRunsUnfinishedNodeAtAttempt2(t *testing.T) {
 	}
 }
 
+// TestDispatcher_HealChargesAnAttemptItNeverSawFinish is ADR-0007's rule for
+// the one spend belay cannot know. A process killed inside a node never
+// reported what that attempt cost, and the backend may have spent any amount
+// before the kill. heal used to close the attempt as free, so a run killed
+// during a paid step and resumed paid for that step twice while the ledger
+// counted it once.
+//
+// The attempt is now charged the most any single step of this run has
+// recorded, marked estimated, so the total never claims to be exact. With
+// nothing recorded yet there is no evidence to charge from, and the attempt
+// is charged nothing rather than a number belay made up.
+func TestDispatcher_HealChargesAnAttemptItNeverSawFinish(t *testing.T) {
+	planSpend := belay.Usage{InputTokens: 1000, OutputTokens: 200, USD: 3.00}
+	codeSpend := belay.Usage{InputTokens: 10, OutputTokens: 5, USD: 1.00}
+	tests := []struct {
+		name       string
+		seed       []journal.Record
+		wantCharge belay.Usage
+		wantTotal  belay.Usage
+	}{
+		{
+			name: "killed inside a step after the run had spent",
+			seed: []journal.Record{
+				{Event: journal.EventRunStarted},
+				{Event: journal.EventNodeStarted, Node: graph.NodePlan, Attempt: 1},
+				{
+					Event: journal.EventNodeFinished, Node: graph.NodePlan, Attempt: 1,
+					Status: journal.StatusOK, Next: graph.NodeCode,
+					Usage: &journal.Usage{InputTokens: 1000, OutputTokens: 200, USD: 3.00},
+				},
+				{Event: journal.EventNodeStarted, Node: graph.NodeCode, Attempt: 1},
+			},
+			wantCharge: belay.Usage{InputTokens: 1000, OutputTokens: 200, USD: 3.00, Estimated: true},
+			wantTotal: belay.Usage{
+				InputTokens:  planSpend.InputTokens*2 + codeSpend.InputTokens,
+				OutputTokens: planSpend.OutputTokens*2 + codeSpend.OutputTokens,
+				USD:          planSpend.USD*2 + codeSpend.USD, Estimated: true,
+			},
+		},
+		{
+			name: "killed inside the first step, before anything was spent",
+			seed: []journal.Record{
+				{Event: journal.EventRunStarted},
+				{Event: journal.EventNodeStarted, Node: graph.NodeCode, Attempt: 1},
+			},
+			wantCharge: belay.Usage{},
+			wantTotal:  codeSpend,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			h := newRun(t, budgetCfg(100.00, 0), "survive a kill -9")
+			h.seedJournal(t, tt.seed...)
+
+			code := &fakeNode{name: graph.NodeCode, steps: []nodeStep{{
+				res: Result{Next: graph.End, Status: journal.StatusOK, Usage: codeSpend},
+			}}}
+			out, err := h.dispatcher(t, ok(graph.NodePlan, graph.NodeCode), code).Run(context.Background())
+			if err != nil {
+				t.Fatalf("Run() error = %v, want nil", err)
+			}
+
+			var healed journal.Record
+			for _, r := range h.records(t) {
+				if r.Interrupted() {
+					healed = r
+				}
+			}
+			if healed.Usage == nil {
+				t.Fatalf("no interrupted attempt with a usage block in the journal: %v", h.timeline(t))
+			}
+			got := belay.Usage{
+				InputTokens: healed.Usage.InputTokens, OutputTokens: healed.Usage.OutputTokens,
+				USD: healed.Usage.USD, Estimated: healed.Usage.Estimated,
+			}
+			if got != tt.wantCharge {
+				t.Errorf("healed attempt charged %+v, want %+v", got, tt.wantCharge)
+			}
+			if !closeTo(out.Usage.USD, tt.wantTotal.USD) || out.Usage.InputTokens != tt.wantTotal.InputTokens ||
+				out.Usage.OutputTokens != tt.wantTotal.OutputTokens || out.Usage.Estimated != tt.wantTotal.Estimated {
+				t.Errorf("Outcome.Usage = %+v, want %+v", out.Usage, tt.wantTotal)
+			}
+		})
+	}
+}
+
 // TestDispatcher_CrashResume_PatchIsNotDoubleApplied covers the crash window
 // the dispatcher's write ordering deliberately makes reachable: the patch was
 // applied, then the process died before node_finished was journalled.
