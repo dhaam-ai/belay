@@ -537,53 +537,11 @@ func describeDryRun(u *ui, plan *runPlan, want, resuming string) error {
 	u.say("This is a dry run. belay is only describing the work; none of it has happened.")
 	u.say("")
 
-	if want != "" {
-		u.say("what you asked for")
-		u.say("  %s", want)
-		u.say("")
-	}
-	if resuming != "" {
-		u.say("which run it would continue")
-		u.say("  %s", resuming)
-		u.say("")
-	}
-
-	u.say("where belay would work")
-	u.say("  %s", plan.workspace)
-	u.say("  %s", projectLine(plan.projects))
-	u.say("")
-
-	u.say("the most it could spend")
-	u.say("  %s", u.emph(budgetCeiling(plan.config.Budget)))
-	u.say("  %s", budgetOnExceed(plan.config.Budget))
-	u.say("")
-
-	u.say("settings it would use")
-	u.say("  read from    %s", sourcesLine(plan.configSources))
-	u.say("  agent        %s, model %s, %s, up to %d turns per step",
-		plan.config.Agent.Backend, plan.config.Agent.Model,
-		agentModeLine(plan.config.Agent.Mode, plan.cassettePath), plan.config.Agent.MaxTurns)
-	u.say("  tests        %s", plan.runnerName())
-	u.say("  quality gate %s, failing the run on %s issues or worse",
-		plan.gateName(), plan.config.Review.FailOn)
-	u.say("  credentials  %s", credentialsLine())
-	u.say("")
-
-	u.say("the route it would take")
-	u.say("  %s", routeLine(plan.route))
-	u.say("  %s", approvalLine(plan.config.Graph))
-	u.say("  it gives up after %d rounds of the test-and-fix loop, or %d steps in all",
-		plan.config.Graph.GiveUp, plan.config.Graph.MaxSteps)
-	u.say("")
-
-	u.say("what it would create")
-	u.say("  %s", filepath.Join(plan.workspace, ".belay", "runs", "<run-id>"))
-	u.say("  holding manifest.json, state.json, journal.ndjson and the plan")
-	u.say("")
-
-	for _, w := range plan.warnings {
-		u.say("worth knowing")
-		u.say("  %s", w)
+	for _, section := range dryRunSections(u, plan, want, resuming) {
+		u.say("%s", section.title)
+		for _, line := range section.lines {
+			u.say("  %s", line)
+		}
 		u.say("")
 	}
 
@@ -601,6 +559,79 @@ func describeDryRun(u *ui, plan *runPlan, want, resuming string) error {
 
 	u.say("Nothing was created and nothing was spent. Run the same command without --dry-run to start.")
 	return nil
+}
+
+// dryRunSection is one titled block of a dry run: a heading, then its lines,
+// each indented under it.
+type dryRunSection struct {
+	title string
+	lines []string
+}
+
+// dryRunSections lists what a dry run describes, in the order it is printed.
+//
+// Each section is built by its own function, and a section that has nothing
+// to say is left out rather than printed empty. Something new a run would do
+// gets a section of its own in this list, or a line in the section it belongs
+// to, instead of more statements in describeDryRun.
+func dryRunSections(u *ui, plan *runPlan, want, resuming string) []dryRunSection {
+	var sections []dryRunSection
+	if want != "" {
+		sections = append(sections, dryRunSection{title: "what you asked for", lines: []string{want}})
+	}
+	if resuming != "" {
+		sections = append(sections, dryRunSection{title: "which run it would continue", lines: []string{resuming}})
+	}
+	sections = append(sections,
+		dryRunSection{title: "where belay would work", lines: []string{plan.workspace, projectLine(plan.projects)}},
+		dryRunSpend(u, plan),
+		dryRunSettings(plan),
+		dryRunRoute(plan),
+		dryRunCreates(plan),
+	)
+	for _, w := range plan.warnings {
+		sections = append(sections, dryRunSection{title: "worth knowing", lines: []string{w}})
+	}
+	return sections
+}
+
+// dryRunSpend is the ceiling a run is held to, and what reaching it does.
+func dryRunSpend(u *ui, plan *runPlan) dryRunSection {
+	return dryRunSection{title: "the most it could spend", lines: []string{
+		u.emph(budgetCeiling(plan.config.Budget)),
+		budgetOnExceed(plan.config.Budget),
+	}}
+}
+
+// dryRunSettings is where the settings came from and the tools they chose.
+func dryRunSettings(plan *runPlan) dryRunSection {
+	agent := plan.config.Agent
+	return dryRunSection{title: "settings it would use", lines: []string{
+		"read from    " + sourcesLine(plan.configSources),
+		fmt.Sprintf("agent        %s, model %s, %s, up to %d turns per step",
+			agent.Backend, agent.Model, agentModeLine(agent.Mode, plan.cassettePath), agent.MaxTurns),
+		"tests        " + plan.runnerName(),
+		fmt.Sprintf("quality gate %s, failing the run on %s issues or worse", plan.gateName(), plan.config.Review.FailOn),
+		"credentials  " + credentialsLine(),
+	}}
+}
+
+// dryRunRoute is the walk through the graph, and what bounds it.
+func dryRunRoute(plan *runPlan) dryRunSection {
+	return dryRunSection{title: "the route it would take", lines: []string{
+		routeLine(plan.route),
+		approvalLine(plan.config.Graph),
+		fmt.Sprintf("it gives up after %d rounds of the test-and-fix loop, or %d steps in all",
+			plan.config.Graph.GiveUp, plan.config.Graph.MaxSteps),
+	}}
+}
+
+// dryRunCreates is what a real run would write, and where.
+func dryRunCreates(plan *runPlan) dryRunSection {
+	return dryRunSection{title: "what it would create", lines: []string{
+		filepath.Join(plan.workspace, ".belay", "runs", "<run-id>"),
+		"holding manifest.json, state.json, journal.ndjson and the plan",
+	}}
 }
 
 // budgetCeiling renders the budget in the two units it is capped in.
