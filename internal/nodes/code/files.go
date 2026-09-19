@@ -21,7 +21,7 @@ import (
 // write node verify an empty set — but it is a salvage path, not a supported
 // contract, and it is never consulted while a usable block is present:
 //
-//  1. The first non-empty fenced block tagged changedFilesTag wins outright.
+//  1. The first non-empty fenced block tagged ChangedFilesTag wins outright.
 //  2. Otherwise, paths are recovered from a unified diff in the reply, fenced
 //     or bare (see extractDiff).
 //  3. Otherwise the reply reports no change, which is a valid outcome: the
@@ -62,12 +62,12 @@ func ParseChangedFiles(text string) ([]string, error) {
 // one harvested out of a volunteered diff, and a post-mortem should not have
 // to guess which happened.
 const (
-	sourceBlock = "the " + changedFilesTag + " block"
+	sourceBlock = "the " + ChangedFilesTag + " block"
 	sourceDiff  = "the unified diff in the reply"
 )
 
 // changedFilesBlock returns the raw lines of the first non-empty fenced block
-// tagged changedFilesTag, and whether one was found.
+// tagged ChangedFilesTag, and whether one was found.
 //
 // Only the first is read. A reply carrying two such blocks has not followed
 // an instruction that says "exactly one", and concatenating them would invent
@@ -104,7 +104,7 @@ func isChangedFilesFenceOpen(line string) bool {
 		return false
 	}
 	info := strings.ToLower(strings.TrimSpace(strings.TrimLeft(s, "`")))
-	return info == changedFilesTag
+	return info == ChangedFilesTag
 }
 
 // cleanPaths validates and normalizes claimed paths, rejecting the whole set

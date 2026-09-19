@@ -29,6 +29,17 @@ Full report: artifacts/test.json
 2. Change the least code that makes those tests pass.
 3. Do not delete, skip, rename, or weaken a test to make the suite green. If a test itself is wrong, fix the test and say so explicitly in your summary.
 4. Do not touch code unrelated to what is listed above.
-5. Finish with a short summary: what was broken, what you changed, and why.
+5. Finish with a short summary: what was broken, what you changed, and why. Then list the files you changed, as below.
+
+## Files you changed
+
+After the summary, emit exactly one fenced block tagged "changed-files", holding the repository-relative path of every file this repair created, modified or deleted, one path per line and nothing else:
+
+```changed-files
+internal/calc/calc.go
+internal/calc/calc_test.go
+```
+
+No absolute paths, no ".." segments, no quotes, no bullets: a path outside the repository fails the run. The files under "Files this run has already changed" stay recorded whether or not you list them again. A file you change but do not list is recorded nowhere, and nothing later in the run will know it changed. If this repair changed no file, emit no block.
 
 This is fix attempt 2 of 3. The suite runs again as soon as you finish; after attempt 3 the run stops and hands the problem to a human.
