@@ -90,6 +90,17 @@ func helperMain(mode string, args []string) {
 	case "stall":
 		signal.Ignore(syscall.SIGTERM, syscall.SIGINT, syscall.SIGHUP)
 		time.Sleep(10 * time.Minute)
+	case "ls":
+		// ls <dir>: what is in dir as this process begins, which is how
+		// the group-record tests see what Run wrote before the child ran.
+		entries, err := os.ReadDir(arg(args, 0))
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "readdir:", err)
+			os.Exit(2)
+		}
+		for _, e := range entries {
+			fmt.Printf("entry:%s\n", e.Name())
+		}
 	case "grandchild":
 		helperGrandchild(arg(args, 0))
 	default:
