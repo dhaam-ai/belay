@@ -224,9 +224,12 @@ func createCandidates(ctx context.Context, rc *graph.RunContext, log *slog.Logge
 		// Dir is the workspace the isolator actually produced, not the
 		// layout path above: state.Candidate.Dir is what later nodes hand to
 		// an agent as a repository root, and only the isolator knows where
-		// that ended up. TestPassed and IssueCount stay zero — this node
-		// creates candidates, it does not run them.
-		candidates = append(candidates, state.Candidate{ID: id, Dir: ws.Dir})
+		// that ended up. Ephemeral is recorded for the same reason: whatever
+		// cleans candidates up later may destroy only a workspace the
+		// isolator said it really removes, and a "no isolation" workspace is
+		// the user's own tree. TestPassed and IssueCount stay zero — this
+		// node creates candidates, it does not run them.
+		candidates = append(candidates, state.Candidate{ID: id, Dir: ws.Dir, Ephemeral: ws.Ephemeral})
 	}
 
 	// A context cancelled after the last Create still has to unwind: a
