@@ -789,6 +789,123 @@ func TestResumeUpgradesTheManifestBeforeItRecordsAnApproval(t *testing.T) {
 	}
 }
 
+// finishedANode reports whether the run's journal already records a node
+// finishing. A test uses it from the dispatcher's clock to cancel the run in
+// the window between two nodes: the plan's completion is durable, so its
+// result stands, and the next node has not been started.
+func finishedANode(t *testing.T, layout state.Layout) bool {
+	t.Helper()
+	read, err := journal.ReadFile(layout.JournalPath())
+	if err != nil {
+		return false
+	}
+	for _, rec := range read.Records {
+		if rec.Event == journal.EventNodeFinished {
+			return true
+		}
+	}
+	return false
+}
+
+// TestResumeDoesNotApproveAPlanTheGateNeverReached covers the two ways a run
+// can be paused at the approve gate without the gate ever having asked
+// anything, neither of which TestResumeApprovesOnlyAPlanTheGateAskedAbout can
+// produce: a Ctrl-C that lands between the plan and the gate, which pauses the
+// run before the gate starts, and a journal in which no node has finished at
+// all. Resuming either must run the gate, not approve on the person's behalf.
+func TestResumeDoesNotApproveAPlanTheGateNeverReached(t *testing.T) {
+	t.Run("Ctrl-C landed between the plan and the gate", func(t *testing.T) {
+		ws := goWorkspace(t)
+		plan, err := resolve(resolveRequest{workspace: ws, logger: quietLogger()})
+		if err != nil {
+			t.Fatalf("resolve: %v", err)
+		}
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+
+		registry := graph.NewRegistry()
+		registry.MustRegister(planWriter{body: "# Plan\n\nwrite a test\n"}, approve.New())
+		plan.registry = registry
+		store := seedRunDir(t, plan, "add tests")
+
+		opts := plan.options(store)
+		opts.PauseOnCancel = true
+		// Cancel at the first reading of the clock after the plan's
+		// completion is in the journal. That is the window between two
+		// nodes: the plan's result has been applied and recorded, and the
+		// gate has not been started, so the dispatcher pauses the run at the
+		// gate with no attempt opened.
+		opts.Now = func() time.Time {
+			if finishedANode(t, store.Layout()) {
+				cancel()
+			}
+			return time.Now().UTC()
+		}
+		dispatcher, err := graph.NewDispatcher(opts)
+		if err != nil {
+			t.Fatalf("graph.NewDispatcher: %v", err)
+		}
+		if _, err := dispatcher.Run(ctx); err != nil && !errors.Is(err, graph.ErrInterrupted) {
+			t.Fatalf("Run: %v", err)
+		}
+
+		chosen, err := chooseRun(ws, store.Layout().RunID())
+		if err != nil {
+			t.Fatalf("chooseRun: %v", err)
+		}
+		if chosen.status != state.RunStatusPaused || chosen.node != graph.NodeApprove {
+			t.Fatalf("the run is %v at %q, want paused at %q before the gate ran",
+				chosen.status, chosen.node, graph.NodeApprove)
+		}
+		// No attempt was opened at the gate, so the run's last node_finished
+		// is the plan's.
+		got, err := awaitsApproval(chosen, store.Layout())
+		if err != nil {
+			t.Fatalf("awaitsApproval: %v", err)
+		}
+		if got {
+			t.Error("awaitsApproval() = true; the gate never ran, so nobody was shown the plan")
+		}
+	})
+
+	t.Run("no node has finished at all", func(t *testing.T) {
+		ws := goWorkspace(t)
+		const runID = "20260905T120000Z-aaaaaaaaaaaa"
+		base := time.Date(2026, 9, 5, 12, 0, 0, 0, time.UTC)
+		seedManifest(t, ws, runID, state.RunStatusPaused, graph.NodeApprove, "add tests", base)
+		layout, err := state.NewLayout(ws, runID)
+		if err != nil {
+			t.Fatalf("NewLayout: %v", err)
+		}
+		j, err := journal.Open(layout.JournalPath())
+		if err != nil {
+			t.Fatalf("journal.Open: %v", err)
+		}
+		for _, rec := range []journal.Record{
+			{Event: journal.EventRunStarted}, {Event: journal.EventRunPaused},
+		} {
+			if _, err := j.Append(rec); err != nil {
+				t.Fatalf("journal.Append(%v): %v", rec.Event, err)
+			}
+		}
+		if err := j.Close(); err != nil {
+			t.Fatalf("journal.Close: %v", err)
+		}
+
+		chosen, err := chooseRun(ws, runID)
+		if err != nil {
+			t.Fatalf("chooseRun: %v", err)
+		}
+		got, err := awaitsApproval(chosen, layout)
+		if err != nil {
+			t.Fatalf("awaitsApproval: %v", err)
+		}
+		if got {
+			t.Error("awaitsApproval() = true for a run in which no node has finished; nothing has asked anything")
+		}
+	})
+}
+
 // TestResumeCommandDoesNotApproveAPlanCtrlCInterrupted is the same rule as
 // TestResumeApprovesOnlyAPlanTheGateAskedAbout, through the command a person
 // types. That test calls awaitsApproval; this one runs `belay resume`, so
