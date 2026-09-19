@@ -291,12 +291,14 @@ What to do when budget is exceeded:
 
 Best-of-N: giving one goal several independent candidates at once, so the best can be kept.
 
+No run uses these settings yet. No step in belay's graph leads to the fanout node, so a run never reaches it, and nothing runs a candidate: the fanout node only prepares a workspace for each. Running candidates is planned, and ADR-0019 is reserved for it.
+
 ### `fanout.enabled`
 
 **Type**: Boolean  
 **Default**: `false`
 
-Whether to enable fanout (parallel code generation with multiple candidates).
+Registers the fanout and join nodes. No node routes to them, so this changes nothing a run does; `true` only makes the loader require a `fanout.candidates` of at least 2.
 
 ### `fanout.candidates`
 
@@ -304,7 +306,7 @@ Whether to enable fanout (parallel code generation with multiple candidates).
 **Default**: `3`  
 **Minimum**: `2`
 
-Number of parallel candidates to generate. Each candidate runs in isolation. Cost multiplies by this factor (3 candidates = 3× budget usage).
+Number of candidates the fanout node prepares, each in its own workspace. Nothing runs them yet; once something does, cost multiplies by about this factor.
 
 ### `fanout.isolator`
 

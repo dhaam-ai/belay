@@ -42,7 +42,7 @@ type AgentBackend interface {
 - `Turns`: number of agent turns taken (0 if the backend does not report it)
 - `Raw`: backend's unparsed output (e.g., raw JSON; never read by belay)
 
-**Concurrency**: An AgentBackend may be called concurrently by the same dispatcher (one call per node, but fanout candidates run in parallel). Adapters that cannot safely serve concurrent Invoke calls must serialize internally and document the constraint.
+**Concurrency**: Today the dispatcher runs one node at a time, no node calls an AgentBackend from more than one goroutine, and nothing runs fanout candidates, so no AgentBackend is called concurrently. Running candidates is planned (ADR-0019, reserved), and they may run in parallel, so an adapter that cannot safely serve concurrent Invoke calls must still serialize internally and document the constraint.
 
 **Error Handling** (see `pkg/belay/errors.go`):
 - `ErrBudgetExceeded`: The backend tracked its own budget and refuses to proceed (rare; belay usually tracks budget itself)
@@ -160,7 +160,7 @@ type Isolator interface {
 - `Dir`: absolute path the agent, test runner, linter should treat as the working directory
 - `Ephemeral`: whether Destroy actually removes Dir (true) or leaves it alone (false, for debugging modes with no isolation)
 
-**Current Implementation**: `internal/isolate/copy.go` uses `cp -r` to copy the source to a temporary directory under `.belay/runs/<run-id>/candidates/`. Fanout is disabled; future implementations could use git worktrees or containers.
+**Current Implementation**: `internal/isolate/dircopy` copies the source tree into one directory per candidate, leaving out `.git`, `node_modules`, `vendor` and similar directories (`dircopy.DefaultSkip`). Nothing in belay constructs it yet, because no run reaches the fanout node (see *Maturity & Limitations* in the README). Future implementations could use git worktrees or containers.
 
 ## Custom Adapter Implementation
 
@@ -332,7 +332,7 @@ Adapters are injected at dispatcher creation time via RunContext (see `internal/
 - `Runner belay.TestRunner`: required, passed to the test node
 - `Linter belay.Linter`: optional (one), passed to linters node if review.mode = "lint"
 - `Reviewer belay.Reviewer`: optional (one), passed to review node if review.mode = "sonar-*" or AI
-- `Isolator belay.Isolator`: required, passed to fanout and every node that touches WorkDir
+- `Isolator belay.Isolator`: optional, used only by the fanout node, which no run reaches; the CLI sets none
 
 Example construction (in internal/cli, not shown due to task scope):
 ```go

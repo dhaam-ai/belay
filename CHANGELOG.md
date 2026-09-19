@@ -85,9 +85,9 @@ that only `pkg/belay` carries a compatibility promise. Everything under
   are unit-tested, but no step in belay's graph leads to fanout, so no run
   reaches either one, and `fanout.enabled: true` changes nothing a run does.
   The fanout node only prepares a workspace per candidate; nothing runs a
-  candidate. The README, docs/architecture.md and docs/troubleshooting.md
-  now say so. Running candidates is planned, and ADR-0019 is reserved for
-  it.
+  candidate. The README, docs/architecture.md, docs/troubleshooting.md,
+  docs/config.md, docs/adapters.md and examples/naive now say so. Running
+  candidates is planned, and ADR-0019 is reserved for it.
 
 ## v0.1.4 — 2026-09-17
 
