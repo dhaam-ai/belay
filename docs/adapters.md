@@ -327,26 +327,42 @@ func zeroReport(source string) belay.QualityReport {
 
 ## Adapter Registration
 
-Adapters are injected at dispatcher creation time via RunContext (see `internal/graph/dispatcher.go`). The Dispatcher sets:
-- `Agent belay.AgentBackend`: required, passed to code, fix, and plan nodes
-- `Runner belay.TestRunner`: required, passed to the test node
-- `Linter belay.Linter`: optional (one), passed to linters node if review.mode = "lint"
-- `Reviewer belay.Reviewer`: optional (one), passed to review node if review.mode = "sonar-*" or AI
-- `Isolator belay.Isolator`: optional, used only by the fanout node, which no run reaches; the CLI sets none
+Adapters are given to the dispatcher when it is created, in `graph.Options`, and it copies them onto every node's RunContext (see `internal/graph/dispatcher.go`). Any of them may be nil when the configuration selects none; a node that needs a nil adapter returns a clear error:
+- `Agent belay.AgentBackend`: used by the plan, code and fix nodes
+- `Runner belay.TestRunner`: used by the test node
+- `Linter belay.Linter`: used by the review node when review.mode is "lint"
+- `Reviewer belay.Reviewer`: used by the review node when review.mode is "sonar" (the SonarQube scanner) or "ai" (the reviewer that asks SonarQube through its MCP server, which `belay run` does not wire in yet)
+- `Isolator belay.Isolator`: used only by the fanout node, which no run reaches; the CLI sets none
 
-Example construction (in internal/cli, not shown due to task scope):
+The CLI builds all of this in `internal/cli/wire.go` (`resolve`, then `runPlan.options`). In outline, for a Go repository under review.mode "lint":
 ```go
-d := &graph.Dispatcher{
-	Agent:     &agent.Claude{...},
-	Runner:    &runner.GoTest{...},
-	Linter:    &linter.GolangCI{...},
-	Reviewer:  nil, // Using Linter instead
-	Isolator:  &isolate.Copy{...},
+registry, err := nodes.Default(cfg)
+if err != nil {
+	return err
 }
-err := d.Run(ctx, &graph.RunContext{...})
+execer := exec.New(logger)
+testRunner, err := runner.Select(cfg.Test, workspace, execer, logger)
+if err != nil {
+	return err
+}
+d, err := graph.NewDispatcher(graph.Options{
+	Store:    state.NewStore(layout),
+	Registry: registry,
+	Config:   cfg,
+	Logger:   logger,
+	Agent:    claude.New(logger), // wrapped to record under agent.mode record; replay uses a cassette instead
+	Runner:   testRunner,
+	Linter:   linter.NewGolangCI(linter.WithRunner(execer), linter.WithLogger(logger)),
+	// Reviewer stays nil under review.mode "lint", and Isolator stays nil:
+	// only the fanout node uses one, and no run reaches it.
+})
+if err != nil {
+	return err
+}
+outcome, err := d.Run(ctx)
 ```
 
-Each node in the graph receives RunContext with all adapters; a node calls only the adapters it needs. The dispatcher never calls adapters directly; nodes do, making adapter selection delegated to node logic (e.g., the linters node auto-detects which linters apply to a repository).
+Each node receives the RunContext with all the adapters and calls only the ones it needs; the dispatcher never calls an adapter itself. Choosing the adapters is the CLI's job, before the run starts: `pickLinter` in `internal/cli/wire.go` picks golangci-lint, eslint or ruff by the project it finds, and the review node uses whichever Linter or Reviewer it is given, without detecting anything itself.
 
 **Error Translation at the Seam**: Adapters must translate errors that originate outside belay into belay sentinels. Most critical: `internal/exec.ErrToolchainMissing` (from process execution) must be wrapped or translated to `belay.ErrToolchainMissing` before returning from the adapter. Failing to do so makes `errors.Is(err, belay.ErrToolchainMissing)` false at the graph, silently defeating the "install software vs. edit code" distinction (see `internal/linter/linter.go` line 263 for the canonical translation pattern).
 
