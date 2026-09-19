@@ -10,6 +10,12 @@ that only `pkg/belay` carries a compatibility promise. Everything under
 
 ### Added
 
+- **A dry run says that `fanout.enabled` does nothing yet.** Nothing in the
+  graph leads to the fanout node, so a run with fanout on takes the ordinary
+  route once, whatever `fanout.candidates` says — and belay said nothing about
+  it, while somebody who had turned it on was expecting N attempts and
+  watching what N attempts would cost. `belay --dry-run run` now lists it
+  under "worth knowing".
 - **`belay timeline` lists the files a run changed.** After the totals, a
   "Files changed:" section lists every file the run changed, one per line
   and sorted, including the files the fix loop repaired. It is left out when

@@ -185,8 +185,26 @@ func resolve(req resolveRequest) (*runPlan, error) {
 	p.resolveGate(execer)
 	p.resolveAgent()
 	p.resolveRegistry()
+	p.warnAboutFanout()
 
 	return p, nil
+}
+
+// warnAboutFanout says that fanout.enabled changes nothing yet.
+//
+// It is a warning rather than a blocker: the setting is valid, the loader
+// checks it, and a run with it on is exactly the run it would be with it off.
+// That is the problem. Somebody who turned it on is expecting N attempts at
+// their goal and watching what N attempts would cost, and belay would take
+// one attempt and say nothing about it. Silence is only safe for a setting
+// that does what it says.
+func (p *runPlan) warnAboutFanout() {
+	if !p.config.Fanout.Enabled {
+		return
+	}
+	p.warn("fanout.enabled is true, but nothing runs the candidates yet: no step of the graph leads to "+
+		"the fanout node, so this run takes the ordinary route once and fanout.candidates (%d) changes "+
+		"nothing it does or spends. ADR-0019 is reserved for the decision.", p.config.Fanout.Candidates)
 }
 
 // resolveWorkspace turns the --workspace flag into the absolute path the rest

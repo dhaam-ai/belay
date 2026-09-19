@@ -263,6 +263,49 @@ func TestDryRunWithApprovalOffShowsTheRouteWithoutTheGate(t *testing.T) {
 	}
 }
 
+// TestDryRunSaysFanoutDoesNothingYet: fanout.enabled is a setting belay
+// accepts and acts on in no way at all — no step of the graph leads to the
+// fanout node, so a run never reaches it. Someone who turned it on is
+// expecting N attempts and paying attention to the cost; a dry run that says
+// nothing lets them believe they are getting them.
+func TestDryRunSaysFanoutDoesNothingYet(t *testing.T) {
+	tests := []struct {
+		name    string
+		config  string
+		wantSay bool
+	}{
+		{
+			name:    "fanout enabled",
+			config:  "version: 1\nfanout:\n  enabled: true\n  candidates: 3\n",
+			wantSay: true,
+		},
+		{name: "fanout left alone", config: "version: 1\n"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ws := goWorkspace(t)
+			writeConfig(t, ws, tt.config)
+
+			out, _, err := runCLI(t, "--dry-run", "run", "--workspace", ws, "add tests")
+			if err != nil {
+				t.Fatalf("belay --dry-run run: %v\n%s", err, out)
+			}
+			const phrase = "fanout.enabled is true"
+			if said := strings.Contains(out, phrase); said != tt.wantSay {
+				t.Errorf("the dry run says %q: %v, want %v; got:\n%s", phrase, said, tt.wantSay, out)
+			}
+			if !tt.wantSay {
+				return
+			}
+			for _, want := range []string{"worth knowing", "nothing runs the candidates", "ADR-0019"} {
+				if !strings.Contains(out, want) {
+					t.Errorf("the warning never says %q; got:\n%s", want, out)
+				}
+			}
+		})
+	}
+}
+
 // TestDryRunNeverPrintsCredentialValues guards the one thing a plan must not
 // leak while reporting on the environment it read.
 func TestDryRunNeverPrintsCredentialValues(t *testing.T) {
