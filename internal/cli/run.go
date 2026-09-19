@@ -179,10 +179,35 @@ func createRun(plan *runPlan, spec runSpec) (*state.Store, error) {
 	}
 	now := time.Now().UTC()
 	manifest := state.NewManifest(now, spec.RunID, spec.Workspace, spec.Goal, plan.config)
+	if err := plan.prepareWorkTree(layout, &manifest); err != nil {
+		return nil, err
+	}
 	if err := state.SaveManifest(layout.ManifestPath(), manifest); err != nil {
 		return nil, fmt.Errorf("cannot write %s: %w", layout.ManifestPath(), err)
 	}
 	return state.NewStore(layout), nil
+}
+
+// prepareWorkTree readies the tree a new run will change, and records in the
+// run's manifest whatever a later resume must know about that tree. createRun
+// calls it once, after the run's state is written and before its manifest is.
+//
+// Today it does nothing. Every run changes the workspace it was started in,
+// so there is no tree to make and nothing to record. The step exists so that
+// a run which works somewhere else, such as a worktree of its own, has one
+// place to make that tree before the manifest pins it, instead of a new write
+// wedged in among createRun's.
+//
+// What it grows to do must keep to the order around it. It runs after
+// state.json, so a failure here leaves a directory with no manifest, which
+// nothing takes for a run. It runs before the manifest, so what it records
+// lands in the manifest's one write. And a failure after it, writing the
+// manifest, cannot undo what it made outside the run directory, so it must be
+// safe to repeat when createRun is called again for the same run id.
+//
+//nolint:revive // layout and manifest are unused until a run can work outside its workspace; they are the step's contract.
+func (p *runPlan) prepareWorkTree(layout state.Layout, manifest *state.Manifest) error {
+	return nil
 }
 
 // driveRun runs the dispatcher over an existing run and reports how it ended.
