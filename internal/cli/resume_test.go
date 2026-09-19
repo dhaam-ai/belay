@@ -320,6 +320,102 @@ func emptyCassette(t *testing.T, workspace string) {
 	}
 }
 
+// TestResumeTreatsAnOlderUnknownVersionAsDamaged: only a version above this
+// belay's means a newer belay wrote the run. A manifest at a version below
+// every one belay has written — 0, say — was written by no belay this one can
+// name, and telling a person to upgrade for it sends them after a fix that
+// does not exist. belay runs already lists such a run as "unsupported
+// manifest version 0"; belay resume must agree with it, named or not.
+func TestResumeTreatsAnOlderUnknownVersionAsDamaged(t *testing.T) {
+	base := time.Date(2026, 9, 5, 12, 0, 0, 0, time.UTC)
+	const (
+		waiting = "20260905T120000Z-aaaaaaaaaaaa"
+		zeroed  = "20260905T130000Z-bbbbbbbbbbbb"
+	)
+	seed := func(t *testing.T) string {
+		t.Helper()
+		ws := goWorkspace(t)
+		seedManifest(t, ws, waiting, state.RunStatusPaused, graph.NodeApprove, "readable and waiting", base)
+		dir := filepath.Join(ws, ".belay", "runs", zeroed)
+		if err := os.MkdirAll(dir, 0o750); err != nil {
+			t.Fatalf("mkdir: %v", err)
+		}
+		raw := []byte(`{"schema_version": 0, "run_id": "` + zeroed + `", "status": "paused"}`)
+		if err := os.WriteFile(filepath.Join(dir, "manifest.json"), raw, 0o600); err != nil {
+			t.Fatalf("write manifest: %v", err)
+		}
+		return ws
+	}
+
+	t.Run("named, it is refused as damaged", func(t *testing.T) {
+		ws := seed(t)
+		_, _, err := runCLI(t, "--dry-run", "resume", zeroed, "--workspace", ws)
+		var exit *ExitError
+		if !errors.As(err, &exit) || exit.Code != graph.ExitFailed {
+			t.Fatalf("error = %#v, want an ExitError with code %d", err, graph.ExitFailed)
+		}
+		for _, phrase := range []string{"cannot continue run " + zeroed, "unsupported manifest version 0"} {
+			if !strings.Contains(exit.Message, phrase) {
+				t.Errorf("message does not say %q; got %q", phrase, exit.Message)
+			}
+		}
+		if strings.Contains(exit.Message, "needs a newer belay") {
+			t.Errorf("a version-0 run is not one a newer belay wrote; got %q", exit.Message)
+		}
+	})
+
+	t.Run("not named, it is passed over", func(t *testing.T) {
+		ws := seed(t)
+		out, _, err := runCLI(t, "--dry-run", "resume", "--workspace", ws)
+		if err != nil {
+			t.Fatalf("belay resume refused to choose because of a damaged run: %v", err)
+		}
+		if !strings.Contains(out, waiting) {
+			t.Errorf("belay resume did not choose the readable run that was waiting; got:\n%s", out)
+		}
+	})
+}
+
+// TestResumeListsAnUnreadableRunForWhatItIs: a run id belay cannot find is
+// answered with the runs it does have, and a run it has but cannot read is
+// listed for what it is — not as "in an unknown state", which is what its
+// empty status would read as, and which gives a person nothing to act on.
+func TestResumeListsAnUnreadableRunForWhatItIs(t *testing.T) {
+	base := time.Date(2026, 9, 5, 12, 0, 0, 0, time.UTC)
+	const (
+		newer   = "20260905T130000Z-bbbbbbbbbbbb"
+		damaged = "20260905T140000Z-cccccccccccc"
+	)
+	ws := goWorkspace(t)
+	seedManifest(t, ws, "20260905T120000Z-aaaaaaaaaaaa", state.RunStatusPaused, graph.NodeApprove, "waiting", base)
+	seedNewerRun(t, ws, newer, base.Add(time.Hour), "output.branch")
+	dir := filepath.Join(ws, ".belay", "runs", damaged)
+	if err := os.MkdirAll(dir, 0o750); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "manifest.json"), []byte("{not json"), 0o600); err != nil {
+		t.Fatalf("write manifest: %v", err)
+	}
+
+	_, _, err := runCLI(t, "--dry-run", "resume", "nosuchrun", "--workspace", ws)
+	var exit *ExitError
+	if !errors.As(err, &exit) {
+		t.Fatalf("error = %#v, want an ExitError", err)
+	}
+	for _, line := range []string{
+		"no run called nosuchrun",
+		"  " + newer + " — needs a newer belay",
+		"  " + damaged + " — manifest.json is damaged",
+	} {
+		if !strings.Contains(exit.Message, line) {
+			t.Errorf("the listing does not say %q; got:\n%s", line, exit.Message)
+		}
+	}
+	if strings.Contains(exit.Message, "in an unknown state") {
+		t.Errorf("the listing describes an unreadable run by its empty status; got:\n%s", exit.Message)
+	}
+}
+
 // isCapabilityError reports whether err wraps a *state.CapabilityError.
 func isCapabilityError(err error) bool {
 	var target *state.CapabilityError
