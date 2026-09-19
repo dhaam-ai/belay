@@ -184,6 +184,129 @@ func TestChooseRun(t *testing.T) {
 	})
 }
 
+// seedNewerRun writes a run directory whose manifest.json this belay cannot
+// read because a newer belay wrote it: it requires a capability this belay
+// lacks, or, when capabilities is empty, it is at schema version 99.
+func seedNewerRun(t *testing.T, workspace, runID string, updated time.Time, capabilities ...string) {
+	t.Helper()
+	layout, err := state.NewLayout(workspace, runID)
+	if err != nil {
+		t.Fatalf("state.NewLayout(%q): %v", runID, err)
+	}
+	if err := os.MkdirAll(layout.RunDir(), 0o750); err != nil {
+		t.Fatalf("create run dir: %v", err)
+	}
+	if len(capabilities) == 0 {
+		raw := []byte(`{"schema_version": 99, "run_id": "` + runID + `", "status": "paused"}`)
+		if err := os.WriteFile(layout.ManifestPath(), raw, 0o600); err != nil {
+			t.Fatalf("write manifest: %v", err)
+		}
+		return
+	}
+	manifest := state.NewManifest(updated, runID, workspace, "a newer belay's goal", config.Default())
+	manifest.Status = state.RunStatusPaused
+	manifest.CurrentNode = graph.NodeApprove
+	manifest.Requires = capabilities
+	if err := state.SaveManifest(layout.ManifestPath(), manifest); err != nil {
+		t.Fatalf("save manifest: %v", err)
+	}
+}
+
+// TestResumeRefusesARunThatNeedsANewerBelay covers a run a newer belay
+// wrote (ADR-0011). belay resume must refuse it by name with the error that
+// says to upgrade, whether the person named it or left belay to choose.
+// Skipping it is wrong both ways: named, belay said it had no such run; left
+// to choose, it would continue an older run that happened to be readable,
+// and spend on a run the person may not have meant.
+func TestResumeRefusesARunThatNeedsANewerBelay(t *testing.T) {
+	base := time.Date(2026, 9, 5, 12, 0, 0, 0, time.UTC)
+	const (
+		waiting = "20260905T120000Z-aaaaaaaaaaaa"
+		newer   = "20260905T130000Z-bbbbbbbbbbbb"
+	)
+
+	tests := []struct {
+		name         string
+		capabilities []string
+		named        bool
+		want         []string
+		wantAs       func(error) bool
+	}{
+		{
+			name:         "named, requiring a capability this belay lacks",
+			capabilities: []string{"output.branch"},
+			named:        true,
+			want:         []string{"cannot continue run " + newer, "needs a newer belay", `"output.branch"`, "upgrade belay"},
+			wantAs:       isCapabilityError,
+		},
+		{
+			name:   "named, at a schema version above this belay's",
+			named:  true,
+			want:   []string{"cannot continue run " + newer, "needs a newer belay", "schema version 99", "upgrade belay"},
+			wantAs: isNewerVersionError,
+		},
+		{
+			name:         "not named, requiring a capability this belay lacks",
+			capabilities: []string{"output.branch"},
+			want:         []string{newer, "needs a newer belay", `"output.branch"`, "upgrade belay", "belay resume <run-id>"},
+			wantAs:       isCapabilityError,
+		},
+		{
+			name:   "not named, at a schema version above this belay's",
+			want:   []string{newer, "needs a newer belay", "schema version 99", "upgrade belay", "belay resume <run-id>"},
+			wantAs: isNewerVersionError,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ws := goWorkspace(t)
+			// A readable run still waiting, which belay could continue:
+			// refusing must not be because there is nothing else.
+			seedManifest(t, ws, waiting, state.RunStatusPaused, graph.NodeApprove, "readable and waiting", base)
+			seedNewerRun(t, ws, newer, base.Add(time.Hour), tt.capabilities...)
+
+			args := []string{"--dry-run", "resume", "--workspace", ws}
+			if tt.named {
+				args = append(args, newer)
+			}
+			out, _, err := runCLI(t, args...)
+			if err == nil {
+				t.Fatalf("belay resume continued a run instead of refusing the one that needs a newer belay:\n%s", out)
+			}
+			var exit *ExitError
+			if !errors.As(err, &exit) || exit.Code != graph.ExitFailed {
+				t.Fatalf("error = %#v, want an ExitError with code %d", err, graph.ExitFailed)
+			}
+			for _, phrase := range tt.want {
+				if !strings.Contains(exit.Message, phrase) {
+					t.Errorf("message does not say %q; got %q", phrase, exit.Message)
+				}
+			}
+			for _, phrase := range []string{"damaged", "no run called"} {
+				if strings.Contains(exit.Message, phrase) {
+					t.Errorf("message says %q of a run a newer belay wrote; got %q", phrase, exit.Message)
+				}
+			}
+			if !tt.wantAs(err) {
+				t.Errorf("error does not carry the state package's error for the run: %v", err)
+			}
+		})
+	}
+}
+
+// isCapabilityError reports whether err wraps a *state.CapabilityError.
+func isCapabilityError(err error) bool {
+	var target *state.CapabilityError
+	return errors.As(err, &target)
+}
+
+// isNewerVersionError reports whether err wraps a *state.ManifestVersionError
+// for a version a newer belay wrote.
+func isNewerVersionError(err error) bool {
+	var target *state.ManifestVersionError
+	return errors.As(err, &target) && target.Newer()
+}
+
 // TestResumeWithNoArgumentSaysWhichRunItChose is acceptance criterion 5,
 // through the command a person types.
 func TestResumeWithNoArgumentSaysWhichRunItChose(t *testing.T) {

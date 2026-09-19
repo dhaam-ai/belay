@@ -41,7 +41,11 @@ are not run again.
 Runs live under <workspace>/.belay/runs/, and "belay runs" lists them. A run
 that already finished or failed cannot be continued, and neither can one belay
 stopped on its own, such as at the budget ceiling, graph.max_steps or
-graph.node_timeout. Start a new one instead.`,
+graph.node_timeout. Start a new one instead.
+
+A run a newer belay wrote cannot be continued by this one: upgrade belay. While
+such a run is in the workspace, belay will not choose a run for you, since it
+cannot tell whether that run is the one still waiting; name the run instead.`,
 	Example: `  belay resume
   belay resume 20260905T153301Z-1f2e3d4c5b6a
   belay --dry-run resume`,
@@ -197,6 +201,11 @@ type resumableRun struct {
 	status  state.RunStatus
 	node    string
 	updated string
+	// newer is why this belay cannot read the run's manifest when a newer
+	// belay wrote it: a *state.CapabilityError, or a
+	// *state.ManifestVersionError whose version is newer (see
+	// needsNewerBelay). Every field but id is zero when it is set.
+	newer error
 }
 
 // describe names this run in one line, and says how belay came to be pointed
@@ -254,6 +263,10 @@ func chooseRun(workspace, runID string) (resumableRun, error) {
 			if r.id != runID {
 				continue
 			}
+			if r.newer != nil {
+				return resumableRun{}, fmt.Errorf(
+					"belay cannot continue run %s: it needs a newer belay.\n%w", r.id, r.newer)
+			}
 			if !resumable(r.status) {
 				return resumableRun{}, fmt.Errorf(
 					"belay cannot continue run %s: it is %s.\nStart a new run instead: belay run \"what you want built\"",
@@ -264,12 +277,35 @@ func chooseRun(workspace, runID string) (resumableRun, error) {
 		return resumableRun{}, unknownRun(workspace, runID, runs)
 	}
 
+	// A run a newer belay wrote may be the most recent one still waiting,
+	// and this belay cannot read whether it is waiting or when it was last
+	// worked on. Choosing past it would continue, and spend on, a run the
+	// person may not have meant, so belay refuses to choose at all. Naming a
+	// run still continues it.
+	for _, r := range runs {
+		if r.newer != nil {
+			return resumableRun{}, fmt.Errorf(
+				"belay will not choose a run to continue: run %s needs a newer belay, and this belay cannot tell whether it is the one still waiting.\n%w\n"+
+					"To continue another run with this belay, name it: belay resume <run-id>",
+				r.id, r.newer)
+		}
+	}
+
 	for _, r := range runs {
 		if resumable(r.status) {
 			return r, nil
 		}
 	}
 	return resumableRun{}, nothingToResume(workspace, runs)
+}
+
+// needsNewerBelay reports whether err, from loading a run's manifest, says
+// a newer belay wrote the run: it requires a capability this belay does not
+// know, or its schema version is above the one this belay reads. Either way
+// the run is not damaged, and the error says to upgrade belay (ADR-0011).
+func needsNewerBelay(err error) bool {
+	var versionErr *state.ManifestVersionError
+	return errors.Is(err, state.ErrUnknownCapability) || (errors.As(err, &versionErr) && versionErr.Newer())
 }
 
 // resumable reports whether a run in this state can be continued. A paused
@@ -300,7 +336,11 @@ func unknownRun(workspace, runID string, runs []resumableRun) error {
 	}
 	ids := make([]string, 0, len(runs))
 	for _, r := range runs {
-		ids = append(ids, "  "+r.id+" — "+statusSentence(r.status, r.node))
+		sentence := statusSentence(r.status, r.node)
+		if r.newer != nil {
+			sentence = "needs a newer belay"
+		}
+		ids = append(ids, "  "+r.id+" — "+sentence)
 	}
 	if len(ids) > 5 {
 		ids = append(ids[:5], fmt.Sprintf("  ...and %d more; see them all with: belay runs", len(runs)-5))
@@ -318,6 +358,12 @@ func unknownRun(workspace, runID string, runs []resumableRun) error {
 // display type. A run whose manifest cannot be read is skipped rather than
 // reported, because a damaged run is one belay must not resume, and `belay
 // runs` is the command that exists to show it.
+//
+// A run a newer belay wrote is the exception. It is not damaged: it is a run
+// someone is using with another belay, so it is kept, named by its directory
+// and carrying the error, and chooseRun refuses it with that error rather
+// than acting as if it were not there. Having no readable update time, it
+// sorts after every run that has one.
 func scanRunsForResume(workspace string) ([]resumableRun, error) {
 	dir := filepath.Join(workspace, ".belay", "runs")
 	entries, err := os.ReadDir(dir)
@@ -339,6 +385,9 @@ func scanRunsForResume(workspace string) ([]resumableRun, error) {
 		}
 		manifest, err := state.LoadManifest(layout.ManifestPath())
 		if err != nil {
+			if needsNewerBelay(err) {
+				found = append(found, resumableRun{id: entry.Name(), newer: err})
+			}
 			continue
 		}
 		found = append(found, resumableRun{
