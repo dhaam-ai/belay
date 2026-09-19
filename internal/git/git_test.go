@@ -450,6 +450,17 @@ func hardenedCalls(t *testing.T, f *fixture, dir string) []hardenedCall {
 			return r.AddWorktree(t.Context(), wt, "hardened-wt")
 		}},
 		{name: "RemoveWorktree", call: func(r *Repo) error { return r.RemoveWorktree(t.Context(), wt) }},
+		{name: "CreateBranch", call: func(r *Repo) error {
+			return r.CreateBranch(t.Context(), "hardened-branch", f.git(dir, "rev-parse", "HEAD"))
+		}},
+		{name: "BranchTip", call: func(r *Repo) error { _, _, err := r.BranchTip(t.Context(), "hardened-branch"); return err }},
+		{name: "ContainedElsewhere", call: func(r *Repo) error {
+			_, err := r.ContainedElsewhere(t.Context(), "hardened-branch")
+			return err
+		}},
+		{name: "DeleteBranch", call: func(r *Repo) error {
+			return r.DeleteBranch(t.Context(), "hardened-branch", f.git(dir, "rev-parse", "HEAD"))
+		}},
 	}
 }
 

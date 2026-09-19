@@ -135,3 +135,239 @@ func (r *Repo) BranchTip(ctx context.Context, name string) (string, bool, error)
 	}
 	return strings.TrimSpace(res.Stdout), true, nil
 }
+
+// Branch sentinels. Match them with errors.Is.
+var (
+	// ErrBranchExists reports that CreateBranch found the branch already
+	// there. It is never moved: an existing branch may hold someone's work.
+	ErrBranchExists = errors.New("git: the branch already exists")
+
+	// ErrRefConflict reports a branch name that cannot exist beside a branch
+	// that already does, because refs are stored as paths: refs/heads/belay
+	// and refs/heads/belay/run1 would need "belay" to be both a file and a
+	// directory. The error names the branch in the way.
+	ErrRefConflict = errors.New("git: the branch name conflicts with an existing branch")
+
+	// ErrBranchMoved reports that DeleteBranch found the branch pointing
+	// somewhere other than the caller expected, and left it alone.
+	ErrBranchMoved = errors.New("git: the branch no longer points where it was expected to")
+
+	// ErrCheckedOut reports that DeleteBranch was asked to delete a branch
+	// some worktree has checked out.
+	ErrCheckedOut = errors.New("git: the branch is checked out in a worktree")
+
+	// ErrInvalidObjectID reports a value that had to be a full object ID
+	// and was not.
+	ErrInvalidObjectID = errors.New("git: not a full object id")
+)
+
+// CreateBranch creates the branch name at commit, and refuses when a branch
+// by that name exists (ErrBranchExists) or when an existing branch's name
+// makes it impossible (ErrRefConflict). It never moves an existing branch.
+//
+// commit may be anything that names a commit — a full or abbreviated object
+// ID, a branch, HEAD — and is resolved first, so the branch records the full
+// ID and something that names a tree or nothing at all is refused before a
+// ref is written.
+//
+// The ref is written with `update-ref <ref> <new> <zero-id>`, whose all-zero
+// old value means "only if it does not exist": git checks and writes under
+// one lock, so a branch created by someone else in the meantime is refused,
+// not overwritten. The conflict check before it is what turns git's refusal
+// into an answer that names the branch in the way, without reading git's
+// message.
+func (r *Repo) CreateBranch(ctx context.Context, name, commit string) error {
+	if err := validateBranch(name); err != nil {
+		return err
+	}
+	oid, err := r.resolveCommit(ctx, commit)
+	if err != nil {
+		return err
+	}
+	if err := r.refConflict(ctx, name); err != nil {
+		return err
+	}
+	zero := strings.Repeat("0", len(oid))
+	_, err = r.run(ctx, r.top, "update-ref", "-m", "belay: create branch", "refs/heads/"+name, oid, zero)
+	if err == nil {
+		return nil
+	}
+	// The conflict check passed, so the likeliest cause is the branch
+	// appearing in between. Say so when it did, rather than reading git's
+	// message to find out.
+	if _, ok, tipErr := r.BranchTip(ctx, name); tipErr == nil && ok {
+		return fmt.Errorf("%w: %s", ErrBranchExists, name)
+	}
+	return err
+}
+
+// resolveCommit returns the full object ID of the commit rev names.
+func (r *Repo) resolveCommit(ctx context.Context, rev string) (string, error) {
+	if rev == "" {
+		return "", errors.New("git: no commit given")
+	}
+	// --end-of-options keeps a rev that starts with a dash from being read
+	// as an option; ^{commit} refuses anything that is not a commit, such
+	// as a tree.
+	res, err := r.run(ctx, r.top, "rev-parse", "--verify", "--quiet", "--end-of-options", rev+"^{commit}")
+	if code, exited := exitCode(err); exited && code == 1 {
+		return "", fmt.Errorf("git: %q does not name a commit", rev)
+	}
+	if err != nil {
+		return "", err
+	}
+	return strings.TrimSpace(res.Stdout), nil
+}
+
+// refConflict reports whether a branch that already exists makes name
+// impossible: the branch itself, a branch named after one of its parent
+// directories, or a branch nested under it.
+//
+// It asks for-each-ref once. A pattern matches a ref exactly or as a
+// directory prefix up to a slash, so "refs/heads/<name>" finds the branch
+// and everything under it, and each parent pattern finds the parent and
+// its whole directory, of which only the parent itself is in the way.
+// Ref names cannot hold a newline, so the list is split on newlines.
+func (r *Repo) refConflict(ctx context.Context, name string) error {
+	full := "refs/heads/" + name
+	args := []string{"for-each-ref", "--format=%(refname)", full}
+	parents := make(map[string]bool)
+	for i := strings.Index(name, "/"); i >= 0; i = nextSlash(name, i) {
+		parent := "refs/heads/" + name[:i]
+		parents[parent] = true
+		args = append(args, parent)
+	}
+	res, err := r.run(ctx, r.top, args...)
+	if err != nil {
+		return err
+	}
+	for ref := range strings.SplitSeq(strings.TrimSuffix(res.Stdout, "\n"), "\n") {
+		switch {
+		case ref == full:
+			return fmt.Errorf("%w: %s", ErrBranchExists, name)
+		case strings.HasPrefix(ref, full+"/"):
+			return fmt.Errorf("%w: %s cannot be created while %s exists", ErrRefConflict, full, ref)
+		case parents[ref]:
+			return fmt.Errorf("%w: %s cannot be created while %s exists", ErrRefConflict, full, ref)
+		}
+	}
+	return nil
+}
+
+// nextSlash returns the index of the next slash in s after index i, or -1.
+func nextSlash(s string, i int) int {
+	j := strings.Index(s[i+1:], "/")
+	if j < 0 {
+		return -1
+	}
+	return i + 1 + j
+}
+
+// DeleteBranch deletes the branch name, but only while it still points at
+// expect, the full object ID the caller last saw it at. A branch that has
+// moved since is left alone (ErrBranchMoved): whatever moved it may be
+// work. A branch that is already gone is not an error, so a cleanup that is
+// run again converges.
+//
+// It refuses two things `git update-ref -d` would happily do, both found by
+// running it:
+//
+//   - An expect that is not a full object ID (ErrInvalidObjectID). The
+//     all-zero ID, like an empty one, tells update-ref to check nothing at
+//     all, so either would make this an unconditional delete.
+//   - A branch some worktree has checked out (ErrCheckedOut), the main one
+//     included. update-ref is plumbing and does not look, and the worktree
+//     is left on a branch that no longer exists, where every file shows as
+//     a new one. `git branch -D` refuses the same thing.
+func (r *Repo) DeleteBranch(ctx context.Context, name, expect string) error {
+	if err := validateBranch(name); err != nil {
+		return err
+	}
+	if !isObjectID(expect) {
+		return fmt.Errorf("%w: deleting %s needs the full commit it is expected to point at, got %q", ErrInvalidObjectID, name, expect)
+	}
+	list, err := r.Worktrees(ctx)
+	if err != nil {
+		return err
+	}
+	for _, w := range list {
+		if w.Branch == name {
+			return fmt.Errorf("%w: %s is checked out at %s", ErrCheckedOut, name, w.Path)
+		}
+	}
+
+	_, err = r.run(ctx, r.top, "update-ref", "-d", "refs/heads/"+name, expect)
+	if err == nil {
+		return nil
+	}
+	// update-ref exits 1 both when the branch is gone and when it moved.
+	// Where the branch is now tells the two apart without reading the
+	// message.
+	tip, ok, tipErr := r.BranchTip(ctx, name)
+	switch {
+	case tipErr != nil:
+		return err
+	case !ok:
+		return nil
+	case tip != expect:
+		return fmt.Errorf("%w: %s is at %s, not %s", ErrBranchMoved, name, tip, expect)
+	default:
+		return err
+	}
+}
+
+// isObjectID reports whether s is a full SHA-1 or SHA-256 object ID other
+// than the all-zero one, in the lowercase hex git prints.
+func isObjectID(s string) bool {
+	if len(s) != 40 && len(s) != 64 {
+		return false
+	}
+	zero := true
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		switch {
+		case c == '0':
+		case c >= '1' && c <= '9', c >= 'a' && c <= 'f':
+			zero = false
+		default:
+			return false
+		}
+	}
+	return !zero
+}
+
+// ContainedElsewhere reports whether any ref other than the branch name
+// itself — another branch, a remote-tracking branch or a tag — contains the
+// branch's tip. It is the question to ask before deleting a branch: when it
+// is true, the branch holds no commit that deleting it would lose.
+//
+// It returns ErrNoBranch when there is no such branch. The branch never
+// counts as containing itself, which is the one thing an implementation
+// built on `for-each-ref --contains` gets wrong by default: the listing
+// always includes the branch, so "contained" would be true for every
+// branch, and a cleanup trusting it would delete unique work.
+//
+// Worktree HEADs and the reflog are deliberately not counted. A detached
+// worktree that happens to hold the commits is not a place anyone would
+// look for them, and a reflog entry expires.
+func (r *Repo) ContainedElsewhere(ctx context.Context, name string) (bool, error) {
+	tip, ok, err := r.BranchTip(ctx, name)
+	if err != nil {
+		return false, err
+	}
+	if !ok {
+		return false, fmt.Errorf("%w: %s", ErrNoBranch, name)
+	}
+	res, err := r.run(ctx, r.top, "for-each-ref", "--format=%(refname)", "--contains", tip,
+		"refs/heads", "refs/remotes", "refs/tags")
+	if err != nil {
+		return false, err
+	}
+	self := "refs/heads/" + name
+	for ref := range strings.SplitSeq(strings.TrimSuffix(res.Stdout, "\n"), "\n") {
+		if ref != "" && ref != self {
+			return true, nil
+		}
+	}
+	return false, nil
+}
