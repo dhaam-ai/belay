@@ -24,6 +24,7 @@ therefore not valid UTF-8 at all.
 | `loose.md` | A loose list: a blank line between every item. |
 | `one.md` | A plan with a single step, which `Delete` must refuse to empty. |
 | `nofinal.md` | `one.md` with no final newline. |
+| `tailless.md` | A plan whose step list is the last thing in it, with no newline after the last step, so there is no tail at all. An edit to that step must not add the newline the author never wrote. |
 | `unicode.md` | CJK, an em dash, accents, emoji and a ZWJ family sequence. |
 | `fenced.md` | A `## Steps` heading and a numbered list inside a fence **before** the real heading, and another fence inside a step. Neither is a step. |
 

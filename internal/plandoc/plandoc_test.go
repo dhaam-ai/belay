@@ -31,6 +31,7 @@ func read(t *testing.T, name string) []byte {
 var parseable = []string{
 	"canonical.md", "nested.md", "paren.md", "lazy.md", "ten.md",
 	"crlf.md", "loose.md", "one.md", "unicode.md", "fenced.md", "nofinal.md",
+	"tailless.md",
 }
 
 // TestParseFindsTheSteps pins what a step is: an item of the first ordered
@@ -133,6 +134,14 @@ func TestParseFindsTheSteps(t *testing.T) {
 			fixture: "nofinal.md",
 			want: []plandoc.Step{
 				{Number: 1, Text: "Add an `Add(a, b int) int` function to src/app.go."},
+			},
+		},
+		{
+			name:    "a plan that ends with its last step",
+			fixture: "tailless.md",
+			want: []plandoc.Step{
+				{Number: 1, Text: "Read the manifest."},
+				{Number: 2, Text: "Rebuild the registry from its pins."},
 			},
 		},
 		{
