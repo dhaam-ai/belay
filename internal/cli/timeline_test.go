@@ -18,6 +18,7 @@ import (
 	"github.com/dhaam-ai/belay/internal/journal"
 	"github.com/dhaam-ai/belay/internal/state"
 	"github.com/google/go-cmp/cmp"
+	"github.com/google/go-cmp/cmp/cmpopts"
 )
 
 // timelineBase is the fixture clock. Every fixture time is derived from it,
@@ -618,6 +619,132 @@ func TestTimelineRenderGolden(t *testing.T) {
 	}
 }
 
+// TestTimelineRenderListsTheFilesTheRunChanged pins the "Files changed:"
+// section: after everything else, one path per line, and nothing at all when
+// the run has changed no file. The paths come from an agent's reply, so a
+// control character in one is dropped rather than sent to the terminal.
+func TestTimelineRenderListsTheFilesTheRunChanged(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name  string
+		files []string
+		want  string
+	}{
+		{
+			name:  "listed after the summary, one per line",
+			files: []string{"cmd/cli.go", "go.sum", "handlers_test.go"},
+			want:  timelineGolden + "\nFiles changed:\n  cmd/cli.go\n  go.sum\n  handlers_test.go\n",
+		},
+		{
+			name: "no section when the run changed nothing",
+			want: timelineGolden,
+		},
+		{
+			name:  "no section for an empty list either",
+			files: []string{},
+			want:  timelineGolden,
+		},
+		{
+			name:  "a control character in a path is dropped",
+			files: []string{"evil\x1b[2Jname.go"},
+			want:  timelineGolden + "\nFiles changed:\n  evil[2Jname.go\n",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			tl := BuildTimeline(timelineDemoSelection(), timelineDemoManifest(),
+				timelineResult(timelineFixLoopRun(), false))
+			tl.ChangedFiles = tt.files
+
+			plain := timelineRender(t, tl, false)
+			if diff := cmp.Diff(tt.want, plain); diff != "" {
+				t.Errorf("rendered timeline mismatch (-want +got):\n%s", diff)
+			}
+
+			// With color on, the heading is dimmed like the summary's
+			// labels, and stripping the color leaves the plain output.
+			colored := timelineRender(t, tl, true)
+			if got := regexpSGR.ReplaceAllString(colored, ""); got != plain {
+				t.Errorf("stripping color changed the output:\n-want %q\n+got  %q", plain, got)
+			}
+			if len(tt.files) > 0 && !strings.Contains(colored, "\x1b[2mFiles changed:\x1b[0m") {
+				t.Errorf("color-on output does not dim the heading:\n%q", colored)
+			}
+		})
+	}
+}
+
+// TestTimelineLoadReadsTheFilesTheRunChanged reads the list from the run's
+// state.json, sorted and each file once, as belay timeline shows it. A
+// state.json that is missing or cannot be read leaves the list empty rather
+// than failing the timeline, as a missing manifest leaves out the goal.
+func TestTimelineLoadReadsTheFilesTheRunChanged(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name  string
+		state func(t *testing.T, path string)
+		want  []string
+	}{
+		{
+			name: "sorted and each file once",
+			state: func(t *testing.T, path string) {
+				st := state.NewState("a goal")
+				st.Code.ChangedFiles = []string{"handlers_test.go", "cmd/cli.go", "go.sum", "cmd/cli.go"}
+				if err := state.SaveState(path, st); err != nil {
+					t.Fatalf("SaveState: %v", err)
+				}
+			},
+			want: []string{"cmd/cli.go", "go.sum", "handlers_test.go"},
+		},
+		{
+			name: "a run that changed nothing",
+			state: func(t *testing.T, path string) {
+				if err := state.SaveState(path, state.NewState("a goal")); err != nil {
+					t.Fatalf("SaveState: %v", err)
+				}
+			},
+		},
+		{
+			name:  "no state.json",
+			state: func(*testing.T, string) {},
+		},
+		{
+			name: "a state.json that cannot be read",
+			state: func(t *testing.T, path string) {
+				if err := os.WriteFile(path, []byte("not json"), 0o600); err != nil {
+					t.Fatalf("WriteFile: %v", err)
+				}
+			},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			ws := t.TempDir()
+			const runID = "20260905T142530Z-bbbbbbbbbbbb"
+			timelineWriteRun(t, ws, runID, "a goal", timelineBase, timelineFixLoopRun())
+			layout, err := state.NewLayout(ws, runID)
+			if err != nil {
+				t.Fatalf("NewLayout: %v", err)
+			}
+			tt.state(t, layout.StatePath())
+
+			tl, err := LoadTimeline(ws, runID)
+			if err != nil {
+				t.Fatalf("LoadTimeline: %v", err)
+			}
+			if diff := cmp.Diff(tt.want, tl.ChangedFiles, cmpopts.EquateEmpty()); diff != "" {
+				t.Errorf("ChangedFiles (-want +got):\n%s", diff)
+			}
+		})
+	}
+}
+
 // TestTimelineRenderNumbersLoopIterations is the loop-visibility contract
 // stated as an assertion: three test runs and two repairs must be legible
 // without counting rows.
@@ -906,7 +1033,7 @@ func TestTimelineJSONShapeIsStable(t *testing.T) {
 	}
 
 	wantKeys := []string{
-		"ended_at", "entries", "goal", "interrupted", "interruption", "loops", "markers",
+		"changed_files", "ended_at", "entries", "goal", "interrupted", "interruption", "loops", "markers",
 		"next", "next_attempt", "run_dir", "run_id", "schema", "selected", "started_at",
 		"status", "total_runs", "totals", "workspace",
 	}
@@ -916,7 +1043,7 @@ func TestTimelineJSONShapeIsStable(t *testing.T) {
 	}
 
 	// Collections are always arrays, so a consumer can iterate unguarded.
-	for _, key := range []string{"entries", "markers", "loops"} {
+	for _, key := range []string{"entries", "markers", "loops", "changed_files"} {
 		if b := doc[key]; len(b) == 0 || b[0] != '[' {
 			t.Errorf("%q should always be an array, got %s", key, b)
 		}
@@ -1001,6 +1128,48 @@ func TestTimelineJSONShapeIsStable(t *testing.T) {
 	}
 	if typed.Totals.BudgetLimitUSD == nil || *typed.Totals.BudgetLimitUSD != 5 {
 		t.Errorf("totals.budget_limit_usd = %v, want 5", typed.Totals.BudgetLimitUSD)
+	}
+}
+
+// TestTimelineJSONListsTheFilesTheRunChanged puts the same list in the JSON
+// document, as an array that is never null.
+func TestTimelineJSONListsTheFilesTheRunChanged(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name  string
+		files []string
+		want  string
+	}{
+		{name: "the run's files", files: []string{"cmd/cli.go", "go.sum"}, want: `["cmd/cli.go","go.sum"]`},
+		{name: "none is an empty array, not null", want: `[]`},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			tl := BuildTimeline(timelineDemoSelection(), timelineDemoManifest(),
+				timelineResult(timelineFixLoopRun(), false))
+			tl.ChangedFiles = tt.files
+
+			var buf bytes.Buffer
+			if err := RenderTimelineJSON(&buf, tl); err != nil {
+				t.Fatalf("RenderTimelineJSON: %v", err)
+			}
+			var doc map[string]json.RawMessage
+			if err := json.Unmarshal(buf.Bytes(), &doc); err != nil {
+				t.Fatalf("output is not valid JSON: %v", err)
+			}
+			var compact bytes.Buffer
+			if raw, ok := doc["changed_files"]; ok {
+				if err := json.Compact(&compact, raw); err != nil {
+					t.Fatalf("compact changed_files: %v", err)
+				}
+			}
+			if got := compact.String(); got != tt.want {
+				t.Errorf("changed_files = %s, want %s", got, tt.want)
+			}
+		})
 	}
 }
 

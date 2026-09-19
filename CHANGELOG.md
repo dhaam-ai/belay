@@ -8,6 +8,14 @@ that only `pkg/belay` carries a compatibility promise. Everything under
 
 ## Unreleased
 
+### Added
+
+- **`belay timeline` lists the files a run changed.** After the totals, a
+  "Files changed:" section lists every file the run changed, one per line
+  and sorted, including the files the fix loop repaired. It is left out when
+  the run has changed nothing. `belay timeline --json` carries the same list
+  as `changed_files`.
+
 ### Changed
 
 - **belay v0.1.x can no longer resume a run this version has saved.** belay

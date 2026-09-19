@@ -13,6 +13,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode"
 	"unicode/utf8"
 
 	"github.com/dhaam-ai/belay/internal/journal"
@@ -232,6 +233,12 @@ type Timeline struct {
 	// the process is killed between write and the next record: expected, and
 	// reported as such.
 	InterruptedMidWrite bool
+	// ChangedFiles is every file the run has changed so far, relative to the
+	// workspace: state.json's Code.ChangedFiles, which the code node starts
+	// and each fix adds to. LoadTimeline sorts it and lists each file once.
+	// It is empty when state.json could not be read, as Goal is when the
+	// manifest could not be.
+	ChangedFiles []string
 }
 
 // InterruptedMidNode reports whether the run stopped with a node still
@@ -661,7 +668,28 @@ func LoadTimeline(workspace, runID string) (Timeline, error) {
 	if m, ok := timelineLoadManifest(workspace, sel.RunID); ok {
 		manifest = &m
 	}
-	return BuildTimeline(sel, manifest, res), nil
+	tl := BuildTimeline(sel, manifest, res)
+	tl.ChangedFiles = timelineChangedFiles(layout)
+	return tl, nil
+}
+
+// timelineChangedFiles reads the files a run has changed from its state.json,
+// sorted and each once.
+//
+// It reads state.json rather than the journal because that is where the list
+// lives: the code node records it, and each fix adds what its repair touched.
+// Like timelineLoadManifest it reports a file it cannot read as nothing to
+// show rather than as an error, so a timeline of a damaged run still renders.
+// It sorts and de-duplicates itself rather than trusting the list, which the
+// code node records in the order the agent reported it.
+func timelineChangedFiles(layout state.Layout) []string {
+	st, err := state.LoadState(layout.StatePath())
+	if err != nil {
+		return nil
+	}
+	files := slices.Clone(st.Code.ChangedFiles)
+	slices.Sort(files)
+	return slices.Compact(files)
 }
 
 // timelineNoValue is what the timeline prints where a number would be
@@ -929,9 +957,38 @@ func RenderTimeline(w io.Writer, tl Timeline, color bool) error {
 	}
 	timelineWriteTable(&b, s, tl)
 	timelineWriteSummary(&b, s, tl)
+	timelineWriteChangedFiles(&b, s, tl)
 
 	_, err := io.WriteString(w, b.String())
 	return err
+}
+
+// timelineWriteChangedFiles writes the files the run changed, one per line,
+// after everything else: the table says what the run did and what it cost,
+// and this says what it left behind. A run that changed nothing gets no
+// section, rather than a heading over an empty list.
+//
+// The paths are an agent's report, which belay checks for escaping the
+// repository but not for control characters, so those are dropped here: a
+// path must not be able to rewrite the terminal it is printed to.
+func timelineWriteChangedFiles(b *strings.Builder, s timelineStyle, tl Timeline) {
+	if len(tl.ChangedFiles) == 0 {
+		return
+	}
+	fmt.Fprintf(b, "\n%s\n", s.paint(timelineDim, "Files changed:"))
+	for _, path := range tl.ChangedFiles {
+		fmt.Fprintf(b, "  %s\n", timelineDropControl(path))
+	}
+}
+
+// timelineDropControl removes every control character from s.
+func timelineDropControl(s string) string {
+	return strings.Map(func(r rune) rune {
+		if unicode.IsControl(r) {
+			return -1
+		}
+		return r
+	}, s)
 }
 
 // timelineWriteHeader writes the identity block: which run this is, how it
@@ -1112,7 +1169,8 @@ const TimelineJSONVersion = 1
 //	  "entries":      [ …entry ],  // always present, possibly empty
 //	  "markers":      [ …marker ],
 //	  "loops":        [ {"node": string, "executions": number} ],
-//	  "totals":       { …totals }
+//	  "totals":       { …totals },
+//	  "changed_files": [ string ]  // sorted, each once; always present, possibly empty
 //	}
 //
 // An entry is one node execution:
@@ -1150,6 +1208,7 @@ type timelineJSONDoc struct {
 	Markers      []timelineJSONMarker      `json:"markers"`
 	Loops        []timelineJSONLoop        `json:"loops"`
 	Totals       timelineJSONTotals        `json:"totals"`
+	ChangedFiles []string                  `json:"changed_files"`
 }
 
 // timelineJSONInterruption reports a run that stopped without recording an
@@ -1247,9 +1306,10 @@ func timelineToJSON(tl Timeline) timelineJSONDoc {
 		Interrupted: tl.Interrupted,
 		// Collections are always present as arrays, never null, so a
 		// consumer can iterate without a nil check.
-		Entries: make([]timelineJSONEntry, 0, len(tl.Entries)),
-		Markers: make([]timelineJSONMarker, 0, len(tl.Markers)),
-		Loops:   make([]timelineJSONLoop, 0, len(tl.Loops)),
+		Entries:      make([]timelineJSONEntry, 0, len(tl.Entries)),
+		Markers:      make([]timelineJSONMarker, 0, len(tl.Markers)),
+		Loops:        make([]timelineJSONLoop, 0, len(tl.Loops)),
+		ChangedFiles: append(make([]string, 0, len(tl.ChangedFiles)), tl.ChangedFiles...),
 		Totals: timelineJSONTotals{
 			Nodes:           tl.Totals.Nodes,
 			AgentDurationMS: tl.Totals.AgentDuration.Milliseconds(),
@@ -1336,7 +1396,8 @@ func newTimelineCmd() *cobra.Command {
 		Use:   "timeline [run-id]",
 		Short: "Show one run's execution order, timing and cost",
 		Long: `Show how one run actually unfolded: every node in the order it ran, how
-long each took, what each cost, and where the run looped.
+long each took, what each cost, and where the run looped. The files the run
+changed are listed last.
 
 With no run id, the most recent run in the workspace is used and named in the
 output. A node that ran more than once is numbered — "test #2/3" — so a fix
