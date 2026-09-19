@@ -677,6 +677,100 @@ func TestTimelineRenderListsTheFilesTheRunChanged(t *testing.T) {
 	}
 }
 
+// timelineReadmeRun is the run README.md's "Example timeline output" shows:
+// the plan pauses at the approval gate, the tests fail twice and pass after
+// the second repair, and the change is three files.
+//
+// The durations and costs are illustrative. Everything else is what belay
+// records for such a run: each note is in the words its node writes (plan,
+// approve, code, write, the go-test runner, fix, and review with
+// golangci-lint), a failing test run finishes ok and routes to fix, the
+// dispatcher gives every node a usage record, and the gate's pause is a
+// paused approve followed by run_paused and run_resumed.
+func timelineReadmeRun() []journal.Record {
+	const planPath = "/home/you/app/.belay/runs/20260905T142530Z-1f2e3d4c5b6a/artifacts/plan.md"
+	free := func() *journal.Usage { return usd(0, 0, 0, false) }
+	return newTimelineBuilder().
+		run(journal.EventRunStarted).
+		node(timelineNodeSpec{node: "plan", status: journal.StatusOK, durationMS: 12300, next: "approve",
+			usage: usd(5200, 1400, 0.040, false),
+			note:  "plan archived to artifacts/plan.md (1843 bytes); next approve"}).
+		node(timelineNodeSpec{node: "approve", status: journal.StatusPaused, durationMS: 10, next: "approve",
+			usage: free(),
+			note: "Plan is waiting for your approval. Review or edit " + planPath +
+				", then continue with: belay resume 20260905T142530Z-1f2e3d4c5b6a"}).
+		pauseFor(4*time.Minute + 12*time.Second).
+		node(timelineNodeSpec{node: "approve", status: journal.StatusOK, durationMS: 10, next: "code",
+			usage: free(), note: "Plan approved; proceeding to code."}).
+		node(timelineNodeSpec{node: "code", status: journal.StatusOK, durationMS: 45200, next: "write",
+			usage: usd(21000, 8300, 0.180, false),
+			note:  "code: claude-code reported changes to 3 file(s) (new session)"}).
+		node(timelineNodeSpec{node: "write", status: journal.StatusOK, durationMS: 100, next: "test",
+			usage: free(),
+			note:  "verified 3 changed file(s): 3 present, 0 deleted; recorded artifacts/diff-0005.patch"}).
+		node(timelineNodeSpec{node: "test", status: journal.StatusOK, durationMS: 3500, next: "fix",
+			usage: free(), note: "go-test: 12 tests, 1 failed"}).
+		node(timelineNodeSpec{node: "fix", status: journal.StatusOK, durationMS: 28400, next: "test",
+			usage: usd(14000, 5100, 0.120, false), note: "fix attempt 1 of 3: 1 of 12 tests failing"}).
+		node(timelineNodeSpec{node: "test", status: journal.StatusOK, durationMS: 2100, next: "fix",
+			usage: free(), note: "go-test: 12 tests, 1 failed"}).
+		node(timelineNodeSpec{node: "fix", status: journal.StatusOK, durationMS: 31200, next: "test",
+			usage: usd(16500, 6200, 0.150, false), note: "fix attempt 2 of 3: 1 of 12 tests failing"}).
+		node(timelineNodeSpec{node: "test", status: journal.StatusOK, durationMS: 2900, next: "review",
+			usage: free(), note: "go-test: 12 tests, 0 failed"}).
+		node(timelineNodeSpec{node: "review", status: journal.StatusOK, durationMS: 6400,
+			usage: free(),
+			note:  "gate pass: no issues at or above fail_on=major (source=golangci-lint, report=artifacts/review-11.json)"}).
+		run(journal.EventRunCompleted).
+		records
+}
+
+// TestReadmeTimelineExampleIsWhatTimelinePrints keeps README.md's "Example
+// timeline output" exactly what belay timeline prints for timelineReadmeRun.
+// The example once showed a table layout and a "Files changed:" section that
+// belay never printed; a person comparing it with their own run would think
+// one of the two was broken.
+func TestReadmeTimelineExampleIsWhatTimelinePrints(t *testing.T) {
+	t.Parallel()
+
+	readme, err := os.ReadFile(filepath.Join("..", "..", "README.md"))
+	if err != nil {
+		t.Fatalf("read README.md: %v", err)
+	}
+	const opening = "Example timeline output:\n\n```\n"
+	_, rest, found := strings.Cut(string(readme), opening)
+	if !found {
+		t.Fatalf("README.md has no %q block", strings.TrimSpace(opening))
+	}
+	example, _, found := strings.Cut(rest, "```\n")
+	if !found {
+		t.Fatal("README.md's example timeline output has no closing fence")
+	}
+
+	if diff := cmp.Diff(timelineReadmeExample(t), example); diff != "" {
+		t.Errorf("README.md's example is not what belay timeline prints (-printed +README):\n%s", diff)
+	}
+}
+
+// timelineReadmeExample renders timelineReadmeRun as belay timeline prints
+// it with colour off.
+func timelineReadmeExample(t *testing.T) string {
+	t.Helper()
+	const runID = "20260905T142530Z-1f2e3d4c5b6a"
+	tl := BuildTimeline(
+		TimelineSelection{RunID: runID, Workspace: "/home/you/app", Dir: "/home/you/app/.belay/runs/" + runID, TotalRuns: 4},
+		&state.Manifest{
+			SchemaVersion: state.ManifestSchemaVersion,
+			RunID:         runID,
+			Goal:          "add a --json flag to the CLI output",
+			Status:        state.RunStatusCompleted,
+			Budget:        state.Budget{LimitUSD: 5},
+		},
+		timelineResult(timelineReadmeRun(), false))
+	tl.ChangedFiles = []string{"cmd/cli.go", "go.sum", "handlers_test.go"}
+	return timelineRender(t, tl, false)
+}
+
 // TestTimelineLoadReadsTheFilesTheRunChanged reads the list from the run's
 // state.json, sorted and each file once, as belay timeline shows it. A
 // state.json that is missing or cannot be read leaves the list empty rather

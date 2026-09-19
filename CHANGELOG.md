@@ -14,7 +14,9 @@ that only `pkg/belay` carries a compatibility promise. Everything under
   "Files changed:" section lists every file the run changed, one per line
   and sorted, including the files the fix loop repaired. It is left out when
   the run has changed nothing. `belay timeline --json` carries the same list
-  as `changed_files`.
+  as `changed_files`. The README's example output showed this section before
+  belay printed it, in a table layout belay never used; it now shows exactly
+  what belay prints, and a test keeps it that way.
 
 ### Changed
 
