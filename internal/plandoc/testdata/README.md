@@ -7,9 +7,11 @@ list under `## Steps`. None of them is a golden file — nothing regenerates
 them, and they are meant to be edited by hand when a new shape needs
 covering, the way a person edits a plan.
 
-Two of them exist for their bytes rather than their words, so open them with
-care: `crlf.md` ends every line with CR LF, and `latin1.md` is Latin-1 and
-therefore not valid UTF-8 at all.
+Five of them exist for their bytes rather than their words, so open them
+with care and do not let an editor "fix" them: `crlf.md` ends every line with
+CR LF, `tabs.md` has a tab after each marker, `nofinal.md` and `tailless.md`
+have no final newline, and `latin1.md` is Latin-1 and therefore not valid
+UTF-8 at all.
 
 ## Plans the parser accepts
 
@@ -25,6 +27,7 @@ therefore not valid UTF-8 at all.
 | `one.md` | A plan with a single step, which `Delete` must refuse to empty. |
 | `nofinal.md` | `one.md` with no final newline. |
 | `tailless.md` | A plan whose step list is the last thing in it, with no newline after the last step, so there is no tail at all. An edit to that step must not add the newline the author never wrote. |
+| `tabs.md` | A tab after each marker, and a continuation line indented four spaces. The tab starts at column 2 and stops at column 4, so the content column is 4 and that line belongs to step 1. |
 | `unicode.md` | CJK, an em dash, accents, emoji and a ZWJ family sequence. |
 | `fenced.md` | A `## Steps` heading and a numbered list inside a fence **before** the real heading, and another fence inside a step. Neither is a step. |
 

@@ -31,7 +31,7 @@ func read(t *testing.T, name string) []byte {
 var parseable = []string{
 	"canonical.md", "nested.md", "paren.md", "lazy.md", "ten.md",
 	"crlf.md", "loose.md", "one.md", "unicode.md", "fenced.md", "nofinal.md",
-	"tailless.md",
+	"tailless.md", "tabs.md",
 }
 
 // TestParseFindsTheSteps pins what a step is: an item of the first ordered
@@ -141,6 +141,17 @@ func TestParseFindsTheSteps(t *testing.T) {
 			fixture: "tailless.md",
 			want: []plandoc.Step{
 				{Number: 1, Text: "Read the manifest."},
+				{Number: 2, Text: "Rebuild the registry from its pins."},
+			},
+		},
+		{
+			// "1." ends at column 2, so the tab after it stops at column 4,
+			// not at column 4 past the marker: the content column is 4, and
+			// a line indented four spaces continues the step.
+			name:    "a tab after the marker is measured from where it starts",
+			fixture: "tabs.md",
+			want: []plandoc.Step{
+				{Number: 1, Text: "Read the manifest.\nIt holds the run's pinned wiring."},
 				{Number: 2, Text: "Rebuild the registry from its pins."},
 			},
 		},

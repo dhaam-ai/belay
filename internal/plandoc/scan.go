@@ -71,16 +71,21 @@ func isBlank(text string) bool { return strings.TrimSpace(text) == "" }
 // indentWidth returns the display column the line's first non-whitespace
 // character sits at, expanding tabs the way CommonMark does.
 func indentWidth(text string) int {
-	col := 0
-	for _, r := range text {
-		switch r {
-		case ' ':
-			col++
-		case '\t':
+	return advance(0, text[:len(text)-len(strings.TrimLeft(text, " \t"))])
+}
+
+// advance returns the column reached by writing ws starting at column col.
+//
+// A tab stops at the next multiple of tabWidth from where it actually
+// starts, which is why the column has to be threaded through: the tab in
+// "1.\tfoo" starts at column 2 and is two columns wide, not four.
+func advance(col int, ws string) int {
+	for _, r := range ws {
+		if r == '\t' {
 			col += tabWidth - col%tabWidth
-		default:
-			return col
+			continue
 		}
+		col++
 	}
 	return col
 }
@@ -202,7 +207,8 @@ func parseMarker(text string) (marker, bool) {
 	}
 
 	pad := rest[:len(rest)-len(strings.TrimLeft(rest, " \t"))]
-	width := indentWidth(pad)
+	markerEnd := indentWidth(indent) + len(digits) + 1
+	width := advance(markerEnd, pad) - markerEnd
 	switch {
 	case pad == "":
 		// An item whose marker is alone on its line: its content column is
@@ -219,7 +225,7 @@ func parseMarker(text string) (marker, bool) {
 		digits: digits,
 		delim:  delim,
 		pad:    pad,
-		col:    indentWidth(indent) + len(digits) + 1 + width,
+		col:    markerEnd + width,
 		number: atoi(digits),
 	}, true
 }
