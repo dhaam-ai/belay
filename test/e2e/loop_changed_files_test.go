@@ -29,6 +29,16 @@ import (
 // dispatcher over the same run directory. Crash recovery closes that attempt
 // as interrupted and re-runs fix at attempt 2 (see the dispatcher's heal). The
 // re-run must record the same list an uninterrupted run records.
+//
+// What that row proves is the recovery path — heal, the re-run at the next
+// attempt, the list at the end — and no more. The crash lands before fix
+// returns, so no Patch was applied and the re-run starts from the very
+// blackboard an uninterrupted run starts from. The window where convergence
+// is actually at stake is a crash after the dispatcher applied fix's Patch and
+// before it journalled node_finished: the re-run then starts from a list that
+// already holds the repair's files. TestFixRecordsTheFilesItsRepairTouched in
+// internal/nodes/fix covers that one, by running fix a second time on the
+// state its own patch produced.
 func TestLoop_FixLoopEditsAreRecordedInChangedFiles(t *testing.T) {
 	tests := []struct {
 		name       string
