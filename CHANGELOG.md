@@ -35,6 +35,18 @@ that only `pkg/belay` carries a compatibility promise. Everything under
 
 ### Fixed
 
+- **A repair that quotes the failure it fixed no longer poisons or ends the
+  run.** The fix node read its reply with the code node's parser, which, when
+  no changed-files block is present, salvages paths out of any unified diff in
+  the text. The fix prompt hands the agent its test failures and asks what was
+  broken, so a reply quoting one is ordinary — and a test failure is routinely
+  a diff. A quoted testify comparison recorded a file called "Actual" as
+  changed, which then reached the reviewer, the next repair's prompt,
+  state.json and `belay timeline`; a quoted golden-file `diff -u`, whose paths
+  are absolute, was refused as an unusable report, which failed the node and
+  ended the run for good after the repair had been made and paid for. A
+  repair's reply is now read for the changed-files block alone. The code node
+  is unchanged: its own prompt quotes no diff.
 - **`review.ai.mcp.url` is now required for `review.ai.mcp.mode: cloud`
   when `review.mode` is `ai`.** `cloud`, the default mode, has no built-in
   address, so the AI reviewer needs the URL as much as `server` does, but

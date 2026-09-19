@@ -50,10 +50,22 @@
 // touches. The review node hands it to a Reviewer, and this node's prompt
 // lists it back to the agent. A repair edits the workspace too, so Run reads
 // the changed-files block from the reply, with the code node's own parser
-// (code.ParseChangedFiles), and sets ChangedFiles to the union of the files
-// already recorded and the files the repair reports: sorted, and each listed
-// once. Code's other fields are carried through unchanged, because
+// (code.ParseChangedFilesBlock), and sets ChangedFiles to the union of the
+// files already recorded and the files the repair reports: sorted, and each
+// listed once. Code's other fields are carried through unchanged, because
 // Patch.Code replaces the whole struct.
+//
+// The block is all it reads. The parser is shared with the code node; its
+// fallback of salvaging paths out of any unified diff in a reply deliberately
+// is not. This node's prompt quotes the failure it wants repaired, and a
+// failure is routinely a unified diff — testify's "--- Expected / +++ Actual",
+// a golden-file `diff -u` between two absolute paths — so a reply that quotes
+// the failure back is the normal case here, where it never occurs in a reply
+// to the code node. Salvaging from one would record a file the run never
+// changed, or refuse the whole report over a path the agent only quoted, which
+// ends the run for good after the repair was made and paid for. The cost is
+// that a repair which emitted a diff instead of the block reports nothing; the
+// prompt tells the agent that a file it does not list is recorded nowhere.
 //
 // This node forms the union, not the write node. write verifies a claim
 // against the disk; belay keeps no pre-change baseline, so write has no way
@@ -263,7 +275,7 @@ func (n *Node) Run(ctx context.Context, rc *graph.RunContext) (graph.Result, err
 		return graph.Result{}, err
 	}
 
-	reported, err := code.ParseChangedFiles(resp.Text)
+	reported, err := code.ParseChangedFilesBlock(resp.Text)
 	if err != nil {
 		return graph.Result{}, fmt.Errorf("fix: the reply's changed-file report: %w", err)
 	}

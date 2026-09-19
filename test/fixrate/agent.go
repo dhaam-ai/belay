@@ -84,10 +84,10 @@ func AllRepair(files []string) ScriptedPlan {
 }
 
 // changedFilesTag is the fenced-block info string belay's code and fix
-// nodes both ask for, and parse back out of an agent's reply with
-// code.ParseChangedFiles: the fix prompt asks for the code node's block by
-// the code node's tag (code.ChangedFilesTag in internal/nodes/code's
-// prompt.go). It is a stable, documented part of the protocol between an
+// nodes both ask for, and parse back out of an agent's reply
+// (code.ParseChangedFiles in the code node, code.ParseChangedFilesBlock in
+// fix): the fix prompt asks for the code node's block by the code node's
+// tag (code.ChangedFilesTag in internal/nodes/code's prompt.go). It is a stable, documented part of the protocol between an
 // AgentBackend and those two nodes, not a symbol this package imports —
 // replicating the exact string here is how any AgentBackend, real or fake,
 // is expected to report what it touched.

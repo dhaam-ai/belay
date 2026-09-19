@@ -8,9 +8,12 @@ import (
 // ParseChangedFiles resolves the set of repository-relative paths an agent's
 // reply reports as changed.
 //
-// It is exported for the fix node, which reads the same block from a
-// repair's reply. One parser holds every reply to one set of rules, whichever
-// node it answered, so a path this node refuses is refused there too.
+// The rules below are shared with the fix node, which reads the same block
+// from a repair's reply: one parser holds every reply to one set of rules,
+// whichever node it answered, so a path this node refuses is refused there
+// too. The diff salvage is deliberately not shared — it is sound only for a
+// reply to a prompt that quotes no diff of its own, which is this node's and
+// not the fix node's. ParseChangedFilesBlock is what fix calls, and says why.
 //
 // # Precedence
 //
@@ -41,20 +44,50 @@ import (
 // The returned slice is nil when nothing was reported, so the caller can
 // distinguish "reported nothing" from "reported an empty set".
 func ParseChangedFiles(text string) ([]string, error) {
-	if raw, ok := changedFilesBlock(text); ok {
-		paths, err := cleanPaths(raw, sourceBlock)
-		if err != nil {
-			return nil, err
-		}
-		if len(paths) > 0 {
-			return paths, nil
-		}
+	paths, err := ParseChangedFilesBlock(text)
+	if err != nil || len(paths) > 0 {
+		return paths, err
 	}
 	diff := extractDiff(text)
 	if diff == "" {
 		return nil, nil
 	}
 	return cleanPaths(changedFiles(diff), sourceDiff)
+}
+
+// ParseChangedFilesBlock resolves the changed-files block alone, holding it to
+// exactly the rules ParseChangedFiles does — and never salvaging paths from a
+// diff. A block that is absent, or present with no entries, reports nothing:
+// nil, nil.
+//
+// It exists because the salvage is only sound for a reply to a prompt that
+// quoted no diff itself. The code node's prompt quotes none, so a diff in its
+// reply is the agent's own work. The fix node's prompt quotes the failure it
+// wants repaired, and a test failure is routinely printed as a unified diff —
+// testify's "--- Expected / +++ Actual", a golden-file `diff -u` naming two
+// absolute paths. Salvaging from a repair's reply therefore either records a
+// file the run never touched ("Actual") or refuses the whole report over a
+// path the agent only quoted, which ends the run after the repair was made
+// and paid for. Reading the block alone cannot do either.
+//
+// What it gives up is a repair that emitted a diff instead of the block: its
+// files go unrecorded, and the prompt says as much to the agent. That is the
+// cheaper mistake — a file missing from the record costs a review that does
+// not look at it, where a phantom file misleads the reviewer, the next
+// prompt, state.json and `belay timeline` alike.
+func ParseChangedFilesBlock(text string) ([]string, error) {
+	raw, ok := changedFilesBlock(text)
+	if !ok {
+		return nil, nil
+	}
+	paths, err := cleanPaths(raw, sourceBlock)
+	if err != nil {
+		return nil, err
+	}
+	if len(paths) == 0 {
+		return nil, nil
+	}
+	return paths, nil
 }
 
 // Where a claimed path came from, for the error message. A malformed entry

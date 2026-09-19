@@ -134,6 +134,97 @@ func TestFixRecordsTheFilesItsRepairTouched(t *testing.T) {
 	}
 }
 
+// quotedTestifyDiff is a repair reply that quotes the test failure it was
+// given: testify prints its comparison as a unified diff, and the fix prompt
+// hands the agent that output and asks what was broken. The reply also shows
+// the edit it made as a diff, in the same prose.
+const quotedTestifyDiff = "The limiter admitted four requests, not five. The suite said:\n\n" +
+	"Error:          Not equal:\n" +
+	"                Diff:\n" +
+	"--- Expected\n" +
+	"+++ Actual\n" +
+	"@@ -1 +1 @@\n" +
+	"-5\n" +
+	"+4\n" +
+	"\n" +
+	"So I raised the burst:\n\n" +
+	"--- a/limiter.go\n" +
+	"+++ b/limiter.go\n" +
+	"@@ -7 +7 @@\n" +
+	"-burst := 4\n" +
+	"+burst := 5\n"
+
+// quotedGoldenDiff is a repair reply that quotes a golden-file failure. The
+// paths in it are absolute, because that is how `diff -u` and Go's own test
+// output name a temporary directory.
+const quotedGoldenDiff = "The golden file no longer matched:\n\n" +
+	"diff -u testdata/out.golden /tmp/TestRender123/out\n" +
+	"--- /Users/me/repo/testdata/out.golden\n" +
+	"+++ /tmp/TestRender123/out\n" +
+	"@@ -1 +1 @@\n" +
+	"-old\n" +
+	"+new\n" +
+	"\n" +
+	"I regenerated it.\n"
+
+// TestFixReadsOnlyTheChangedFilesBlock pins that a repair's reply is read for
+// the block the prompt asked for and nothing else.
+//
+// The code node's parser also salvages paths from any unified diff in a reply,
+// which is right there: nothing in a code prompt quotes a diff. A fix prompt
+// quotes the failure it wants repaired, so a diff in a repair's reply is as
+// likely to be the failure as the repair — and reading it either invents a
+// file the run never changed or, when the quoted paths are absolute, refuses
+// the whole report and ends the run after the repair was made and paid for.
+func TestFixReadsOnlyTheChangedFilesBlock(t *testing.T) {
+	tests := []struct {
+		name  string
+		prior []string
+		reply string
+		want  []string
+	}{
+		{
+			name:  "a quoted test failure is not a change report",
+			prior: []string{"a.go"},
+			reply: quotedTestifyDiff,
+			want:  []string{"a.go"},
+		},
+		{
+			name:  "a quoted golden-file diff is not a refusal",
+			prior: []string{"a.go"},
+			reply: quotedGoldenDiff,
+			want:  []string{"a.go"},
+		},
+		{
+			name:  "the block wins over a diff in the same reply",
+			prior: []string{"a.go"},
+			reply: quotedTestifyDiff + "\n" + changedFilesReply("limiter.go"),
+			want:  []string{"a.go", "limiter.go"},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			st := failingState(0)
+			st.Code = state.Code{SessionID: "sess-code-1", ChangedFiles: slices.Clone(tt.prior)}
+			h := newHarness(t, st)
+			h.agent.Responses = []belay.AgentResponse{{Text: tt.reply, SessionID: "sess-42"}}
+
+			res, err := fix.New().Run(context.Background(), h.rc)
+			if err != nil {
+				t.Fatalf("Run: %v", err)
+			}
+			applied := st
+			applied.Code.ChangedFiles = slices.Clone(st.Code.ChangedFiles)
+			if err := res.Patch.Apply(&applied); err != nil {
+				t.Fatalf("Apply: %v", err)
+			}
+			if diff := cmp.Diff(tt.want, applied.Code.ChangedFiles); diff != "" {
+				t.Errorf("ChangedFiles after the repair (-want +got):\n%s", diff)
+			}
+		})
+	}
+}
+
 // TestFixRefusesAnUnusableChangedFilesReport: a reply naming a path outside
 // the repository is refused whole, exactly as the code node refuses one,
 // because a filtered report records a half-truth as fact. The exchange is

@@ -188,9 +188,10 @@ func TestBuildPromptFailedGate(t *testing.T) {
 }
 
 // TestBuildPromptAsksForTheChangedFilesBlock: Run records the files a repair
-// reports, so the prompt has to ask for the report, in the block the code
-// node's parser reads. The example the prompt shows is parsed here with that
-// parser, so the instruction and the parser cannot drift apart.
+// reports, so the prompt has to ask for the report, in the block Run reads
+// back. The example the prompt shows is parsed here with the very parser Run
+// calls — the block-only one, since a repair's reply may quote a diff — so the
+// instruction and the parser cannot drift apart.
 func TestBuildPromptAsksForTheChangedFilesBlock(t *testing.T) {
 	tests := []struct {
 		name string
@@ -214,12 +215,12 @@ func TestBuildPromptAsksForTheChangedFilesBlock(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			got := buildPrompt(tt.in)
 
-			example, err := code.ParseChangedFiles(got)
+			example, err := code.ParseChangedFilesBlock(got)
 			if err != nil {
-				t.Fatalf("the code node's parser refused the prompt's example block: %v\n--- prompt ---\n%s", err, got)
+				t.Fatalf("Run's parser refused the prompt's example block: %v\n--- prompt ---\n%s", err, got)
 			}
 			if len(example) == 0 {
-				t.Errorf("the prompt shows no changed-files block the code node's parser reads\n--- prompt ---\n%s", got)
+				t.Errorf("the prompt shows no changed-files block Run's parser reads\n--- prompt ---\n%s", got)
 			}
 			for _, want := range []string{
 				"every file this repair created, modified or deleted",

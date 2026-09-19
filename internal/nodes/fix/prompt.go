@@ -296,7 +296,12 @@ func writeInstructions(b *strings.Builder, in promptInput) {
 // writeReportRequest asks for the changed-files block Run reads back. It is
 // the code node's block, by the code node's tag (code.ChangedFilesTag), so a
 // session that was told once how to report its files is asked the same way
-// again, and code.ParseChangedFiles holds the reply to the same rules.
+// again, and code.ParseChangedFilesBlock holds the reply to the same rules.
+//
+// The block is also the only thing Run reads: the code node's parser would
+// salvage paths from a diff, and this prompt quotes the failure it wants
+// repaired, which is routinely a diff. So the instruction below has to say,
+// in as many words, that a file the agent does not list is recorded nowhere.
 //
 // It asks for the files this repair touched, not every file the run has
 // changed. Run keeps the union, so a file recorded earlier stays recorded
