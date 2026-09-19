@@ -112,7 +112,11 @@ func startRun(cmd *cobra.Command, want string) error {
 		return refuseToStart(u, plan)
 	}
 
-	store, err := createRun(plan, want)
+	runID, err := state.NewRunID()
+	if err != nil {
+		return &ExitError{Code: graph.ExitFailed, Message: "belay: " + err.Error(), Err: err}
+	}
+	store, err := createRun(plan, runSpec{Workspace: plan.workspace, RunID: runID, Goal: want})
 	if err != nil {
 		return &ExitError{Code: graph.ExitFailed, Message: "belay: " + err.Error(), Err: err}
 	}
@@ -121,15 +125,28 @@ func startRun(cmd *cobra.Command, want string) error {
 	return driveRun(cmd, u, plan, store, false)
 }
 
+// runSpec names the run createRun makes: where it lives, what it is called,
+// and what it is for.
+//
+// The caller chooses the run id, not createRun, so that a caller can record
+// the id somewhere of its own before the run exists and find the run again
+// after a crash. `belay run` has nowhere to record it and simply asks
+// state.NewRunID for one.
+type runSpec struct {
+	// Workspace is the absolute path of the repository the run works on.
+	// The run's directory is made under it, in .belay/runs/.
+	Workspace string
+	// RunID names the run and its directory.
+	RunID string
+	// Goal is what the person asked for, exactly as they typed it.
+	Goal string
+}
+
 // createRun lays down the run directory, its manifest and its initial state.
 // It is the first thing in `belay run` that writes anything at all;
 // everything before it is resolution, which is what lets --dry-run stop here.
-func createRun(plan *runPlan, want string) (*state.Store, error) {
-	runID, err := state.NewRunID()
-	if err != nil {
-		return nil, err
-	}
-	layout, err := state.NewLayout(plan.workspace, runID)
+func createRun(plan *runPlan, spec runSpec) (*state.Store, error) {
+	layout, err := state.NewLayout(spec.Workspace, spec.RunID)
 	if err != nil {
 		return nil, err
 	}
@@ -139,11 +156,11 @@ func createRun(plan *runPlan, want string) (*state.Store, error) {
 	}
 
 	now := time.Now().UTC()
-	manifest := state.NewManifest(now, runID, plan.workspace, want, plan.config)
+	manifest := state.NewManifest(now, spec.RunID, spec.Workspace, spec.Goal, plan.config)
 	if err := state.SaveManifest(layout.ManifestPath(), manifest); err != nil {
 		return nil, fmt.Errorf("cannot write %s: %w", layout.ManifestPath(), err)
 	}
-	if err := state.SaveState(layout.StatePath(), state.NewState(want)); err != nil {
+	if err := state.SaveState(layout.StatePath(), state.NewState(spec.Goal)); err != nil {
 		return nil, fmt.Errorf("cannot write %s: %w", layout.StatePath(), err)
 	}
 	return state.NewStore(layout), nil

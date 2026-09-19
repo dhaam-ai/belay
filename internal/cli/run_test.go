@@ -256,6 +256,53 @@ func TestRunArgumentErrors(t *testing.T) {
 	}
 }
 
+// TestCreateRunLaysDownTheRunItWasAskedFor pins createRun's promise to its
+// caller: the run it makes is under the workspace and id the caller chose,
+// the dispatcher can load both of its files, and belay resume can find it.
+func TestCreateRunLaysDownTheRunItWasAskedFor(t *testing.T) {
+	ws := goWorkspace(t)
+	plan, err := resolve(resolveRequest{workspace: ws, logger: quietLogger()})
+	if err != nil {
+		t.Fatalf("resolve: %v", err)
+	}
+	const runID = "20260905T120000Z-abcdef123456"
+
+	store, err := createRun(plan, runSpec{Workspace: ws, RunID: runID, Goal: "add tests"})
+	if err != nil {
+		t.Fatalf("createRun: %v", err)
+	}
+	if store == nil {
+		t.Fatal("createRun returned no store and no error")
+	}
+	if got := store.Layout().RunID(); got != runID {
+		t.Errorf("run id = %q, want the one the caller chose, %q", got, runID)
+	}
+
+	manifest, err := store.LoadManifest()
+	if err != nil {
+		t.Fatalf("load manifest: %v", err)
+	}
+	if manifest.RunID != runID || manifest.Workspace != ws || manifest.Goal != "add tests" {
+		t.Errorf("manifest names run %q in %q for %q, want run %q in %q for %q",
+			manifest.RunID, manifest.Workspace, manifest.Goal, runID, ws, "add tests")
+	}
+	blackboard, err := store.LoadState()
+	if err != nil {
+		t.Fatalf("load state: %v", err)
+	}
+	if blackboard.Goal != "add tests" {
+		t.Errorf("state goal = %q, want %q", blackboard.Goal, "add tests")
+	}
+
+	chosen, err := chooseRun(ws, "")
+	if err != nil {
+		t.Fatalf("belay resume cannot find the run createRun made: %v", err)
+	}
+	if chosen.id != runID {
+		t.Errorf("belay resume chose %q, want %q", chosen.id, runID)
+	}
+}
+
 func TestReportOutcomeMapsExitCodesAndExplainsItself(t *testing.T) {
 	layout, err := state.NewLayout(t.TempDir(), "20260905T120000Z-abcdef123456")
 	if err != nil {
