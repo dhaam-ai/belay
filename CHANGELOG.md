@@ -41,6 +41,12 @@ that only `pkg/belay` carries a compatibility promise. Everything under
 
 ### Fixed
 
+- **belay no longer says its write step saves the agent's changes.** The
+  closing report described the write step as "saving the agent's changes
+  into your repository", and `belay run --help` said belay "saves the
+  files". The agent edits the files itself, in place; the write step checks
+  the files it reported changing and records them, and never writes to your
+  repository. Both now say that.
 - **A dry run with `graph.approval: false` no longer shows the approve gate on
   the route.** The route belay prints is the walk a run takes, and with
   approval off the plan node goes straight to code — which the line under the

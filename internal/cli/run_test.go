@@ -169,11 +169,17 @@ func TestRunHelpReadsAsEnglish(t *testing.T) {
 		"belay resume",
 		"--dry-run",
 		"without creating anything or spending anything",
+		// The write step records the files the agent changed; the agent
+		// has already saved them (internal/nodes/write).
+		"records which files it changed",
 	}
 	for _, phrase := range want {
 		if !strings.Contains(out, phrase) {
 			t.Errorf("belay run --help never mentions %q", phrase)
 		}
+	}
+	if strings.Contains(out, "saves the files") {
+		t.Error(`belay run --help says belay "saves the files"; the agent edits them in place, and belay only records them`)
 	}
 }
 
@@ -613,6 +619,21 @@ func TestReportOutcomeMapsExitCodesAndExplainsItself(t *testing.T) {
 			runErr:   graph.ErrNodeFailed,
 			wantCode: graph.ExitFailed,
 			wantSaid: []string{"could not finish", "review — running the quality gate", "belay timeline"},
+		},
+		{
+			// The write step reads the workspace and never changes it
+			// (internal/nodes/write): the agent has already edited the
+			// files in place. Saying it saves them into the repository
+			// tells a person the change landed at a step it did not.
+			name: "failed at the write step",
+			outcome: graph.Outcome{
+				Status: state.RunStatusFailed, ExitCode: graph.ExitFailed,
+				Node: graph.NodeWrite, Steps: 4,
+			},
+			runErr:      graph.ErrNodeFailed,
+			wantCode:    graph.ExitFailed,
+			wantSaid:    []string{"write — checking the files the agent reported changing, and recording them"},
+			wantNotSaid: []string{"saving", "into your repository"},
 		},
 		{
 			// A run that ended as aborted cannot be resumed: belay resume

@@ -49,8 +49,8 @@ Say what you want built, in your own words, as one argument:
 
 belay writes a plan first and then stops, so you can read the plan — and edit
 it — before anything in your repository changes. Continue with "belay resume".
-From there belay writes the code, saves the files, runs your tests, fixes what
-fails, and puts the result through a quality gate.
+From there belay writes the code, records which files it changed, runs your
+tests, fixes what fails, and puts the result through a quality gate.
 
 belay stops on its own at the budget ceiling set in belay.yaml, and it prints
 that ceiling before it spends anything.
@@ -472,7 +472,7 @@ var nodeMeaning = map[string]string{
 	graph.NodePlan:    "writing the plan",
 	graph.NodeApprove: "waiting for you to read the plan and approve it",
 	graph.NodeCode:    "asking the agent to write the change",
-	graph.NodeWrite:   "saving the agent's changes into your repository",
+	graph.NodeWrite:   "checking the files the agent reported changing, and recording them",
 	graph.NodeTest:    "running your tests",
 	graph.NodeFix:     "asking the agent to repair what failed",
 	graph.NodeReview:  "running the quality gate over the result",
