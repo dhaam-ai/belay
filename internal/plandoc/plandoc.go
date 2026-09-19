@@ -38,6 +38,23 @@
 // package promises not to renumber behind anyone's back. The position is the
 // index into [Document.Steps], which is what every method here takes.
 //
+// # Editing
+//
+// [Document.Edit] rewrites one step and nothing else: not its number, and
+// not a byte of any other step. [Document.Insert], [Document.Delete] and
+// [Document.Move] change the list's shape, so they renumber it from its own
+// start number, move a step's continuation lines to its new content column
+// when its number gains or loses a digit (a sub-list left at column 3 under
+// a "10." marker would escape the step), and space the steps the way the
+// list was spaced. None of them touches the head or the tail.
+//
+// Every editing method reads its result back with Parse before returning
+// it, and refuses with [ErrAmbiguousEdit] if the document would not read
+// back as exactly the steps it meant to write. The rules above are designed
+// so that never happens; the check is there so that a case nobody thought
+// of fails loudly instead of quietly moving text from one step into
+// another.
+//
 // # It has no opinion about whether a plan is any good
 //
 // ErrNoSteps does not mean "this plan is invalid". It means "I cannot edit
@@ -72,6 +89,7 @@ import (
 	"bytes"
 	"errors"
 	"fmt"
+	"strings"
 	"unicode/utf8"
 )
 
@@ -96,6 +114,19 @@ var (
 	// blank item would disappear from the rendered plan while still taking
 	// up a number, so it is refused rather than written.
 	ErrEmptyStep = errors.New("plandoc: a step cannot be empty")
+
+	// ErrLastStep reports an attempt to delete a plan's only step. What
+	// would be left is a Steps heading with nothing under it, which Parse
+	// cannot read back as a list, so no later edit could add a step again.
+	// Editing the step is the way to replace it.
+	ErrLastStep = errors.New("plandoc: cannot delete the only step")
+
+	// ErrAmbiguousEdit reports an edit whose result would not read back as
+	// the steps it wrote, so it was not made. The case known to cause it is
+	// a line just after the list, indented to a column the last step's
+	// content does not reach until renumbering makes its marker a digit
+	// narrower; the edit would silently pull that line into the step.
+	ErrAmbiguousEdit = errors.New("plandoc: the edit would move text between steps")
 )
 
 // Step is one step of a plan, as a caller sees it.
@@ -118,7 +149,6 @@ type step struct {
 	delim  byte   // '.' or ')'
 	indent string // the whitespace before the marker
 	pad    string // the whitespace between the delimiter and the content
-	col    int    // the display column the content starts at
 	text   string // the de-indented content, "\n"-joined
 
 	// raw is the item's bytes, from the start of its marker line through the
@@ -311,7 +341,6 @@ func collectSteps(buf []byte, lines []span, first int) (steps []step, tailAt int
 			delim:  m.delim,
 			indent: m.indent,
 			pad:    m.pad,
-			col:    m.col,
 			text:   itemText(buf, lines, i, last, m.col),
 			raw:    buf[lines[i].start:lines[last].end],
 		}
@@ -372,16 +401,21 @@ func itemExtent(buf []byte, lines []span, i, col int) (last, next int) {
 // removed, then every following line de-indented by the content column,
 // joined with "\n". The document's own line ending is not part of the text —
 // a caller editing a CRLF plan should not have to think about CR.
+//
+// Nor is a stray CR in front of that ending. It is not text anyone can see,
+// and the writer, which ends every line with the document's own line
+// ending, could not write it back as text anyway: a step moved or
+// renumbered would read back different from the step that was moved.
 func itemText(buf []byte, lines []span, first, last, col int) string {
 	out := make([]string, 0, last-first+1)
-	out = append(out, markerContent(body(buf, lines[first])))
+	out = append(out, strings.TrimRight(markerContent(body(buf, lines[first])), "\r"))
 	for i := first + 1; i <= last; i++ {
 		text := body(buf, lines[i])
 		if isBlank(text) {
 			out = append(out, "")
 			continue
 		}
-		out = append(out, stripIndent(text, col))
+		out = append(out, strings.TrimRight(stripIndent(text, col), "\r"))
 	}
 	return joinLines(out)
 }

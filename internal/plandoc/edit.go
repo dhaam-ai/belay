@@ -30,7 +30,10 @@ import (
 //
 // Otherwise it returns ErrNoSuchStep for an index outside Steps, ErrEmptyStep
 // for text that is empty or only whitespace, and ErrNotUTF8 for text that is
-// not valid UTF-8. The receiver is never modified.
+// not valid UTF-8. Like every editing method it reads its result back, and
+// returns ErrAmbiguousEdit rather than a document that would not; an edit
+// keeps the step's content column, so nothing known makes that happen here.
+// The receiver is never modified.
 func (d Document) Edit(i int, text string) (Document, error) {
 	if err := d.checkIndex(i); err != nil {
 		return Document{}, err
@@ -43,9 +46,8 @@ func (d Document) Edit(i int, text string) (Document, error) {
 	if err != nil {
 		return Document{}, err
 	}
-	s.text = joinLines(lines)
-	s.raw = s.render(lines, d.eol, bytes.HasSuffix(s.raw, []byte("\n")))
-	return d.replacing(i, s), nil
+	s = s.rewritten(lines, d.eol, bytes.HasSuffix(s.raw, []byte("\n")))
+	return d.replacing(i, s).readBack()
 }
 
 // checkIndex reports ErrNoSuchStep for an index outside Steps.
@@ -68,7 +70,7 @@ func (d Document) replacing(i int, s step) Document {
 }
 
 // tidy validates step text a caller supplied and splits it into the lines
-// render writes. See Edit for what it drops, and why.
+// rewritten writes. See Edit for what it drops, and why.
 //
 // Whitespace-only lines become empty lines, which is how the reader sees
 // them too, and CRs at the end of a line are removed: the writer adds the
@@ -99,27 +101,34 @@ func tidy(text string) ([]string, error) {
 	return lines, nil
 }
 
-// render writes lines back as the step's bytes: its marker, then the first
-// line, then every other line indented to the content column. terminate
-// says whether the last line gets a line ending, which it does unless this
-// is the final line of a document that never had one.
+// rewritten returns s with its bytes written again from lines: its marker,
+// then the first line, then every other line indented to the content
+// column. terminate says whether the last line gets a line ending, which it
+// does unless this is the final line of a document that never had one.
+//
+// The content column is measured from the marker line as written, with the
+// same parseMarker the reader uses, rather than carried over from before.
+// A renumbered step's marker can be a digit wider or narrower, and a tab
+// after it can change width with it, so any column remembered from the old
+// marker could be wrong; one measured by the reader's own rule cannot.
 //
 // A marker with no pad (an item whose marker stood alone on its line) is
-// given one space, which puts its content in the same column it had.
-func (s step) render(lines []string, eol string, terminate bool) []byte {
-	var b strings.Builder
-	b.WriteString(s.indent)
-	b.WriteString(s.digits)
-	b.WriteByte(s.delim)
+// given one space, which puts its content in the column it already had.
+func (s step) rewritten(lines []string, eol string, terminate bool) step {
+	first := s.indent + s.digits + string(s.delim)
 	if lines[0] != "" {
 		pad := s.pad
 		if pad == "" {
 			pad = " "
 		}
-		b.WriteString(pad)
-		b.WriteString(lines[0])
+		first += pad + lines[0]
 	}
-	continuation := strings.Repeat(" ", s.col)
+	written, _ := parseMarker(first)
+	s.pad = written.pad
+
+	var b strings.Builder
+	b.WriteString(first)
+	continuation := strings.Repeat(" ", written.col)
 	for _, line := range lines[1:] {
 		b.WriteString(eol)
 		if line != "" {
@@ -130,5 +139,7 @@ func (s step) render(lines []string, eol string, terminate bool) []byte {
 	if terminate {
 		b.WriteString(eol)
 	}
-	return []byte(b.String())
+	s.raw = []byte(b.String())
+	s.text = joinLines(lines)
+	return s
 }

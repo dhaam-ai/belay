@@ -65,8 +65,15 @@ func detectEOL(buf []byte) string {
 	return "\n"
 }
 
-// isBlank reports whether the line holds nothing but whitespace.
-func isBlank(text string) bool { return strings.TrimSpace(text) == "" }
+// isBlank reports whether the line is blank as CommonMark defines it: empty,
+// or only spaces and tabs. A stray CR counts as blank too, because CommonMark
+// reads a CR as a line ending of its own.
+//
+// It is deliberately narrower than unicode.IsSpace. A line holding a
+// no-break space is text to every Markdown renderer, and blank lines between
+// steps are exactly what a structural edit is allowed to respace — so a
+// broader rule here would let an edit delete something a person typed.
+func isBlank(text string) bool { return strings.Trim(text, " \t\r") == "" }
 
 // indentWidth returns the display column the line's first non-whitespace
 // character sits at, expanding tabs the way CommonMark does.
