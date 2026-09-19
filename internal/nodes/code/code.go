@@ -278,7 +278,11 @@ func (*Node) Run(ctx context.Context, rc *graph.RunContext) (graph.Result, error
 
 	resp, err := rc.Agent.Invoke(ctx, req)
 	if err != nil {
-		return graph.Result{}, fmt.Errorf("%w: backend %q: %w", ErrAgent, rc.Agent.Name(), err)
+		// Usage travels with the error. A backend may answer with output
+		// and an error together (belay.AgentBackend.Invoke), and whatever
+		// it reports having spent it has spent; graph.Result.Usage is the
+		// one field the dispatcher reads from a Result it rejects.
+		return graph.Result{Usage: resp.Usage}, fmt.Errorf("%w: backend %q: %w", ErrAgent, rc.Agent.Name(), err)
 	}
 	if err := writeResponse(rc, resp); err != nil {
 		return graph.Result{}, err

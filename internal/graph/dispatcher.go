@@ -437,7 +437,7 @@ func (d *Dispatcher) heal(jrnl *journal.Journal, records []journal.Record, start
 	switch last.Event {
 	case journal.EventNodeStarted:
 		note := fmt.Sprintf("interrupted: no completion record for attempt %d (the process died inside this node); re-running", last.Attempt)
-		if _, err := jrnl.Append(interruptedAttempt(last.Node, last.Attempt, 0, note)); err != nil {
+		if _, err := jrnl.Append(interruptedAttempt(last.Node, last.Attempt, 0, belay.Usage{}, note)); err != nil {
 			return false, fmt.Errorf("graph: close interrupted %q: %w", last.Node, err)
 		}
 		d.logger.Warn("belay/graph: recovered an interrupted node",
@@ -465,16 +465,20 @@ func (d *Dispatcher) heal(jrnl *journal.Journal, records []journal.Record, start
 }
 
 // interruptedAttempt is the node_finished that closes an attempt the
-// dispatcher will run again: aborted, naming its own node as Next, with no
-// usage recorded (journal.Record.Interrupted). heal writes it for an attempt a
-// crash left open, and pauseInsideNode for one a cancellation cut short.
-// Building both here keeps them the one shape that ResolveStart resumes at the
-// next attempt and owedRunMarker owes nothing for.
-func interruptedAttempt(node string, attempt int, elapsed time.Duration, note string) journal.Record {
+// dispatcher will run again: aborted, naming its own node as Next
+// (journal.Record.Interrupted). heal writes it for an attempt a crash left
+// open, and pauseInsideNode for one a cancellation cut short. Building both
+// here keeps them the one shape that ResolveStart resumes at the next attempt
+// and owedRunMarker owes nothing for.
+//
+// usage is what the attempt is charged. pauseInsideNode passes the node's own
+// report, because a node cut short by a cancellation has still spent whatever
+// its backend said it spent.
+func interruptedAttempt(node string, attempt int, elapsed time.Duration, usage belay.Usage, note string) journal.Record {
 	return journal.Record{
 		Event: journal.EventNodeFinished, Node: node, Attempt: attempt,
 		DurationMS: elapsed.Milliseconds(), Status: journal.StatusAborted, Next: node,
-		Usage: journalUsage(belay.Usage{}), Note: note,
+		Usage: journalUsage(usage), Note: note,
 	}
 }
 
@@ -750,13 +754,21 @@ func (d *Dispatcher) settle(
 	jrnl *journal.Journal, man *state.Manifest, ledger *budget.Ledger,
 	node string, attempt int, startedSeq uint64, step, steps int, exec nodeOutcome, logger *slog.Logger,
 ) (*Outcome, error) {
-	// The rejected paths. None of them applies a Patch or records Usage:
-	// each means the Result is untrustworthy or absent. A run that ends here
-	// executes nothing further, so under-counting a failed node's spend
-	// cannot let a later node overspend. A run paused by a cancellation does
-	// continue, and its interrupted node's spend goes uncounted exactly as a
-	// crashed one's does: a node cut off part-way has not reported what it
-	// spent.
+	// The rejected paths. None of them applies a Patch: each means the
+	// Result is untrustworthy or absent, so nothing it claims about the
+	// workspace may be believed.
+	//
+	// Every one of them does record Usage. Spend is not a verdict: a backend
+	// that reports having burned $2.50 has burned it, and whether the
+	// dispatcher then accepts, rejects or throws away the node's Result
+	// changes nothing about the money. Recording zero here is what let a run
+	// cross budget.max_usd and, once Options.PauseOnCancel made an
+	// interrupted run resumable through an ordinary Ctrl-C, spend the whole
+	// ceiling over again on the resume (ADR-0007).
+	//
+	// A node cut off part-way often has nothing to report, and then this
+	// records the zero it reported. That is a separate case from an attempt
+	// belay never saw finish at all, which heal closes.
 	//
 	// The timeout is checked first. It is the dispatcher's own guard, and a
 	// node that outlived it is not excused by a cancellation that arrived
@@ -764,24 +776,24 @@ func (d *Dispatcher) settle(
 	switch {
 	case exec.timedOut:
 		err := fmt.Errorf("%w: %q exceeded graph.node_timeout=%s", ErrNodeTimeout, node, d.cfg.Graph.NodeTimeout)
-		return d.terminal(jrnl, man, ledger, node, attempt, steps, exec.elapsed,
+		return d.terminal(jrnl, man, ledger, node, attempt, steps, exec.elapsed, exec.res.Usage,
 			journal.StatusAborted, journal.EventRunAborted, state.RunStatusAborted, ExitAborted,
 			d.note(err.Error()), err, logger)
 	case exec.canceled && d.pauseOnCancel:
-		return d.pauseInsideNode(jrnl, man, ledger, node, attempt, steps, exec.elapsed, logger)
+		return d.pauseInsideNode(jrnl, man, ledger, node, attempt, steps, exec.elapsed, exec.res.Usage, logger)
 	case exec.canceled:
 		err := fmt.Errorf("%w: %q canceled: %w", ErrNodeAborted, node, context.Canceled)
-		return d.terminal(jrnl, man, ledger, node, attempt, steps, exec.elapsed,
+		return d.terminal(jrnl, man, ledger, node, attempt, steps, exec.elapsed, exec.res.Usage,
 			journal.StatusAborted, journal.EventRunAborted, state.RunStatusAborted, ExitAborted,
 			d.note(err.Error()), err, logger)
 	case exec.err != nil:
-		return d.terminal(jrnl, man, ledger, node, attempt, steps, exec.elapsed,
+		return d.terminal(jrnl, man, ledger, node, attempt, steps, exec.elapsed, exec.res.Usage,
 			journal.StatusFailed, journal.EventRunFailed, state.RunStatusFailed, ExitFailed,
 			nodeErrorNotePrefix+d.note(exec.err.Error()),
 			fmt.Errorf("%w: %q returned an error: %w", ErrNodeFailed, node, exec.err), logger)
 	}
 	if err := exec.res.Validate(); err != nil {
-		return d.terminal(jrnl, man, ledger, node, attempt, steps, exec.elapsed,
+		return d.terminal(jrnl, man, ledger, node, attempt, steps, exec.elapsed, exec.res.Usage,
 			journal.StatusFailed, journal.EventRunFailed, state.RunStatusFailed, ExitFailed,
 			invalidResultNotePrefix+d.note(err.Error()),
 			fmt.Errorf("%w: %q returned an unusable Result: %w", ErrNodeFailed, node, err), logger)
@@ -877,17 +889,20 @@ func (d *Dispatcher) settle(
 // leaves that record last, which owedRunMarker owes nothing for, so the run is
 // still resumable.
 //
-// Whatever the node returned is discarded. A node cut off part-way cannot
-// vouch for its Result, and re-running it from the blackboard it started from
-// is what the Node contract already makes safe.
+// Whatever the node returned is discarded, except what it spent. A node cut
+// off part-way cannot vouch for its Result, and re-running it from the
+// blackboard it started from is what the Node contract already makes safe;
+// but the money the backend reported is gone whether or not the Result is
+// used, so usage is recorded and journalled (see settle).
 func (d *Dispatcher) pauseInsideNode(
 	jrnl *journal.Journal, man *state.Manifest, ledger *budget.Ledger,
-	node string, attempt, steps int, elapsed time.Duration, logger *slog.Logger,
+	node string, attempt, steps int, elapsed time.Duration, usage belay.Usage, logger *slog.Logger,
 ) (*Outcome, error) {
 	logger.Warn("belay/graph: run interrupted; pausing it so the node re-runs on resume")
 
 	note := fmt.Sprintf("interrupted: belay was asked to stop while attempt %d was running; resuming re-runs it", attempt)
-	if _, err := jrnl.Append(interruptedAttempt(node, attempt, elapsed, note)); err != nil {
+	ledger.Record(node, usage)
+	if _, err := jrnl.Append(interruptedAttempt(node, attempt, elapsed, usage, note)); err != nil {
 		return &Outcome{ExitCode: ExitFailed, Node: node, Steps: steps, Usage: ledger.Total()},
 			fmt.Errorf("graph: journal node_finished for %q: %w", node, err)
 	}
@@ -913,20 +928,25 @@ func (d *Dispatcher) pauseInterrupted(
 // run-level record written while a node execution is still open, so every
 // rejected path must close its node before it may end its run.
 //
+// usage is whatever the node reported spending before it was rejected, which
+// terminal both journals and records: see settle on why spend survives a
+// verdict the dispatcher throws away.
+//
 //nolint:revive // the parameter list is the terminal-record shape; a struct here would only move it.
 func (d *Dispatcher) terminal(
 	jrnl *journal.Journal, man *state.Manifest, ledger *budget.Ledger,
-	node string, attempt, steps int, elapsed time.Duration,
+	node string, attempt, steps int, elapsed time.Duration, usage belay.Usage,
 	status journal.Status, event journal.Event, runStatus state.RunStatus, exitCode int,
 	note string, cause error, logger *slog.Logger,
 ) (*Outcome, error) {
 	logger.Error("belay/graph: node ended the run",
 		slog.String("status", status.String()), slog.String("note", note))
 
+	ledger.Record(node, usage)
 	if _, err := jrnl.Append(journal.Record{
 		Event: journal.EventNodeFinished, Node: node, Attempt: attempt,
 		DurationMS: elapsed.Milliseconds(), Status: status,
-		Usage: journalUsage(belay.Usage{}), Note: note,
+		Usage: journalUsage(usage), Note: note,
 	}); err != nil {
 		return &Outcome{ExitCode: ExitFailed, Node: node, Steps: steps, Usage: ledger.Total()},
 			fmt.Errorf("graph: journal node_finished for %q: %w", node, err)

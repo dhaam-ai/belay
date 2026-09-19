@@ -268,7 +268,11 @@ func (n *Node) Run(ctx context.Context, rc *graph.RunContext) (graph.Result, err
 
 	resp, err := rc.Agent.Invoke(ctx, req)
 	if err != nil {
-		return graph.Result{}, fmt.Errorf("fix: agent %s: %w", rc.Agent.Name(), err)
+		// Usage travels with the error, for the reason the success path
+		// below gives: usage the budget guard never sees is spend it
+		// cannot stop, and a fix attempt that failed after paying for a
+		// call has still paid for it.
+		return graph.Result{Usage: resp.Usage}, fmt.Errorf("fix: agent %s: %w", rc.Agent.Name(), err)
 	}
 
 	if err := writeResponse(rc, resp); err != nil {

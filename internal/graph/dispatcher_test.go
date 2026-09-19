@@ -182,6 +182,20 @@ func (h *harness) records(t *testing.T) []journal.Record {
 	return res.Records
 }
 
+// lastNodeFinished returns the run's final node_finished record, which is
+// where a node execution's Usage is journalled.
+func (h *harness) lastNodeFinished(t *testing.T) journal.Record {
+	t.Helper()
+	recs := h.records(t)
+	for i := len(recs) - 1; i >= 0; i-- {
+		if recs[i].Event == journal.EventNodeFinished {
+			return recs[i]
+		}
+	}
+	t.Fatal("journal holds no node_finished record")
+	return journal.Record{}
+}
+
 // timeline renders the journal compactly for assertion.
 func (h *harness) timeline(t *testing.T) []string {
 	t.Helper()
@@ -641,6 +655,106 @@ func TestDispatcher_ResumeContinuesTheLedgerRatherThanResettingIt(t *testing.T) 
 	}
 	if !closeTo(got.LimitUSD, 100.00) {
 		t.Errorf("manifest.Budget.LimitUSD = %v, want 100.00", got.LimitUSD)
+	}
+}
+
+// TestDispatcher_RecordsWhatARejectedNodeSpent is the first half of the
+// budget-integrity contract ADR-0007 makes: money a backend reports having
+// spent is spent, whatever the dispatcher then decides about the node's
+// verdict.
+//
+// Every rejected path used to journal a zero Usage and never call
+// Ledger.Record, so an agent that burned $2.50 and then timed out, was
+// cancelled, or reported an error cost the run nothing on paper. The run
+// could then be resumed and spend its whole ceiling over again.
+func TestDispatcher_RecordsWhatARejectedNodeSpent(t *testing.T) {
+	spent := belay.Usage{InputTokens: 1000, OutputTokens: 500, USD: 2.50}
+	timeoutCfg := func() config.Config {
+		cfg := config.Default()
+		cfg.Graph.NodeTimeout = config.NewDuration(20 * time.Millisecond)
+		return cfg
+	}
+
+	tests := []struct {
+		name  string
+		cfg   config.Config
+		pause bool
+		node  func(cancel context.CancelFunc) graph.Node
+	}{
+		{
+			name: "the node returned an error after the backend had spent",
+			cfg:  config.Default(),
+			node: func(context.CancelFunc) graph.Node {
+				return &fakeNode{name: graph.NodePlan, steps: []nodeStep{{
+					res: Result{Usage: spent},
+					err: errors.New("the agent CLI reported an error"),
+				}}}
+			},
+		},
+		{
+			name: "the node returned an unusable Result after the backend had spent",
+			cfg:  config.Default(),
+			node: func(context.CancelFunc) graph.Node {
+				return &fakeNode{name: graph.NodePlan, steps: []nodeStep{{
+					res: Result{Usage: spent},
+				}}}
+			},
+		},
+		{
+			name: "the node outlived graph.node_timeout after the backend had spent",
+			cfg:  timeoutCfg(),
+			node: func(context.CancelFunc) graph.Node {
+				return &fakeNode{name: graph.NodePlan, steps: []nodeStep{{
+					res:       Result{Next: graph.End, Status: journal.StatusOK, Usage: spent},
+					sleep:     150 * time.Millisecond,
+					ignoreCtx: true,
+				}}}
+			},
+		},
+		{
+			name: "the run was cancelled after the backend had spent",
+			cfg:  config.Default(),
+			node: func(cancel context.CancelFunc) graph.Node {
+				return &interruptingNode{name: graph.NodePlan, cancel: cancel, usage: spent}
+			},
+		},
+		{
+			name:  "the run was paused by a cancellation after the backend had spent",
+			cfg:   config.Default(),
+			pause: true,
+			node: func(cancel context.CancelFunc) graph.Node {
+				return &interruptingNode{name: graph.NodePlan, cancel: cancel, usage: spent}
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			h := newRun(t, tt.cfg, "spend, then fall over")
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+
+			out, _ := h.pausingDispatcher(t, tt.pause, tt.node(cancel)).Run(ctx)
+
+			if !closeTo(out.Usage.USD, spent.USD) {
+				t.Errorf("Outcome.Usage.USD = %v, want %v: the spend the node reported vanished",
+					out.Usage.USD, spent.USD)
+			}
+			if out.Usage.InputTokens != spent.InputTokens || out.Usage.OutputTokens != spent.OutputTokens {
+				t.Errorf("Outcome.Usage tokens = in %d / out %d, want in %d / out %d",
+					out.Usage.InputTokens, out.Usage.OutputTokens, spent.InputTokens, spent.OutputTokens)
+			}
+			if got := h.manifest(t).Budget; !closeTo(got.SpentUSD, spent.USD) {
+				t.Errorf("manifest.Budget.SpentUSD = %v, want %v: a resume would restore the wrong total",
+					got.SpentUSD, spent.USD)
+			}
+			// The journal is the durable source of truth the ledger is
+			// rebuilt from, so the record must carry the figure too.
+			rec := h.lastNodeFinished(t)
+			if rec.Usage == nil || !closeTo(rec.Usage.USD, spent.USD) {
+				t.Errorf("node_finished usage = %+v, want USD %v", rec.Usage, spent.USD)
+			}
+		})
 	}
 }
 
@@ -1113,7 +1227,11 @@ type interruptingNode struct {
 	name   string
 	cancel context.CancelFunc
 	finish bool
-	calls  int
+	// usage is what the backend behind this node reported spending before
+	// the cancellation reached it. A node cut short still knows what it has
+	// already paid for.
+	usage belay.Usage
+	calls int
 	// seenStep records the RunContext.Step of each execution, which is the
 	// step number the run would have spent on it.
 	seenStep []int
@@ -1129,10 +1247,10 @@ func (n *interruptingNode) Run(ctx context.Context, rc *graph.RunContext) (graph
 	if n.finish {
 		return Result{
 			Next: graph.End, Status: journal.StatusOK,
-			Patch: state.Patch{Fix: &state.Fix{Attempts: 9}},
+			Patch: state.Patch{Fix: &state.Fix{Attempts: 9}}, Usage: n.usage,
 		}, nil
 	}
-	return Result{}, ctx.Err()
+	return Result{Usage: n.usage}, ctx.Err()
 }
 
 // TestDispatcher_CancellationEndsOrPausesTheRun is the Ctrl-C contract.

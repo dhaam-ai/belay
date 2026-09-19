@@ -443,3 +443,23 @@ func TestRunRejectsALayoutItCannotInvert(t *testing.T) {
 		t.Fatal("the agent was invoked without a resolvable workspace directory")
 	}
 }
+
+// TestRunCarriesTheBackendsSpendOnAnAgentFailure: a backend that answers with
+// usage and an error has already spent that money. graph.Result.Usage is the
+// one field the dispatcher reads from a rejected Result, so dropping it here
+// is how a failed $2.50 call came to cost the run nothing and let a resumed
+// run overshoot budget.max_usd.
+func TestRunCarriesTheBackendsSpendOnAnAgentFailure(t *testing.T) {
+	spent := belay.Usage{InputTokens: 1200, OutputTokens: 340, USD: 2.50, Estimated: true}
+	f := newFixture(t, belay.AgentResponse{Text: "half an answer", Usage: spent},
+		func(f *fixture) { f.agent.Errs = []error{errors.New("claude reported subtype error_during_execution")} },
+	)
+
+	res, err := code.New().Run(context.Background(), f.rc)
+	if err == nil {
+		t.Fatalf("Run succeeded; want an error. Result = %+v", res)
+	}
+	if res.Usage != spent {
+		t.Errorf("Result.Usage = %+v, want %+v: the spend the backend reported was dropped", res.Usage, spent)
+	}
+}

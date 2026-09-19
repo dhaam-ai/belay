@@ -362,8 +362,12 @@ func TestRunEmptyPlanIsTypedError(t *testing.T) {
 			if !errors.Is(err, ErrEmptyPlan) {
 				t.Fatalf("err = %v, want ErrEmptyPlan", err)
 			}
-			if res != (graph.Result{}) {
-				t.Errorf("Result = %+v, want the zero Result on error", res)
+			// Empty but for Usage: an error means no verdict, so nothing
+			// the node concluded is carried out of it — but the call was
+			// paid for, and the dispatcher charges the run for it. See
+			// graph.Result.Usage.
+			if res != (graph.Result{Usage: testUsage}) {
+				t.Errorf("Result = %+v, want the zero Result but for the usage the backend reported", res)
 			}
 			assertNoPlanArtifact(t, rc)
 			readNodeFile(t, rc, ResponseFile) // still diagnosable
@@ -579,7 +583,26 @@ func TestRunFailsWhenArtifactCannotBeWritten(t *testing.T) {
 	if err == nil {
 		t.Fatal("Run succeeded with an unwritable artifacts directory")
 	}
-	if res != (graph.Result{}) {
-		t.Errorf("Result = %+v, want the zero Result on error", res)
+	if res != (graph.Result{Usage: testUsage}) {
+		t.Errorf("Result = %+v, want the zero Result but for the usage the backend reported", res)
+	}
+}
+
+// TestRunCarriesTheBackendsSpendOnAnAgentFailure: the plan node already
+// records a failed call's response as evidence, for exactly the reason the
+// budget ledger needs its usage — a backend can answer with output and an
+// error together. graph.Result.Usage is the one field the dispatcher reads
+// from a Result it otherwise rejects, so dropping it loses the spend.
+func TestRunCarriesTheBackendsSpendOnAnAgentFailure(t *testing.T) {
+	agent := planAgent(testPlan)
+	agent.Errs = []error{errors.New("claude reported subtype error_during_execution")}
+	rc := newRunContext(t, agent)
+
+	res, err := New().Run(context.Background(), rc)
+	if err == nil {
+		t.Fatalf("Run succeeded; want an error. Result = %+v", res)
+	}
+	if res.Usage != testUsage {
+		t.Errorf("Result.Usage = %+v, want %+v: the spend the backend reported was dropped", res.Usage, testUsage)
 	}
 }

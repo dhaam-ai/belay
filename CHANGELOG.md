@@ -222,6 +222,15 @@ that only `pkg/belay` carries a compatibility promise. Everything under
   candidate. The README, docs/architecture.md, docs/troubleshooting.md,
   docs/config.md, docs/adapters.md and examples/naive now say so. Running
   candidates is planned, and ADR-0019 is reserved for it.
+- **A step that fails, times out or is stopped is charged for what it
+  spent.** When the agent reported spending money and the step then
+  returned an error, ran past `graph.node_timeout`, or was stopped with
+  Ctrl-C, belay recorded the step as free: the money was left out of the
+  run's total and out of the journal. A run could then go past
+  `budget.max_usd`, and a run stopped with Ctrl-C and resumed could spend
+  its whole budget a second time. Whatever the agent reported spending is
+  now added to the run's total and written to the journal, however the step
+  ended.
 
 ## v0.1.4 — 2026-09-17
 
