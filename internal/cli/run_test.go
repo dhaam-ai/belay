@@ -189,6 +189,10 @@ func TestResumeHelpReadsAsEnglish(t *testing.T) {
 		"says which one it picked",
 		"resuming is how you approve",
 		"belay runs",
+		// belay run --help promises that a run stopped with Ctrl-C is
+		// picked up by resume; resume's own help must agree.
+		"Ctrl-C",
+		"runs that step again",
 	} {
 		if !strings.Contains(out, phrase) {
 			t.Errorf("belay resume --help never mentions %q", phrase)

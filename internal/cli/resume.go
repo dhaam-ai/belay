@@ -34,9 +34,14 @@ If the run stopped at the plan for your approval, resuming is how you approve
 it. Read the plan first, and edit it if you want to: belay reads the file again
 as it starts, so your edits are what the agent is given.
 
+If you stopped the run with Ctrl-C, or belay was killed part-way through a
+step, resuming runs that step again from its start. The steps that finished
+are not run again.
+
 Runs live under <workspace>/.belay/runs/, and "belay runs" lists them. A run
-that already finished, failed or was stopped for good cannot be continued;
-start a new one instead.`,
+that already finished or failed cannot be continued, and neither can one belay
+stopped on its own, such as at the budget ceiling, graph.max_steps or
+graph.node_timeout. Start a new one instead.`,
 	Example: `  belay resume
   belay resume 20260905T153301Z-1f2e3d4c5b6a
   belay --dry-run resume`,
