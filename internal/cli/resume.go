@@ -313,7 +313,7 @@ func announceContinue(u *ui, plan *runPlan, chosen resumableRun, layout state.La
 	u.say("  to stop it:          press Ctrl-C once; belay saves its state and exits")
 	u.say("")
 	u.say("  state:  %s", layout.RunDir())
-	u.say("  route:  %s", routeLine())
+	u.say("  route:  %s", routeLine(plan.route))
 	u.say("")
 }
 

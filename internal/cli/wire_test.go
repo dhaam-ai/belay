@@ -15,7 +15,6 @@ import (
 	"github.com/dhaam-ai/belay/internal/config"
 	"github.com/dhaam-ai/belay/internal/graph"
 	"github.com/dhaam-ai/belay/internal/journal"
-	"github.com/dhaam-ai/belay/internal/nodes"
 	"github.com/dhaam-ai/belay/internal/state"
 )
 
@@ -171,8 +170,8 @@ func TestResolvePicksAdapters(t *testing.T) {
 	if plan.recorder != nil {
 		t.Error("live mode must not arm the cassette recorder")
 	}
-	if plan.registry == nil || plan.registry.Len() != len(defaultRoute) {
-		t.Errorf("registry = %v, want the %d nodes of the default route", plan.registry, len(defaultRoute))
+	if plan.registry == nil || plan.registry.Len() != len(plan.route) {
+		t.Errorf("registry = %v, want the %d nodes of the route %v", plan.registry, len(plan.route), plan.route)
 	}
 	if len(plan.projects) != 1 || plan.projects[0].Kind.String() != "go" {
 		t.Errorf("projects = %+v, want one Go project", plan.projects)
@@ -273,26 +272,6 @@ func blockerText(p *runPlan) string {
 		b.WriteString("\n")
 	}
 	return b.String()
-}
-
-// TestDefaultRouteMatchesRegistry keeps the route belay shows a person and
-// the graph belay actually walks from drifting apart.
-func TestDefaultRouteMatchesRegistry(t *testing.T) {
-	registry, err := nodes.Default(config.Default())
-	if err != nil {
-		t.Fatalf("nodes.Default: %v", err)
-	}
-	if registry.Len() != len(defaultRoute) {
-		t.Fatalf("defaultRoute has %d nodes, the registry has %d", len(defaultRoute), registry.Len())
-	}
-	for _, name := range defaultRoute {
-		if _, err := registry.Get(name); err != nil {
-			t.Errorf("defaultRoute names %q, which nodes.Default does not register", name)
-		}
-	}
-	if defaultRoute[0] != journal.FirstNode {
-		t.Errorf("the route starts at %q but a run starts at %q", defaultRoute[0], journal.FirstNode)
-	}
 }
 
 // secretNode is a node that fails the way a real adapter fails: with an error

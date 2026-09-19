@@ -226,7 +226,7 @@ func announceStart(u *ui, plan *runPlan, layout state.Layout, want string) {
 	u.say("")
 	u.say("run %s", layout.RunID())
 	u.say("  state:  %s", layout.RunDir())
-	u.say("  route:  %s", routeLine())
+	u.say("  route:  %s", routeLine(plan.route))
 	u.say("")
 }
 
@@ -434,7 +434,7 @@ func describeDryRun(u *ui, plan *runPlan, want, resuming string) error {
 	u.say("")
 
 	u.say("the route it would take")
-	u.say("  %s", routeLine())
+	u.say("  %s", routeLine(plan.route))
 	u.say("  %s", approvalLine(plan.config.Graph))
 	u.say("  it gives up after %d rounds of the test-and-fix loop, or %d steps in all",
 		plan.config.Graph.GiveUp, plan.config.Graph.MaxSteps)
@@ -482,9 +482,9 @@ func budgetOnExceed(b config.Budget) string {
 }
 
 // routeLine is the walk through the graph, written out so a person can see
-// where they are in it.
-func routeLine() string {
-	return strings.Join(append(slices.Clone(defaultRoute), "done"), " → ")
+// where they are in it. route is what nodes.Route returned for this run.
+func routeLine(route []string) string {
+	return strings.Join(append(slices.Clone(route), "done"), " → ")
 }
 
 // approvalLine explains the one step that stops for a human.

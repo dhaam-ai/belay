@@ -39,18 +39,6 @@ const (
 // because a cassette recorded by one run is replayed by a different run.
 const defaultCassetteName = "cassette.json"
 
-// defaultRoute is the path a standard run walks, mirroring nodes.Default.
-//
-// It is written out here rather than read back from the registry because a
-// graph.Registry is a set of nodes and not an order — Registry.Names returns
-// map keys. A person asking "where am I and what happens next" needs the
-// order, so it is stated once, and TestDefaultRouteMatchesRegistry keeps this
-// list and nodes.Default from drifting apart.
-var defaultRoute = []string{
-	graph.NodePlan, graph.NodeApprove, graph.NodeCode,
-	graph.NodeWrite, graph.NodeTest, graph.NodeFix, graph.NodeReview,
-}
-
 // resolveRequest is what a caller knows before belay resolves anything: the
 // directory to work in and the flags that were set.
 type resolveRequest struct {
@@ -90,7 +78,10 @@ type runPlan struct {
 	linter   belay.Linter
 	reviewer belay.Reviewer
 	registry *graph.Registry
-	redact   func(string) string
+	// route is the order registry is walked in, for showing a person; see
+	// resolveRegistry.
+	route  []string
+	redact func(string) string
 
 	// recorder is the record-mode wrapper whose cassette must be saved when
 	// the run ends. It is nil in every other mode.
@@ -455,8 +446,14 @@ func (p *runPlan) resolveReplayAgent() {
 	p.agent = backend
 }
 
-// resolveRegistry builds the node graph the dispatcher walks.
+// resolveRegistry builds the node graph the dispatcher walks, and the route
+// belay shows a person, together. Whatever options nodes.Default is given,
+// nodes.Route must be given too, or belay shows one graph and walks another.
+//
+// The route is set even when the registry cannot be built, so that a dry run
+// refusing to start still shows the route it would have taken.
 func (p *runPlan) resolveRegistry() {
+	p.route = nodes.Route(p.config)
 	registry, err := nodes.Default(p.config)
 	if err != nil {
 		p.block(

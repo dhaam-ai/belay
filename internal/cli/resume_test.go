@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"os"
@@ -229,6 +230,31 @@ func TestResumeWithNothingToContinue(t *testing.T) {
 		if !strings.Contains(exit.Message, phrase) {
 			t.Errorf("message does not say %q; got %q", phrase, exit.Message)
 		}
+	}
+}
+
+// Continuing a run says which route it walks, as starting one does: a person
+// resuming days later needs to see where the run is in it before it spends.
+func TestAnnounceContinueShowsTheRoute(t *testing.T) {
+	ws := goWorkspace(t)
+	plan, err := resolve(resolveRequest{workspace: ws, logger: quietLogger()})
+	if err != nil {
+		t.Fatalf("resolve: %v", err)
+	}
+	const runID = "20260905T130000Z-bbbbbbbbbbbb"
+	layout, err := state.NewLayout(ws, runID)
+	if err != nil {
+		t.Fatalf("NewLayout: %v", err)
+	}
+
+	var out bytes.Buffer
+	announceContinue(&ui{out: &out, err: &out}, plan, resumableRun{
+		id: runID, goal: "add tests", status: state.RunStatusPaused, node: graph.NodeApprove,
+	}, layout, false)
+
+	const want = "route:  plan → approve → code → write → test → fix → review → done"
+	if !strings.Contains(out.String(), want) {
+		t.Errorf("continuing a run never says %q; got:\n%s", want, out.String())
 	}
 }
 
