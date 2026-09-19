@@ -56,5 +56,5 @@ manifest.json and state.json move to schema version 2, and both carry a `require
 - internal/state/manifest.go (`Store.Preflight`: refuse, then upgrade the manifest, before anything in a run is written)
 - internal/state/migrate.go (`migrateFromVersion1`)
 - internal/state/state.go package documentation: "Schema versioning" and "Capabilities"
-- ADR-0002 (the dispatcher is the only writer of both files)
+- ADR-0002 (nodes never write either file). The dispatcher writes both during a run, and the CLI writes them only to create a run (`createRun`, whose documents are new and require nothing) and to record an approval (`approvePlan`, after `Store.Preflight`). Every write to an existing run decodes the document first, through `decodeState` or `decodeManifest` (behind `LoadState`, `LoadManifest` and `Store.Preflight`), and both call `checkRequires`, so it guards the CLI's writes exactly as it guards the dispatcher's.
 - ADR-0003 (journal.ndjson, which carries no schema version)

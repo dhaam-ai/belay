@@ -26,7 +26,7 @@ This directory contains architecture decisions for belay, recorded to capture th
 | 0018 | SWE-bench corpus and the bare-agent control arm | Reserved (slice 6) | |
 | 0019 | Executing fanout candidates | Reserved (slice 7) | |
 
-Reserved numbers are assigned in merge order so parallel work never collides on a number. A reserved row gains a link, a title and a status when its ADR lands.
+Reserved numbers were assigned per slice up front, so parallel work never collides on a number. A reserved row gains a link, a title and a status when its ADR lands.
 
 ## Reading ADRs
 
