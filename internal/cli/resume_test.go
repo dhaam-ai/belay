@@ -767,10 +767,13 @@ func TestResumeUpgradesTheManifestBeforeItRecordsAnApproval(t *testing.T) {
 	layout := store.Layout()
 	downgradeToVersion1(t, layout.StatePath())
 	downgradeToVersion1(t, layout.ManifestPath())
+	// #nosec G302 -- read-only is the point: these are the modes that make
+	// the run directory unwritable and then writable again for the cleanup,
+	// on a directory inside t.TempDir().
 	if err := os.Chmod(layout.RunDir(), 0o500); err != nil {
 		t.Fatalf("chmod the run directory read-only: %v", err)
 	}
-	t.Cleanup(func() { _ = os.Chmod(layout.RunDir(), 0o750) })
+	t.Cleanup(func() { _ = os.Chmod(layout.RunDir(), 0o750) }) // #nosec G302 -- as above, so t.TempDir can clean up.
 
 	out, _, err := runCLI(t, "resume", layout.RunID(), "--workspace", ws)
 	if err == nil {

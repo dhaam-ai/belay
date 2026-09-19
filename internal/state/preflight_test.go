@@ -41,6 +41,8 @@ func copyJSONObject(t *testing.T, doc map[string]any, path string) {
 	if err != nil {
 		t.Fatalf("read %s: %v", written, err)
 	}
+	// #nosec G703 -- path is built by this test from its own t.TempDir()
+	// Layout and a fixed file name.
 	if err := os.WriteFile(path, raw, filePerm); err != nil {
 		t.Fatalf("write %s: %v", path, err)
 	}

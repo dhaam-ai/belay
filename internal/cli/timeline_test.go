@@ -785,6 +785,8 @@ func TestReadmeTimelineExampleIsWhatTimelinePrints(t *testing.T) {
 
 	printed := timelineReadmeExample(t)
 	if *updateReadme {
+		// #nosec G703 -- path is the constant relative path to this
+		// repository's own README, and -update is a maintainer's flag.
 		if err := os.WriteFile(path, []byte(head+opening+printed+"```\n"+tail), 0o600); err != nil {
 			t.Fatalf("rewrite README.md: %v", err)
 		}
