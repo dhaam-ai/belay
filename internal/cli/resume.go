@@ -12,6 +12,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/dhaam-ai/belay/internal/graph"
+	"github.com/dhaam-ai/belay/internal/journal"
 	"github.com/dhaam-ai/belay/internal/state"
 )
 
@@ -92,7 +93,11 @@ func continueRun(cmd *cobra.Command, runID string) error {
 
 	announceContinue(u, plan, chosen, layout, runID == "")
 
-	if chosen.node == graph.NodeApprove && chosen.status == state.RunStatusPaused {
+	awaiting, err := awaitsApproval(chosen, layout)
+	if err != nil {
+		return &ExitError{Code: graph.ExitFailed, Message: "belay: " + err.Error(), Err: err}
+	}
+	if awaiting {
 		approved, err := approvePlan(store)
 		if err != nil {
 			return &ExitError{Code: graph.ExitFailed, Message: "belay: " + err.Error(), Err: err}
@@ -127,6 +132,32 @@ func continueRun(cmd *cobra.Command, runID string) error {
 //nolint:revive // store is unused until a run's manifest pins something a resume must check; it is the hook's contract.
 func (p *runPlan) resumePreflight(store *state.Store) error {
 	return nil
+}
+
+// awaitsApproval reports whether resuming chosen is how a person approves its
+// plan: the run is paused at the approve gate because the gate asked.
+//
+// A run is also paused at approve when Ctrl-C lands while the gate is running
+// (see suspendOnCancel). Nobody was shown the plan then, or told that
+// resuming approves it, so resuming must run the gate again, which asks,
+// instead of approving on the person's behalf. The manifest cannot tell the
+// two apart; the journal can. The gate's own pause is the run's last
+// node_finished, with status paused. An interrupted attempt is closed as
+// aborted (journal.Record.Interrupted).
+func awaitsApproval(chosen resumableRun, layout state.Layout) (bool, error) {
+	if chosen.node != graph.NodeApprove || chosen.status != state.RunStatusPaused {
+		return false, nil
+	}
+	read, err := journal.ReadFile(layout.JournalPath())
+	if err != nil {
+		return false, fmt.Errorf("cannot read this run's journal: %w", err)
+	}
+	for i := len(read.Records) - 1; i >= 0; i-- {
+		if rec := read.Records[i]; rec.Event == journal.EventNodeFinished {
+			return rec.Node == graph.NodeApprove && rec.Status == journal.StatusPaused, nil
+		}
+	}
+	return false, nil
 }
 
 // approvePlan records that the human approved the plan, and reports whether

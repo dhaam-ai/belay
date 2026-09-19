@@ -404,3 +404,95 @@ func TestApprovePlanIsIdempotent(t *testing.T) {
 		t.Error("approving an already-approved plan should report that nothing changed")
 	}
 }
+
+// pressesCtrlC stands in for a person pressing Ctrl-C while this node runs.
+// Cancelling the context the dispatcher was given reaches it exactly as the
+// signal handler's cancellation does. The node then returns what a node that
+// honours its context returns.
+type pressesCtrlC struct {
+	name   string
+	cancel context.CancelFunc
+}
+
+func (n pressesCtrlC) Name() string { return n.name }
+
+func (n pressesCtrlC) Run(ctx context.Context, _ *graph.RunContext) (graph.Result, error) {
+	n.cancel()
+	<-ctx.Done()
+	return graph.Result{}, ctx.Err()
+}
+
+// TestResumeApprovesOnlyAPlanTheGateAskedAbout pins when resuming a run is
+// the approval of its plan. It is when the approve gate paused the run to ask.
+// It is not when Ctrl-C landed while the gate was running: the run is paused
+// at approve then too, but nobody was shown the plan or told that resuming
+// approves it, so resuming must run the gate again, and the gate asks.
+func TestResumeApprovesOnlyAPlanTheGateAskedAbout(t *testing.T) {
+	tests := []struct {
+		name string
+		gate func(cancel context.CancelFunc) graph.Node
+		want bool
+	}{
+		{
+			name: "the gate paused to ask",
+			gate: func(context.CancelFunc) graph.Node { return approve.New() },
+			want: true,
+		},
+		{
+			name: "Ctrl-C landed while the gate ran",
+			gate: func(cancel context.CancelFunc) graph.Node {
+				return pressesCtrlC{name: graph.NodeApprove, cancel: cancel}
+			},
+			want: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ws := goWorkspace(t)
+			plan, err := resolve(resolveRequest{workspace: ws, logger: quietLogger()})
+			if err != nil {
+				t.Fatalf("resolve: %v", err)
+			}
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			reached := false
+			registry := graph.NewRegistry()
+			registry.MustRegister(
+				planWriter{body: "# Plan\n\nwrite a test\n"},
+				tt.gate(cancel),
+				endsTheRun{reached: &reached},
+			)
+			plan.registry = registry
+			store := seedRunDir(t, plan, "add tests")
+
+			opts := plan.options(store)
+			opts.SuspendOnCancel = true
+			dispatcher, err := graph.NewDispatcher(opts)
+			if err != nil {
+				t.Fatalf("graph.NewDispatcher: %v", err)
+			}
+			if _, err := dispatcher.Run(ctx); err != nil && !errors.Is(err, graph.ErrInterrupted) {
+				t.Fatalf("Run: %v", err)
+			}
+
+			chosen, err := chooseRun(ws, store.Layout().RunID())
+			if err != nil {
+				t.Fatalf("chooseRun: %v", err)
+			}
+			// Both runs look the same to anything that reads only the
+			// manifest, which is why awaitsApproval cannot.
+			if chosen.status != state.RunStatusPaused || chosen.node != graph.NodeApprove {
+				t.Fatalf("the run is %v at %q, want paused at %q", chosen.status, chosen.node, graph.NodeApprove)
+			}
+
+			got, err := awaitsApproval(chosen, store.Layout())
+			if err != nil {
+				t.Fatalf("awaitsApproval: %v", err)
+			}
+			if got != tt.want {
+				t.Errorf("awaitsApproval() = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
