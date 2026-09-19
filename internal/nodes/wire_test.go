@@ -1,12 +1,79 @@
 package nodes_test
 
 import (
+	"slices"
 	"testing"
 
 	"github.com/dhaam-ai/belay/internal/config"
 	"github.com/dhaam-ai/belay/internal/graph"
+	"github.com/dhaam-ai/belay/internal/journal"
 	"github.com/dhaam-ai/belay/internal/nodes"
 )
+
+// TestRouteMatchesRegistry keeps the route belay shows a person and the graph
+// the dispatcher walks from drifting apart. It moved here from internal/cli
+// with the route itself, so that each change to the graph adds a row here
+// rather than a second route function somewhere else.
+func TestRouteMatchesRegistry(t *testing.T) {
+	t.Parallel()
+
+	// The route every release so far has walked and shown. With no options
+	// Route must return exactly this, whatever else the config says.
+	standard := []string{
+		graph.NodePlan, graph.NodeApprove, graph.NodeCode,
+		graph.NodeWrite, graph.NodeTest, graph.NodeFix, graph.NodeReview,
+	}
+	fanoutOn := config.Default()
+	fanoutOn.Fanout.Enabled = true
+	fanoutOn.Fanout.Candidates = 3
+
+	for _, tc := range []struct {
+		name string
+		cfg  config.Config
+		want []string
+		// offRoute are registered but not on the route: no node routes
+		// into them yet, so a run cannot reach them.
+		offRoute []string
+	}{
+		{name: "defaults", cfg: config.Default(), want: standard},
+		{
+			name: "fanout enabled", cfg: fanoutOn, want: standard,
+			offRoute: []string{graph.NodeFanout, graph.NodeJoin},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			got := nodes.Route(tc.cfg)
+			if !slices.Equal(got, tc.want) {
+				t.Fatalf("Route() = %v, want %v", got, tc.want)
+			}
+			if got[0] != journal.FirstNode {
+				t.Errorf("the route starts at %q but a run starts at %q", got[0], journal.FirstNode)
+			}
+
+			registry, err := nodes.Default(tc.cfg)
+			if err != nil {
+				t.Fatalf("Default: %v", err)
+			}
+			for _, name := range got {
+				if _, err := registry.Get(name); err != nil {
+					t.Errorf("the route names %q, which Default does not register", name)
+				}
+			}
+			// The other direction: a registered node that is neither on
+			// the route nor known to be off it is one a person is never
+			// shown and a run may still reach.
+			registered := registry.Names()
+			slices.Sort(registered)
+			accounted := slices.Concat(got, tc.offRoute)
+			slices.Sort(accounted)
+			if !slices.Equal(registered, accounted) {
+				t.Errorf("Default registers %v; the route and the off-route nodes account for %v", registered, accounted)
+			}
+		})
+	}
+}
 
 // Every name a node can route to must be registered. The dispatcher resolves
 // Result.Next by exact string match, so an unregistered target is not a
