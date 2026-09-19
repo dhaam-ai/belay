@@ -20,6 +20,7 @@ import (
 	"github.com/dhaam-ai/belay/internal/detect"
 	"github.com/dhaam-ai/belay/internal/graph"
 	"github.com/dhaam-ai/belay/internal/state"
+	"github.com/dhaam-ai/belay/pkg/belay"
 )
 
 // runFlags holds the settings `belay run` and `belay resume` share. Both
@@ -48,8 +49,8 @@ Say what you want built, in your own words, as one argument:
 
 belay writes a plan first and then stops, so you can read the plan — and edit
 it — before anything in your repository changes. Continue with "belay resume".
-From there belay writes the code, saves the files, runs your tests, fixes what
-fails, and puts the result through a quality gate.
+From there belay writes the code, records which files it changed, runs your
+tests, fixes what fails, and puts the result through a quality gate.
 
 belay stops on its own at the budget ceiling set in belay.yaml, and it prints
 that ceiling before it spends anything.
@@ -112,7 +113,11 @@ func startRun(cmd *cobra.Command, want string) error {
 		return refuseToStart(u, plan)
 	}
 
-	store, err := createRun(plan, want)
+	runID, err := state.NewRunID()
+	if err != nil {
+		return &ExitError{Code: graph.ExitFailed, Message: "belay: " + err.Error(), Err: err}
+	}
+	store, err := createRun(plan, runSpec{Workspace: plan.workspace, RunID: runID, Goal: want})
 	if err != nil {
 		return &ExitError{Code: graph.ExitFailed, Message: "belay: " + err.Error(), Err: err}
 	}
@@ -121,15 +126,47 @@ func startRun(cmd *cobra.Command, want string) error {
 	return driveRun(cmd, u, plan, store, false)
 }
 
-// createRun lays down the run directory, its manifest and its initial state.
-// It is the first thing in `belay run` that writes anything at all;
-// everything before it is resolution, which is what lets --dry-run stop here.
-func createRun(plan *runPlan, want string) (*state.Store, error) {
-	runID, err := state.NewRunID()
-	if err != nil {
-		return nil, err
-	}
-	layout, err := state.NewLayout(plan.workspace, runID)
+// runSpec names the run createRun makes: where it lives, what it is called,
+// and what it is for.
+//
+// The caller chooses the run id, not createRun, so that a caller can record
+// the id somewhere of its own before the run exists and find the run again
+// after a crash. `belay run` has nowhere to record it and simply asks
+// state.NewRunID for one.
+type runSpec struct {
+	// Workspace is the absolute path of the repository the run works on.
+	// The run's directory is made under it, in .belay/runs/.
+	Workspace string
+	// RunID names the run and its directory.
+	RunID string
+	// Goal is what the person asked for, exactly as they typed it.
+	Goal string
+}
+
+// createRun lays down the run directory, its initial state and its manifest,
+// in that order. It is the first thing in `belay run` that writes anything at
+// all; everything before it is resolution, which is what lets --dry-run stop
+// here.
+//
+// The manifest goes last because writing it is what creates the run.
+// Everything that looks for runs reads manifest.json and nothing else: belay
+// resume chooses from the manifests it finds, and belay runs lists them. The
+// dispatcher, for its part, cannot continue a run without state.json. When
+// the manifest came first, a failure or a crash before state.json was written
+// left a manifest saying "running" over a run with no state: resume chose it,
+// and the dispatcher failed to load it. Now a failure or a crash anywhere
+// before the manifest leaves a directory without one, which resume never
+// chooses and belay runs reports as unreadable.
+//
+// createRun does not delete that directory when it fails. A crash leaves the
+// same directory with no chance to delete anything, so every reader must
+// already treat a directory without a manifest as not a run; deleting it on
+// the error path would add a way to remove files without sparing any reader
+// that work. Calling createRun again for the same run id converges instead:
+// it writes the state again, whole, then the manifest. It must not be called
+// for a run whose manifest exists, which it would start over.
+func createRun(plan *runPlan, spec runSpec) (*state.Store, error) {
+	layout, err := state.NewLayout(spec.Workspace, spec.RunID)
 	if err != nil {
 		return nil, err
 	}
@@ -138,28 +175,92 @@ func createRun(plan *runPlan, want string) (*state.Store, error) {
 		return nil, fmt.Errorf("cannot create the run directory %s: %w", layout.RunDir(), err)
 	}
 
+	if err := state.SaveState(layout.StatePath(), state.NewState(spec.Goal)); err != nil {
+		return nil, fmt.Errorf("cannot write %s: %w", layout.StatePath(), err)
+	}
 	now := time.Now().UTC()
-	manifest := state.NewManifest(now, runID, plan.workspace, want, plan.config)
+	manifest := state.NewManifest(now, spec.RunID, spec.Workspace, spec.Goal, plan.config)
+	if err := plan.prepareWorkspace(layout, &manifest); err != nil {
+		return nil, err
+	}
 	if err := state.SaveManifest(layout.ManifestPath(), manifest); err != nil {
 		return nil, fmt.Errorf("cannot write %s: %w", layout.ManifestPath(), err)
-	}
-	if err := state.SaveState(layout.StatePath(), state.NewState(want)); err != nil {
-		return nil, fmt.Errorf("cannot write %s: %w", layout.StatePath(), err)
 	}
 	return state.NewStore(layout), nil
 }
 
-// driveRun runs the dispatcher over an existing run and reports how it ended.
-// `belay run` and `belay resume` differ only in the resuming flag, so the two
-// commands cannot narrate the same events differently.
+// prepareWorkspace readies the workspace a new run will change, and records in
+// the run's manifest whatever a later resume must know about it. createRun
+// calls it once, after the run's state is written and before its manifest is.
+//
+// Today it does nothing. Every run changes the workspace it was started in, so
+// there is nothing to create and nothing to record. The step exists so that a
+// run which works somewhere else — an isolator's workspace, such as a git
+// worktree — has one place to create it before the manifest pins it, instead
+// of a new write wedged in among createRun's.
+//
+// What it grows to do must keep to the order around it. It runs after
+// state.json, so a failure here leaves a directory with no manifest, which
+// nothing takes for a run. It runs before the manifest, so what it records
+// lands in the manifest's one write. And a failure after it, writing the
+// manifest, cannot undo what it made outside the run directory, so it must be
+// safe to repeat when createRun is called again for the same run id.
+//
+//nolint:revive // layout and manifest are unused until a run can work outside its workspace; they are the step's contract.
+func (p *runPlan) prepareWorkspace(layout state.Layout, manifest *state.Manifest) error {
+	return nil
+}
+
+// driveRun dispatches an existing run once, does what follows a dispatch,
+// and reports how the run ended. `belay run` and `belay resume` differ only
+// in the resuming flag, so the two commands cannot narrate the same events
+// differently.
+//
+// Ctrl-C is handled from before the dispatch until the report is written, so
+// a first Ctrl-C after the dispatch has returned still lets afterCompletion
+// finish rather than killing belay part-way through saving the recording.
+//
+// A Ctrl-C during the dispatch pauses the run rather than ending it (see
+// pauseOnCancel), which is what both commands' help promises.
 func driveRun(cmd *cobra.Command, u *ui, plan *runPlan, store *state.Store, resuming bool) error {
-	dispatcher, err := graph.NewDispatcher(plan.options(store))
+	ctx, stop := stopOnSignal(cmd.Context(), u)
+	defer stop()
+
+	view, err := dispatchOnce(ctx, plan, store, resuming, pauseOnCancel)
 	if err != nil {
 		return &ExitError{Code: graph.ExitFailed, Message: "belay: " + err.Error(), Err: err}
 	}
+	afterCompletion(u, plan, view)
+	return reportOutcome(u, view)
+}
 
-	ctx, stop := stopOnSignal(cmd.Context(), u)
-	defer stop()
+// dispatchOnce builds the dispatcher for an existing run and dispatches it
+// once: Resume when resuming, Run otherwise.
+//
+// Each mut changes the dispatcher's Options, in order, after runPlan.options
+// has built them. It is for what a caller decides about this dispatch rather
+// than about the run's wiring: driveRun passes pauseOnCancel, and a caller
+// that dispatches a run differently, such as one that stops after a single
+// node, passes its own. runPlan.options stays the one place the wiring every
+// run shares is built, and a mut only departs from it.
+//
+// The error is not how the run went. It is set only when no dispatcher could
+// be built, so nothing ran and there is nothing to report. How the run went,
+// a failed run included, is in the returned outcomeView.
+//
+// dispatchOnce neither saves nor says anything once the dispatch returns:
+// afterCompletion and reportOutcome are the caller's to run, so a caller can
+// dispatch a run more than once, through a pause and on, and report once.
+func dispatchOnce(ctx context.Context, plan *runPlan, store *state.Store, resuming bool,
+	mut ...func(*graph.Options)) (outcomeView, error) {
+	opts := plan.options(store)
+	for _, change := range mut {
+		change(&opts)
+	}
+	dispatcher, err := graph.NewDispatcher(opts)
+	if err != nil {
+		return outcomeView{}, err
+	}
 
 	// Run and Resume differ in exactly one thing: whether a run parked at
 	// an approval gate may be stepped past. Calling both would step past a
@@ -169,22 +270,56 @@ func driveRun(cmd *cobra.Command, u *ui, plan *runPlan, store *state.Store, resu
 		dispatch = dispatcher.Resume
 	}
 	outcome, runErr := dispatch(ctx)
+	return outcomeView{layout: store.Layout(), outcome: outcome, runErr: runErr}, nil
+}
 
+// pauseOnCancel is the change driveRun makes to the dispatcher's Options:
+// when the person running belay presses Ctrl-C, or the process is sent
+// SIGTERM, the run is paused where it stands and `belay resume` continues it,
+// re-running the step that was interrupted. Without it the dispatcher ends
+// the run as aborted, and resume refuses an aborted run, although belay run's
+// help says Ctrl-C leaves a run resume picks up.
+//
+// It is passed to dispatchOnce rather than built into runPlan.options because
+// it answers how this invocation stops, not how the run is wired. driveRun
+// owns the signal handling, so it owns what a signal does to the run. A
+// caller that dispatches runs no person is watching chooses for itself.
+func pauseOnCancel(o *graph.Options) { o.PauseOnCancel = true }
+
+// afterCompletion does what belay does once a dispatch has returned, before
+// it reports how the run went. Its steps run in this order, every time:
+//
+//  1. Save the recording, when agent.mode is "record". This happens whatever
+//     the outcome: a run that failed or was stopped still made the calls it
+//     recorded.
+//
+// A new step goes into this list at the position its inputs require, with
+// the reason for that position beside it.
+//
+// No step can change the process's exit status, and the signature is what
+// guarantees it: afterCompletion returns nothing, and reportOutcome derives
+// the status from view, which afterCompletion is given a copy of. A step that
+// fails says so on stderr, and the steps after it still run. A run that
+// finished has finished whether or not a step after it worked; reporting it
+// as failed would tell a script to redo work that is already done.
+//
+//nolint:revive // view is unused until a step depends on how the run ended; it is the steps' contract.
+func afterCompletion(u *ui, plan *runPlan, view outcomeView) {
 	if path, err := plan.saveCassette(); err != nil {
 		u.note("belay: %v", err)
 	} else if path != "" {
 		u.say("  recording saved to %s", path)
 	}
-
-	return reportOutcome(u, store.Layout(), outcome, runErr)
 }
 
 // stopOnSignal cancels ctx when the person running belay asks it to stop, and
 // says on screen that stopping is safe.
 //
 // The first SIGINT or SIGTERM cancels the run's context: the dispatcher
-// finishes the durable write it is in the middle of, journals an abort and
-// returns, so the run stops with its state intact. signal.Stop then hands the
+// finishes the durable write it is in the middle of, pauses the run and
+// returns, so the run stops with its state intact and `belay resume` picks it
+// up (see pauseOnCancel). If the second signal kills belay before that, the
+// run is left as a crash leaves it, which resume also continues. signal.Stop then hands the
 // next signal back to Go's default handler, which ends the process at once —
 // somebody holding Ctrl-C must never be left wondering whether belay is
 // ignoring them.
@@ -226,8 +361,27 @@ func announceStart(u *ui, plan *runPlan, layout state.Layout, want string) {
 	u.say("")
 	u.say("run %s", layout.RunID())
 	u.say("  state:  %s", layout.RunDir())
-	u.say("  route:  %s", routeLine())
+	u.say("  route:  %s", routeLine(plan.route))
 	u.say("")
+}
+
+// outcomeView is everything belay's closing report reads about how one
+// dispatch of a run ended: which run it was, what the dispatcher returned,
+// and the error it gave as the reason a run stopped short.
+//
+// It is one value rather than a list of parameters so that the report can
+// learn something new about a run, such as where the run's work went, by
+// gaining a field, instead of by changing the signature of every function
+// that reads it.
+type outcomeView struct {
+	// layout locates the run's files. The report names the plan, the
+	// journal and the command that continues the run.
+	layout state.Layout
+	// outcome is what the dispatcher returned.
+	outcome graph.Outcome
+	// runErr is the dispatcher's error. It is part of how the run went, such
+	// as graph.ErrMaxSteps, not a failure to find out.
+	runErr error
 }
 
 // reportOutcome turns an Outcome into the last thing a person reads, and into the
@@ -236,7 +390,8 @@ func announceStart(u *ui, plan *runPlan, layout state.Layout, want string) {
 // Every branch answers the same three questions in the same order: where the
 // run is, what it cost, and what to do next. A person who has read one of
 // these has read all of them.
-func reportOutcome(u *ui, layout state.Layout, outcome graph.Outcome, runErr error) error {
+func reportOutcome(u *ui, view outcomeView) error {
+	outcome, runErr := view.outcome, view.runErr
 	u.say("")
 	u.say("%s", outcomeHeadline(outcome, runErr))
 	u.say("  where:  %s", whereText(outcome.Node))
@@ -244,7 +399,7 @@ func reportOutcome(u *ui, layout state.Layout, outcome graph.Outcome, runErr err
 	// The label sits on the first line only: repeating "next:" down a
 	// paragraph turns one instruction into four, which is exactly the
 	// reading a person then has to undo.
-	for i, line := range nextSteps(layout, outcome, runErr) {
+	for i, line := range nextSteps(view) {
 		switch {
 		case line == "":
 			u.say("")
@@ -317,7 +472,7 @@ var nodeMeaning = map[string]string{
 	graph.NodePlan:    "writing the plan",
 	graph.NodeApprove: "waiting for you to read the plan and approve it",
 	graph.NodeCode:    "asking the agent to write the change",
-	graph.NodeWrite:   "saving the agent's changes into your repository",
+	graph.NodeWrite:   "checking the files the agent reported changing, and recording them",
 	graph.NodeTest:    "running your tests",
 	graph.NodeFix:     "asking the agent to repair what failed",
 	graph.NodeReview:  "running the quality gate over the result",
@@ -338,10 +493,16 @@ func spendText(outcome graph.Outcome) string {
 
 // nextSteps is the wayfinding line: the exact command that continues from
 // here, written out so nobody has to remember or reconstruct it.
-func nextSteps(layout state.Layout, outcome graph.Outcome, runErr error) []string {
+func nextSteps(view outcomeView) []string {
+	layout, outcome, runErr := view.layout, view.outcome, view.runErr
 	resume := "belay resume " + layout.RunID()
+	newRun := `belay run "what you want built"`
 
 	switch {
+	case errors.Is(runErr, graph.ErrInterrupted):
+		// Paused, but by Ctrl-C and not by the graph: nothing is waiting
+		// for the person to read, and resume re-runs the interrupted step.
+		return []string{"pick up where it stopped with:", "", "    " + resume}
 	case errors.Is(runErr, graph.ErrRunPaused), outcome.Status == state.RunStatusPaused:
 		lines := []string{"read the plan, edit it if you want to, then run:", "", "    " + resume}
 		if outcome.Node == graph.NodeApprove {
@@ -354,21 +515,34 @@ func nextSteps(layout state.Layout, outcome graph.Outcome, runErr error) []strin
 			"belay cannot tell where this run left off, so it will not guess.",
 			"start a fresh run; the journal of this one is at " + layout.JournalPath(),
 		}
+	// A run that ended as aborted cannot be resumed: belay resume refuses
+	// it. Only a run that is paused or was interrupted is offered the
+	// command, so the report never names one that would refuse.
 	case errors.Is(runErr, graph.ErrMaxSteps):
 		return []string{
-			"the graph kept going round without finishing, so belay stopped it.",
-			"raise graph.max_steps in belay.yaml, or take a smaller bite:",
-			"", "    " + resume,
+			"the graph kept going round without finishing, so belay stopped it. this run has ended.",
+			"raise graph.max_steps in belay.yaml, or ask for less, and start a new run:",
+			"", "    " + newRun,
 		}
 	case errors.Is(runErr, graph.ErrNodeTimeout):
 		return []string{
-			"one step ran longer than graph.node_timeout allows.",
-			"raise it in belay.yaml, then:", "", "    " + resume,
+			"one step ran longer than graph.node_timeout allows. this run has ended.",
+			"raise graph.node_timeout in belay.yaml, and start a new run:", "", "    " + newRun,
+		}
+	case errors.Is(runErr, belay.ErrBudgetExceeded):
+		// Crossing either ceiling ends a run with the same error, which
+		// does not say which one, so both settings are named.
+		return []string{
+			"the run went past its budget ceiling, so belay stopped it. this run has ended.",
+			"raise budget.max_usd or budget.max_tokens in belay.yaml, whichever it reached, and start a new run:",
+			"", "    " + newRun,
 		}
 	case outcome.Status == state.RunStatusCompleted:
 		return []string{"review the change in your repository, then commit it"}
 	case outcome.Status == state.RunStatusAborted:
-		return []string{"pick up where it stopped with:", "", "    " + resume}
+		return []string{
+			"this run has ended. see what happened with:", "", "    belay timeline " + layout.RunID(),
+		}
 	case outcome.Status == state.RunStatusFailed:
 		return []string{
 			"see what happened with:", "", "    belay timeline " + layout.RunID(),
@@ -401,53 +575,11 @@ func describeDryRun(u *ui, plan *runPlan, want, resuming string) error {
 	u.say("This is a dry run. belay is only describing the work; none of it has happened.")
 	u.say("")
 
-	if want != "" {
-		u.say("what you asked for")
-		u.say("  %s", want)
-		u.say("")
-	}
-	if resuming != "" {
-		u.say("which run it would continue")
-		u.say("  %s", resuming)
-		u.say("")
-	}
-
-	u.say("where belay would work")
-	u.say("  %s", plan.workspace)
-	u.say("  %s", projectLine(plan.projects))
-	u.say("")
-
-	u.say("the most it could spend")
-	u.say("  %s", u.emph(budgetCeiling(plan.config.Budget)))
-	u.say("  %s", budgetOnExceed(plan.config.Budget))
-	u.say("")
-
-	u.say("settings it would use")
-	u.say("  read from    %s", sourcesLine(plan.configSources))
-	u.say("  agent        %s, model %s, %s, up to %d turns per step",
-		plan.config.Agent.Backend, plan.config.Agent.Model,
-		agentModeLine(plan.config.Agent.Mode, plan.cassettePath), plan.config.Agent.MaxTurns)
-	u.say("  tests        %s", plan.runnerName())
-	u.say("  quality gate %s, failing the run on %s issues or worse",
-		plan.gateName(), plan.config.Review.FailOn)
-	u.say("  credentials  %s", credentialsLine())
-	u.say("")
-
-	u.say("the route it would take")
-	u.say("  %s", routeLine())
-	u.say("  %s", approvalLine(plan.config.Graph))
-	u.say("  it gives up after %d rounds of the test-and-fix loop, or %d steps in all",
-		plan.config.Graph.GiveUp, plan.config.Graph.MaxSteps)
-	u.say("")
-
-	u.say("what it would create")
-	u.say("  %s", filepath.Join(plan.workspace, ".belay", "runs", "<run-id>"))
-	u.say("  holding manifest.json, state.json, journal.ndjson and the plan")
-	u.say("")
-
-	for _, w := range plan.warnings {
-		u.say("worth knowing")
-		u.say("  %s", w)
+	for _, section := range dryRunSections(u, plan, want, resuming) {
+		u.say("%s", section.title)
+		for _, line := range section.lines {
+			u.say("  %s", line)
+		}
 		u.say("")
 	}
 
@@ -467,6 +599,79 @@ func describeDryRun(u *ui, plan *runPlan, want, resuming string) error {
 	return nil
 }
 
+// dryRunSection is one titled block of a dry run: a heading, then its lines,
+// each indented under it.
+type dryRunSection struct {
+	title string
+	lines []string
+}
+
+// dryRunSections lists what a dry run describes, in the order it is printed.
+//
+// Each section is built by its own function, and a section that has nothing
+// to say is left out rather than printed empty. Something new a run would do
+// gets a section of its own in this list, or a line in the section it belongs
+// to, instead of more statements in describeDryRun.
+func dryRunSections(u *ui, plan *runPlan, want, resuming string) []dryRunSection {
+	var sections []dryRunSection
+	if want != "" {
+		sections = append(sections, dryRunSection{title: "what you asked for", lines: []string{want}})
+	}
+	if resuming != "" {
+		sections = append(sections, dryRunSection{title: "which run it would continue", lines: []string{resuming}})
+	}
+	sections = append(sections,
+		dryRunSection{title: "where belay would work", lines: []string{plan.workspace, projectLine(plan.projects)}},
+		dryRunSpend(u, plan),
+		dryRunSettings(plan),
+		dryRunRoute(plan),
+		dryRunCreates(plan),
+	)
+	for _, w := range plan.warnings {
+		sections = append(sections, dryRunSection{title: "worth knowing", lines: []string{w}})
+	}
+	return sections
+}
+
+// dryRunSpend is the ceiling a run is held to, and what reaching it does.
+func dryRunSpend(u *ui, plan *runPlan) dryRunSection {
+	return dryRunSection{title: "the most it could spend", lines: []string{
+		u.emph(budgetCeiling(plan.config.Budget)),
+		budgetOnExceed(plan.config.Budget),
+	}}
+}
+
+// dryRunSettings is where the settings came from and the tools they chose.
+func dryRunSettings(plan *runPlan) dryRunSection {
+	agent := plan.config.Agent
+	return dryRunSection{title: "settings it would use", lines: []string{
+		"read from    " + sourcesLine(plan.configSources),
+		fmt.Sprintf("agent        %s, model %s, %s, up to %d turns per step",
+			agent.Backend, agent.Model, agentModeLine(agent.Mode, plan.cassettePath), agent.MaxTurns),
+		"tests        " + plan.runnerName(),
+		fmt.Sprintf("quality gate %s, failing the run on %s issues or worse", plan.gateName(), plan.config.Review.FailOn),
+		"credentials  " + credentialsLine(),
+	}}
+}
+
+// dryRunRoute is the walk through the graph, and what bounds it.
+func dryRunRoute(plan *runPlan) dryRunSection {
+	return dryRunSection{title: "the route it would take", lines: []string{
+		routeLine(plan.route),
+		approvalLine(plan.config.Graph),
+		fmt.Sprintf("it gives up after %d rounds of the test-and-fix loop, or %d steps in all",
+			plan.config.Graph.GiveUp, plan.config.Graph.MaxSteps),
+	}}
+}
+
+// dryRunCreates is what a real run would write, and where.
+func dryRunCreates(plan *runPlan) dryRunSection {
+	return dryRunSection{title: "what it would create", lines: []string{
+		filepath.Join(plan.workspace, ".belay", "runs", "<run-id>"),
+		"holding manifest.json, state.json, journal.ndjson and the plan",
+	}}
+}
+
 // budgetCeiling renders the budget in the two units it is capped in.
 func budgetCeiling(b config.Budget) string {
 	return fmt.Sprintf("%s or %s tokens, whichever comes first", dollars(b.MaxUSD), thousands(b.MaxTokens))
@@ -482,9 +687,9 @@ func budgetOnExceed(b config.Budget) string {
 }
 
 // routeLine is the walk through the graph, written out so a person can see
-// where they are in it.
-func routeLine() string {
-	return strings.Join(append(slices.Clone(defaultRoute), "done"), " → ")
+// where they are in it. route is what nodes.Route returned for this run.
+func routeLine(route []string) string {
+	return strings.Join(append(slices.Clone(route), "done"), " → ")
 }
 
 // approvalLine explains the one step that stops for a human.

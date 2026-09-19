@@ -6,6 +6,223 @@ All notable changes to belay are recorded here. The format follows
 that only `pkg/belay` carries a compatibility promise. Everything under
 `internal/` may change in any release.
 
+## Unreleased
+
+### Added
+
+- **A dry run says that `fanout.enabled` does nothing yet.** Nothing in the
+  graph leads to the fanout node, so a run with fanout on takes the ordinary
+  route once, whatever `fanout.candidates` says — and belay said nothing about
+  it, while somebody who had turned it on was expecting N attempts and
+  watching what N attempts would cost. `belay --dry-run run` now lists it
+  under "worth knowing".
+- **`belay timeline` lists the files a run changed.** After the totals, a
+  "Files changed:" section lists every file the run changed, one per line
+  and sorted, including the files the fix loop repaired. It is left out when
+  the run has changed nothing. `belay timeline --json` carries the same list
+  as `changed_files`. The README's example output showed this section before
+  belay printed it, in a table layout belay never used; it now shows exactly
+  what belay prints, and a test keeps it that way.
+
+### Changed
+
+- **belay v0.1.x can no longer resume a run this version has saved.** belay
+  ignores fields it does not know in a run's state.json and manifest.json,
+  and saves the run without them. Once runs carry settings that change what
+  they do, an older belay resuming one would drop those settings without a
+  word. Both files now carry a `requires` list naming what a run depends on,
+  and a belay that lacks something on the list refuses the run by name and
+  says to upgrade. Nothing adds to the list yet. v0.1.x never reads it, so
+  both files also move to schema version 2, which v0.1.x refuses: its
+  `belay runs` shows such a run as "unsupported manifest version 2", and its
+  `belay resume` does not offer it. Runs started by v0.1.x still resume, and
+  are saved at version 2 from then on. With two belay installs, resume runs
+  with the newer one. ADR-0011 records the decision.
+
+### Fixed
+
+- **The README describes what belay really does and prints.** Its dry-run
+  example showed a ceiling of 1,000,000 tokens, 5 agent turns a step and a
+  closing line belay never printed, and left out what reaching the ceiling
+  does and when belay gives up. It is now exactly what `belay run --dry-run`
+  prints for the quickstart's own belay.yaml, and a test keeps it that way.
+  The README also sent you to `.belay/runs/<run-id>/plan.md`, when the plan
+  is at `artifacts/plan.md`; said manifest.json holds the run's state, which
+  is in state.json; listed agent modes belay does not have (streaming,
+  batch) instead of live, record and replay; said a failing quality gate
+  pauses the run, when it sends the change to the fix step; said nodes
+  never touch the filesystem; and put writing the journal before saving a
+  step's changes, the reverse of the order belay depends on.
+- **belay no longer says its write step saves the agent's changes.** The
+  closing report described the write step as "saving the agent's changes
+  into your repository", and `belay run --help` said belay "saves the
+  files". The agent edits the files itself, in place; the write step checks
+  the files it reported changing and records them, and never writes to your
+  repository. Both now say that.
+- **A dry run with `graph.approval: false` no longer shows the approve gate on
+  the route.** The route belay prints is the walk a run takes, and with
+  approval off the plan node goes straight to code — which the line under the
+  route already said, while the route above it still listed `approve`. The gate
+  is still part of the graph belay can resolve, so a run started with it and
+  resumed after the flag was turned off still re-runs the step its journal
+  names.
+- **`belay resume <run-id>` says a damaged run is damaged, instead of saying
+  it does not exist.** A run whose manifest.json belay cannot read was skipped
+  when choosing a run, and naming it answered "belay has no run called
+  <run-id>" — for an id a person had usually just copied from `belay runs`,
+  which lists the same run and says what is wrong with it. Naming such a run
+  now says belay cannot continue it, why in the same words `belay runs` uses,
+  and where the run directory is. belay still never picks one when you do not
+  name a run: it passes over it and chooses from the others. `belay resume
+  --help` says both.
+- **`belay timeline` no longer reports the approval gate as a loop.** The gate
+  pausing for you and running again when you resumed the run is two journal
+  records for one visit, and the timeline counted them as two: every run with
+  `graph.approval` on said "approve ran 2 times", numbered the two rows
+  "approve #1/2" and "#2/2", and opened the loop-cost span at the gate — so the
+  figure for what the test-and-fix loop cost included the plan, the code and
+  the write that came before it. The same held for a step that Ctrl-C or a
+  crash interrupted and belay ran again. Both now read as one visit, and the
+  loop cost covers the loop. The README's example output is regenerated from
+  what belay prints.
+
+  A script reading `belay timeline --json` will see different numbers for
+  such runs. `loops[].executions` now counts visits to a node; it counted
+  journal records, which over-counted every run with the gate on, so
+  `approve` no longer appears in `loops`. Each entry's `iteration`
+  and `iterations` count visits too, and the `loop_*` totals start at the
+  first node that really looped. `schema` stays 1: these fields always meant
+  how many times the run came back to a node, and the old values were wrong.
+- **Stopping a run with Ctrl-C no longer costs it a step.** The interrupted
+  step was counted against `graph.max_steps` before the run was paused, so a
+  run stopped twice had two fewer steps left to finish in than one killed
+  twice — although `belay run`'s help promises that Ctrl-C leaves the run
+  where a kill would. It also moved the re-run's evidence directory under
+  `nodes/` beside the attempt it replaces rather than over it. Only a step the
+  run acted on is counted now.
+- **A version-1 run's manifest is now saved at the current schema version
+  before belay writes anything else to the run.** Resuming a run belay v0.1.x
+  started upgrades both of its documents, and state.json was saved first — by
+  the dispatcher's first patch, or by `belay resume` recording your approval.
+  A crash in between left a version-1 manifest over a version-2 state.json,
+  which a released belay accepts: it would resume the run, append to its
+  journal, and on the next invocation report that the run had already ended.
+  The manifest is now saved first, which is the version a released belay
+  refuses (ADR-0011).
+- **A run that requires something this belay does not have is refused before
+  its journal is touched.** A run may declare a required capability in
+  state.json alone, and the dispatcher read manifest.json, opened the journal
+  and healed a crashed step before it ever read state.json — so a run it was
+  not allowed to read had already been written to, and the first guard it met
+  ended it for good. Nothing sets `requires` yet, so no run was affected in
+  practice.
+- **A repair that quotes the failure it fixed no longer poisons or ends the
+  run.** The fix node read its reply with the code node's parser, which, when
+  no changed-files block is present, salvages paths out of any unified diff in
+  the text. The fix prompt hands the agent its test failures and asks what was
+  broken, so a reply quoting one is ordinary — and a test failure is routinely
+  a diff. A quoted testify comparison recorded a file called "Actual" as
+  changed, which then reached the reviewer, the next repair's prompt,
+  state.json and `belay timeline`; a quoted golden-file `diff -u`, whose paths
+  are absolute, was refused as an unusable report, which failed the node and
+  ended the run for good after the repair had been made and paid for. A
+  repair's reply is now read for the changed-files block alone. The code node
+  is unchanged: its own prompt quotes no diff.
+- **`review.ai.mcp.url` is now required for `review.ai.mcp.mode: cloud`
+  when `review.mode` is `ai`.** `cloud`, the default mode, has no built-in
+  address, so the AI reviewer needs the URL as much as `server` does, but
+  the loader required it only for `server`. No run was at risk: `belay run`
+  and `belay resume` refuse `review.mode: ai` before they start, because
+  that reviewer is not wired in yet. What changes is where such a
+  configuration stops: it now fails when belay loads it, with an error
+  naming `review.ai.mcp.url`, instead of loading and meeting that refusal.
+  The refusal itself now says what the mode is, as docs/config.md does; it
+  used to call the reviewer "agent-driven" and "not built yet". Under any
+  other `review.mode` the URL may still be left empty, so the default
+  configuration is unaffected.
+- **`--config` help no longer says the file replaces belay.yaml.** It said
+  belay reads the file "instead of" the belay.yaml it would find, but belay
+  reads your user config and the workspace's belay.yaml as well, and merges
+  the `--config` file on top of them, setting by setting. A setting you
+  left out of that file still came from the others. The help, and the
+  README's configuration section, now say so.
+- **A run a newer belay wrote now says it needs a newer belay.** A run
+  whose manifest.json requires something this belay does not have, or is
+  at a schema version above the one it reads, is not damaged, but
+  `belay runs` listed it as "manifest.json is damaged" or "unsupported
+  manifest version", and `belay resume` acted as if it were not there:
+  named, it said there was no such run, and left to choose, it continued
+  an older run instead. `belay runs` now lists it as "needs a newer belay",
+  with what it requires. `belay resume` refuses it with an error that says
+  what it requires and to upgrade belay, and while such a run is in the
+  workspace, `belay resume` with no run id will not choose a run for you;
+  name the run instead. A version older than any belay reads keeps its
+  "unsupported" wording.
+- **Files changed in the fix loop are now recorded with the rest of the
+  run's change.** belay keeps a list of the files a run changed, taken from
+  the files the agent reports after writing the code. When a test or the
+  quality gate failed and the agent repaired it, the files that repair
+  touched were never added, so the list belay passes to a reviewer, and
+  shows the agent on its next repair, left them out. belay now asks the
+  agent which files each repair changed and adds them to the list, each
+  file once. A repair that reports a path outside the repository fails the
+  run, as the first change already did.
+- **Ctrl-C now leaves a run that `belay resume` continues.** `belay run
+  --help` promised this, but Ctrl-C, or a SIGTERM, ended the run as
+  aborted: belay printed `belay resume <id>`, and `belay resume` then
+  refused the run as "already stopped for good". belay now pauses the run
+  at the step it was in. `belay resume` runs that step again from its
+  start, and not the steps that had finished. If Ctrl-C lands while belay
+  is at the approval gate, resuming asks for approval again rather than
+  approving the plan for you. An interrupted `belay run` still exits with
+  code 3. A second Ctrl-C still quits at once, which leaves the run as a
+  crash does, and `belay resume` continues that too.
+- **belay no longer tells you to resume a run it cannot resume.** After
+  `graph.max_steps`, `graph.node_timeout`, or the budget ceiling with
+  `budget.on_exceed: abort`, the closing report offered `belay resume
+  <id>`, which refuses such a run. It now says the run has ended, names the
+  setting to raise — `budget.max_usd` or `budget.max_tokens` for the budget
+  ceiling — and gives the command that starts a new run. A run aborted
+  any other way is pointed at `belay timeline`.
+  docs/troubleshooting.md and docs/architecture.md also suggested `belay
+  resume` for runs that had completed or failed, and no longer do.
+- **A crash while belay recovers from a crash no longer ends the run.**
+  After a crash belay closes the step that was cut off and runs it again.
+  If belay died again between the two, the next attempt took the run for
+  aborted and refused it. It now runs the step again, and numbers it as
+  the next attempt instead of reusing the number of the one it replaces.
+- **A `belay run` that fails while creating its run no longer leaves a run
+  that `belay resume` picks up.** belay wrote the run's manifest.json before
+  its state.json. If writing state.json failed, or belay was killed between
+  the two, the manifest said the run was running: `belay resume` chose it
+  and then failed to load it, and `belay runs` listed it as resumable. belay
+  now writes state.json first and the manifest last, so a run exists only
+  once both files do. A run whose creation was cut short shows in
+  `belay runs` as unreadable, with no manifest.json, and `belay resume`
+  never offers it.
+- **The configuration reference now states the defaults and values belay
+  actually uses.** docs/config.md had drifted on nine defaults, among them
+  `agent.max_turns` (30, not 5), `graph.max_steps` (60, not 20),
+  `graph.node_timeout` (15m, not 10m) and `budget.max_usd` (5, not 10). It
+  listed values the loader rejects for `agent.mode`, `test.runner`,
+  `review.fail_on` and `review.ai.mcp.mode`, and documented
+  `review.sonar.quality_gate_wait` and `quality_gate_timeout` as durations
+  when they are a boolean and a number of seconds. It also said unknown keys
+  are only warnings, when they are errors, and that environment variables
+  and flags override settings, when only a `--config` file does. Tests now
+  check every documented setting's type, default and valid values against
+  the code, and fail when a setting has no entry.
+- **The docs no longer say fanout works.** The README said parallel
+  candidate generation works and only merging the winner back was manual,
+  and docs/architecture.md said the fanout node runs each candidate from the
+  code step onward. Neither was true. The fanout and join nodes exist and
+  are unit-tested, but no step in belay's graph leads to fanout, so no run
+  reaches either one, and `fanout.enabled: true` changes nothing a run does.
+  The fanout node only prepares a workspace per candidate; nothing runs a
+  candidate. The README, docs/architecture.md, docs/troubleshooting.md,
+  docs/config.md, docs/adapters.md and examples/naive now say so. Running
+  candidates is planned, and ADR-0019 is reserved for it.
+
 ## v0.1.4 — 2026-09-17
 
 ### Fixed

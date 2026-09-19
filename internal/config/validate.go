@@ -159,12 +159,28 @@ func (c Config) reviewErrors() []error {
 		errs = append(errs, textError("review.sonar.image", c.Review.Sonar.Image,
 			`want a scanner image, because review.sonar.runner is "docker"`))
 	}
+	// The mcp rules apply only while review.mode is "ai", the one mode
+	// that dials the server. The defaults pair review.mode "lint" with
+	// review.ai.mcp.mode "cloud" and no url, and must stay valid.
+	//
+	// "cloud" needs the url as much as "server" does: the reviewer has no
+	// built-in endpoint for it (aireview.ErrMissingURL argues why). No run
+	// reaches that reviewer today, because belay run refuses review.mode
+	// "ai" before it starts: the reviewer is not wired in. The rule is
+	// here for the day it is, so that a missing url fails when the
+	// configuration loads rather than at the review step, after the run
+	// has spent on everything before it.
 	if c.Review.Mode == ReviewModeAI {
 		switch c.Review.AI.MCP.Mode {
 		case MCPModeServer:
 			if c.Review.AI.MCP.URL == "" {
 				errs = append(errs, textError("review.ai.mcp.url", c.Review.AI.MCP.URL,
 					`want the URL of a running MCP server, because review.ai.mcp.mode is "server"`))
+			}
+		case MCPModeCloud:
+			if c.Review.AI.MCP.URL == "" {
+				errs = append(errs, textError("review.ai.mcp.url", c.Review.AI.MCP.URL,
+					`want the URL of SonarQube Cloud's MCP endpoint, because review.ai.mcp.mode is "cloud"`))
 			}
 		case MCPModeDocker:
 			if c.Review.AI.MCP.Image == "" {

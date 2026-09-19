@@ -7,8 +7,8 @@ import "strings"
 //
 // Nothing asks the agent for a diff any more — the prompt asks it to edit
 // files and report their paths. This is the salvage path described in
-// changeSet: a backend that volunteers a diff anyway has still said which
-// files it touched, and harvesting those paths costs nothing, where
+// ParseChangedFiles: a backend that volunteers a diff anyway has still said
+// which files it touched, and harvesting those paths costs nothing, where
 // discarding them would mean paying for another invocation to learn
 // something already in hand. The bare-diff fallback below exists for the
 // same reason, one level down: a model that emitted a diff but forgot to

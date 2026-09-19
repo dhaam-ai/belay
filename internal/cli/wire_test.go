@@ -12,10 +12,10 @@ import (
 	"testing"
 	"time"
 
+	"github.com/dhaam-ai/belay/internal/agent/claude"
 	"github.com/dhaam-ai/belay/internal/config"
 	"github.com/dhaam-ai/belay/internal/graph"
 	"github.com/dhaam-ai/belay/internal/journal"
-	"github.com/dhaam-ai/belay/internal/nodes"
 	"github.com/dhaam-ai/belay/internal/state"
 )
 
@@ -41,6 +41,9 @@ func goWorkspace(t *testing.T) string {
 // writeConfig drops a belay.yaml into dir.
 func writeConfig(t *testing.T, dir, body string) {
 	t.Helper()
+	// gosec's taint analysis cannot see that dir is always a t.TempDir() and
+	// that the name is a constant, so it reads this as attacker-controlled.
+	//nolint:gosec // G703: dir comes from t.TempDir(); config.ProjectFile is a constant.
 	if err := os.WriteFile(filepath.Join(dir, config.ProjectFile), []byte(body), 0o600); err != nil {
 		t.Fatalf("write %s: %v", config.ProjectFile, err)
 	}
@@ -171,8 +174,8 @@ func TestResolvePicksAdapters(t *testing.T) {
 	if plan.recorder != nil {
 		t.Error("live mode must not arm the cassette recorder")
 	}
-	if plan.registry == nil || plan.registry.Len() != len(defaultRoute) {
-		t.Errorf("registry = %v, want the %d nodes of the default route", plan.registry, len(defaultRoute))
+	if plan.registry == nil || plan.registry.Len() != len(plan.route) {
+		t.Errorf("registry = %v, want the %d nodes of the route %v", plan.registry, len(plan.route), plan.route)
 	}
 	if len(plan.projects) != 1 || plan.projects[0].Kind.String() != "go" {
 		t.Errorf("projects = %+v, want one Go project", plan.projects)
@@ -218,16 +221,33 @@ func TestResolveBlocksWhenNothingToTest(t *testing.T) {
 	}
 }
 
-func TestResolveBlocksOnUnbuiltReviewMode(t *testing.T) {
+// TestResolveBlocksOnUnwiredReviewMode pins the refusal of review.mode "ai"
+// to what docs/config.md says about it: the reviewer asks SonarQube through
+// the Sonar MCP server, and belay has not wired it in. The refusal once
+// called it "the agent-driven reviewer" and "not built yet", which is neither
+// what the mode is nor why belay refuses it: internal/nodes/aireview exists
+// and is tested, and nothing in belay run constructs it.
+func TestResolveBlocksOnUnwiredReviewMode(t *testing.T) {
 	ws := goWorkspace(t)
-	writeConfig(t, ws, "version: 1\nreview:\n  mode: \"ai\"\n")
+	// The url is there because review.mode "ai" with the default mcp mode,
+	// "cloud", requires one to load at all; this test is about the refusal
+	// that follows loading.
+	writeConfig(t, ws, "version: 1\nreview:\n  mode: \"ai\"\n  ai:\n    mcp:\n      url: \"https://mcp.example.test\"\n")
 
 	plan, err := resolve(resolveRequest{workspace: ws, logger: quietLogger()})
 	if err != nil {
 		t.Fatalf("resolve: %v", err)
 	}
-	if !strings.Contains(blockerText(plan), "not built yet") {
-		t.Errorf("review.mode ai should be refused in plain words; got:\n%s", blockerText(plan))
+	got := blockerText(plan)
+	for _, want := range []string{"SonarQube", "Sonar MCP server", "not wired in yet", `set review.mode to "lint" or "sonar"`} {
+		if !strings.Contains(got, want) {
+			t.Errorf("the refusal of review.mode ai does not say %q; got:\n%s", want, got)
+		}
+	}
+	for _, wrong := range []string{"agent-driven", "not built"} {
+		if strings.Contains(got, wrong) {
+			t.Errorf("the refusal of review.mode ai says %q, which is not why belay refuses it; got:\n%s", wrong, got)
+		}
 	}
 }
 
@@ -273,26 +293,6 @@ func blockerText(p *runPlan) string {
 		b.WriteString("\n")
 	}
 	return b.String()
-}
-
-// TestDefaultRouteMatchesRegistry keeps the route belay shows a person and
-// the graph belay actually walks from drifting apart.
-func TestDefaultRouteMatchesRegistry(t *testing.T) {
-	registry, err := nodes.Default(config.Default())
-	if err != nil {
-		t.Fatalf("nodes.Default: %v", err)
-	}
-	if registry.Len() != len(defaultRoute) {
-		t.Fatalf("defaultRoute has %d nodes, the registry has %d", len(defaultRoute), registry.Len())
-	}
-	for _, name := range defaultRoute {
-		if _, err := registry.Get(name); err != nil {
-			t.Errorf("defaultRoute names %q, which nodes.Default does not register", name)
-		}
-	}
-	if defaultRoute[0] != journal.FirstNode {
-		t.Errorf("the route starts at %q but a run starts at %q", defaultRoute[0], journal.FirstNode)
-	}
 }
 
 // secretNode is a node that fails the way a real adapter fails: with an error
@@ -439,6 +439,47 @@ func TestSignInWarning(t *testing.T) {
 	}
 }
 
+// TestAgentWarningsNameOnlyTheBackendInUse pins agentWarnings on its own
+// terms, beneath TestSignInWarning: a warning about how one backend signs in
+// is given only for that backend, so a run on another is not told to sign in
+// to a command line it will never call.
+func TestAgentWarningsNameOnlyTheBackendInUse(t *testing.T) {
+	tests := []struct {
+		name    string
+		backend string
+		key     string
+		want    []string
+	}{
+		{name: "claude, signed out", backend: claude.BackendName, want: []string{anthropicKeyEnv, claudeOAuthTokenEnv}},
+		{name: "claude, signed in", backend: claude.BackendName, key: "belay-test-api-credential"},
+		{name: "another backend, signed out", backend: "some-other-cli"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Setenv(anthropicKeyEnv, tt.key)
+			t.Setenv(claudeOAuthTokenEnv, "")
+			cfg := config.Default()
+			cfg.Agent.Backend = tt.backend
+
+			got := agentWarnings(cfg)
+			if len(tt.want) == 0 {
+				if len(got) != 0 {
+					t.Errorf("agentWarnings() = %q, want none", got)
+				}
+				return
+			}
+			if len(got) != 1 {
+				t.Fatalf("agentWarnings() = %q, want one warning", got)
+			}
+			for _, name := range tt.want {
+				if !strings.Contains(got[0], name) {
+					t.Errorf("warning = %q, want it to name %s", got[0], name)
+				}
+			}
+		})
+	}
+}
+
 // seedRunDir creates the run directory a dispatcher needs. It is the same
 // sequence run.go performs, kept here so wire tests do not depend on the
 // command layer.
@@ -455,13 +496,13 @@ func seedRunDir(t *testing.T, plan *runPlan, goal string) *state.Store {
 	if err := os.MkdirAll(layout.ArtifactsDir(), 0o750); err != nil {
 		t.Fatalf("create run directory: %v", err)
 	}
+	if err := state.SaveState(layout.StatePath(), state.NewState(goal)); err != nil {
+		t.Fatalf("save state: %v", err)
+	}
 	now := time.Now().UTC()
 	if err := state.SaveManifest(layout.ManifestPath(),
 		state.NewManifest(now, runID, plan.workspace, goal, plan.config)); err != nil {
 		t.Fatalf("save manifest: %v", err)
-	}
-	if err := state.SaveState(layout.StatePath(), state.NewState(goal)); err != nil {
-		t.Fatalf("save state: %v", err)
 	}
 	return state.NewStore(layout)
 }

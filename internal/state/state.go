@@ -34,8 +34,49 @@
 // Both on-disk documents carry a schema_version field. LoadState and
 // LoadManifest reject a version they do not recognize with a typed error
 // (VersionError, ManifestVersionError) unless a migration has been
-// registered for it; today neither package has one, since both schemas
-// are still at version 1.
+// registered for it. A version above the current one was written by a
+// newer belay, so its error says to upgrade, as a *CapabilityError does.
+//
+// Both are at version 2, and the one registered migration takes either file
+// from version 1, which every release up to v0.1.4 wrote, to version 2 (see
+// migrateFromVersion1). Version 2 adds only the requires list described
+// below; every other field keeps its shape and meaning. The bump exists
+// because those releases accept version 1 and nothing else, and never read
+// requires: a run this belay has saved is one they refuse, rather than one
+// they resume after dropping whatever they cannot read. The cost is that
+// once this belay has saved a run, including one a released belay started,
+// no released belay can resume it.
+//
+// # Capabilities
+//
+// Both documents also carry a requires list: the names of the capabilities
+// the run depends on, such as "output.branch" for a run whose output is a
+// git branch. A capability is a promise that whatever reads the document
+// understands a field that changes what the run does. LoadState and
+// LoadManifest refuse a document that requires a capability this binary
+// does not know, with a *CapabilityError that names it and says to upgrade.
+//
+// The list exists because encoding/json ignores keys it does not recognize.
+// A belay that predates a control field would decode a run carrying it,
+// drop the field without a word, and write the file back without it on its
+// next save; the run would then carry on doing something other than what it
+// was started to do. Bumping schema_version stops binaries that predate the
+// bump, and is the only thing that can, since they already shipped. The
+// requires list stops every binary from this one on, without a schema bump
+// each time a control field is added. ADR-0011 records the decision.
+//
+// Each document declares only what its own fields need. state.json and
+// manifest.json are loaded and rewritten independently — Store.ApplyPatch
+// reads and saves state.json without opening the manifest — so neither
+// file can rely on the other to protect it. The check runs before the
+// document is decoded, so a field in a shape this binary cannot read never
+// hides the capability that explains why.
+//
+// This deliberately does not refuse unknown keys in general
+// (json.Decoder.DisallowUnknownFields). A field that only adds information
+// is safe for an older binary to drop, and refusing it would turn every
+// additive change into a break. Only a field whose loss changes what the
+// run does earns a capability name.
 package state
 
 import (
@@ -67,8 +108,10 @@ func cloneSlice[T any](s []T) []T {
 }
 
 // StateSchemaVersion is the schema version SaveState writes and the only
-// version LoadState accepts without a registered migration.
-const StateSchemaVersion = 1
+// version LoadState accepts without a registered migration. It is 2, not 1,
+// so that released belay refuses a state.json this one has written; see
+// "Schema versioning" in the package documentation.
+const StateSchemaVersion = 2
 
 // ErrUnsupportedStateVersion reports a state.json whose schema_version
 // LoadState does not know how to read and has no migration registered for.
@@ -81,13 +124,25 @@ type VersionError struct {
 	Got int
 }
 
-// Error implements error.
+// Error implements error. For a version above StateSchemaVersion it says to
+// upgrade belay, as CapabilityError does: a newer belay wrote the file, and
+// running that one is the only fix. A lower version no migration covers
+// was not written by any belay this one can point to, so it says only that
+// the version is not supported.
 func (e *VersionError) Error() string {
+	if e.Newer() {
+		return fmt.Sprintf("state: state.json schema version %d is newer than this belay reads (%d); upgrade belay to continue this run",
+			e.Got, StateSchemaVersion)
+	}
 	return fmt.Sprintf("state: state.json schema version %d is not supported (want %d)", e.Got, StateSchemaVersion)
 }
 
 // Unwrap reports ErrUnsupportedStateVersion.
 func (e *VersionError) Unwrap() error { return ErrUnsupportedStateVersion }
+
+// Newer reports whether the version found is above StateSchemaVersion,
+// which means a newer belay wrote the document.
+func (e *VersionError) Newer() bool { return e.Got > StateSchemaVersion }
 
 // Migration upgrades a raw state.json document exactly one schema
 // version forward. A migration for version N is registered at
@@ -96,10 +151,10 @@ func (e *VersionError) Unwrap() error { return ErrUnsupportedStateVersion }
 // reaches StateSchemaVersion.
 type Migration func(raw []byte) ([]byte, error)
 
-// stateMigrations holds no entries today: StateSchemaVersion is state.json's
-// only version so far. It exists so a future schema bump has somewhere to
-// register its upgrade path without changing decodeState's logic.
-var stateMigrations = map[int]Migration{}
+// stateMigrations holds every registered Migration, keyed by the version
+// it upgrades from. Version 1, which every released belay wrote, upgrades
+// to 2 by migrateFromVersion1.
+var stateMigrations = map[int]Migration{1: migrateFromVersion1}
 
 // State is the blackboard graph nodes read and the dispatcher patches
 // after every node — belay's working memory for one run.
@@ -109,6 +164,10 @@ var stateMigrations = map[int]Migration{}
 type State struct {
 	// SchemaVersion is this document's schema version.
 	SchemaVersion int `json:"schema_version"`
+	// Requires lists the capabilities this document's fields depend on,
+	// sorted and without duplicates; see "Capabilities" in the package
+	// documentation. Empty, never nil, for a run that depends on none.
+	Requires []string `json:"requires"`
 	// Goal is the run's objective, as given by the caller that started it.
 	Goal string `json:"goal"`
 	// Plan is the plan node's output.
@@ -133,12 +192,13 @@ type State struct {
 }
 
 // NewState returns the initial blackboard for a run pursuing goal: schema
-// current, everything else zero, with Candidates and History set to
-// non-nil empty slices so a freshly started run serializes
-// "candidates": [] and "history": [] rather than null.
+// current, everything else zero, with Requires, Candidates and History set
+// to non-nil empty slices so a freshly started run serializes
+// "requires": [], "candidates": [] and "history": [] rather than null.
 func NewState(goal string) State {
 	return State{
 		SchemaVersion: StateSchemaVersion,
+		Requires:      []string{},
 		Goal:          goal,
 		Candidates:    []Candidate{},
 		History:       []HistoryEntry{},
@@ -348,7 +408,9 @@ type HistoryEntry struct {
 // looks for a registered migration and applies it repeatedly until the
 // document reaches StateSchemaVersion; if none is registered for the
 // version found, it returns a *VersionError (wrapping
-// ErrUnsupportedStateVersion) rather than guessing at the shape.
+// ErrUnsupportedStateVersion) rather than guessing at the shape. If the
+// document requires a capability this binary does not know, it returns a
+// *CapabilityError (wrapping ErrUnknownCapability).
 func LoadState(path string) (State, error) {
 	raw, err := readFile(path)
 	if err != nil {
@@ -379,6 +441,10 @@ func decodeState(raw []byte) (State, error) {
 			return State{}, fmt.Errorf("state: migrate state.json from version %d: %w", probe.SchemaVersion, err)
 		}
 		raw = migrated
+	}
+
+	if err := checkRequires("state.json", raw); err != nil {
+		return State{}, err
 	}
 
 	var st State

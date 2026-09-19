@@ -7,6 +7,7 @@ import (
 	"strings"
 	"unicode/utf8"
 
+	"github.com/dhaam-ai/belay/internal/nodes/code"
 	"github.com/dhaam-ai/belay/internal/state"
 	"github.com/dhaam-ai/belay/pkg/belay"
 )
@@ -102,7 +103,8 @@ type promptInput struct {
 	// Test and Review are the blackboard's failure records.
 	Test   state.Test
 	Review state.Review
-	// ChangedFiles is what the code node reported touching.
+	// ChangedFiles is what the run has recorded as changed: the files the
+	// code node reported, and those every earlier repair reported.
 	ChangedFiles []string
 }
 
@@ -282,10 +284,47 @@ func writeInstructions(b *strings.Builder, in promptInput) {
 			"test itself is wrong, fix the test and say so explicitly in your summary.\n")
 	}
 	b.WriteString("4. Do not touch code unrelated to what is listed above.\n")
-	b.WriteString("5. Finish with a short summary: what was broken, what you changed, and why.\n\n")
+	b.WriteString("5. Finish with a short summary: what was broken, what you changed, and why. " +
+		"Then list the files you changed, as below.\n\n")
+
+	writeReportRequest(b, in.ChangedFiles)
 
 	fmt.Fprintf(b, "This is fix attempt %d of %d. The suite runs again as soon as you finish; "+
 		"after attempt %d the run stops and hands the problem to a human.\n", in.Attempt, in.GiveUp, in.GiveUp)
+}
+
+// writeReportRequest asks for the changed-files block Run reads back. It is
+// the code node's block, by the code node's tag (code.ChangedFilesTag), so a
+// session that was told once how to report its files is asked the same way
+// again, and code.ParseChangedFilesBlock holds the reply to the same rules.
+//
+// The block is also the only thing Run reads: the code node's parser would
+// salvage paths from a diff, and this prompt quotes the failure it wants
+// repaired, which is routinely a diff. So the instruction below has to say,
+// in as many words, that a file the agent does not list is recorded nowhere.
+//
+// It asks for the files this repair touched, not every file the run has
+// changed. Run keeps the union, so a file recorded earlier stays recorded
+// either way and a reply that repeats one costs nothing. Asking for the
+// cumulative set, as the code node's resume prompt must because its list
+// replaces the record, would give the agent more to get wrong for no gain.
+//
+// The sentence about files already recorded appears only when the prompt
+// lists some, so it never points at a section that is not there.
+func writeReportRequest(b *strings.Builder, recorded []string) {
+	b.WriteString("## Files you changed\n\n")
+	fmt.Fprintf(b, "After the summary, emit exactly one fenced block tagged %q, holding the repository-relative "+
+		"path of every file this repair created, modified or deleted, one path per line and nothing else:\n\n",
+		code.ChangedFilesTag)
+	fmt.Fprintf(b, "```%s\ninternal/calc/calc.go\ninternal/calc/calc_test.go\n```\n\n", code.ChangedFilesTag)
+	b.WriteString("No absolute paths, no \"..\" segments, no quotes, no bullets: a path outside the repository " +
+		"fails the run. ")
+	if len(recorded) > 0 {
+		b.WriteString("The files under \"Files this run has already changed\" stay recorded whether or not " +
+			"you list them again. ")
+	}
+	b.WriteString("A file you change but do not list is recorded nowhere, and nothing later in the run will " +
+		"know it changed. If this repair changed no file, emit no block.\n\n")
 }
 
 // compareIssues orders issues most severe first, then by file, line and

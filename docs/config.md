@@ -1,10 +1,23 @@
 # Belay Configuration
 
-Belay is configured via a `belay.yaml` file in the project root. This document describes every field and its effects.
+<!--
+Insertion markers. Each "slice:NAME" comment below marks where the work in
+flight for that slice adds its text: insert directly above the marker and
+leave the marker in place, so changes built in parallel land on different
+lines. Delete a marker once its slice has merged.
+-->
+
+Belay is configured by a `belay.yaml` file in the repository it works on. This document describes every field and its effects.
 
 ## File Location
 
-Belay looks for `belay.yaml` in the workspace directory (specified by `--workspace`, defaulting to `.`). For example, `belay run --workspace ../other-repo "your goal"` reads `../other-repo/belay.yaml`. You can also specify an alternate path with `belay run --config /path/to/config.yaml`, which overrides the automatic lookup.
+belay builds its configuration from up to three files, merged onto its built-in defaults. Each later file overrides the earlier ones:
+
+1. `$XDG_CONFIG_HOME/belay/config.yaml`, or `~/.config/belay/config.yaml` when `XDG_CONFIG_HOME` is not set: your own settings, for every repository.
+2. `belay.yaml` in the workspace (`--workspace`, `.` by default). For example, `belay run --workspace ../other-repo "your goal"` reads `../other-repo/belay.yaml`.
+3. The file named by `--config`, if you pass one.
+
+Merging is per field, not per file: a file that sets only `budget.max_usd` keeps every other setting from the layers below it, including the other `budget` settings. A file that is missing is skipped, except the one `--config` names, which must exist. With no files at all, belay runs on the defaults this document lists.
 
 ## Top-Level Fields
 
@@ -28,7 +41,7 @@ The schema version of this file, not the belay release version. The only accepte
 
 ## `agent`
 
-Configuration for the LLM backend that generates code, plans, and fixes.
+The coding agent belay drives to write the plan, the code and the fixes.
 
 ### `agent.backend`
 
@@ -49,25 +62,27 @@ The model identifier passed straight through to the backend CLI's `--model` flag
 ### `agent.max_turns`
 
 **Type**: Integer  
-**Default**: `5`  
-**Range**: `1` to `100`
+**Default**: `30`  
+**Minimum**: `1`
 
-The maximum number of back-and-forth turns in a single phase (e.g., "code → fix → code → fix → done"). If max_turns is reached, the phase aborts with "max_turns_exceeded" status.
+The most turns the agent may take in one step (plan, code or fix), where a turn is one model response and the tool calls it makes. belay passes it to Claude Code as `--max-turns`. It limits a single step, not the run: the number of trips around the fix loop is `graph.give_up`. An agent that runs out of turns stops, the step fails with the error the agent reported, and the run stops as failed.
 
 ### `agent.mode`
 
 **Type**: String  
-**Default**: `"auto"`  
-**Valid values**: `"auto"`, `"streaming"`, `"batch"`
+**Default**: `"live"`  
+**Valid values**: `"live"`, `"record"`, `"replay"`
 
-How the agent returns results:
-- `"auto"`: Agent chooses based on backend capabilities
-- `"streaming"`: Agent streams tokens as they arrive (faster feedback, less latency for large responses)
-- `"batch"`: Agent waits until generation is complete and returns the full result
+Whether belay calls the agent, and whether it keeps a recording (a cassette) of what the agent said:
+- `"live"`: Call the agent for real. Nothing is recorded.
+- `"record"`: Call the agent for real and save every exchange to the cassette, `<workspace>/.belay/cassette.json` unless `--cassette` names another file.
+- `"replay"`: Answer every agent call from the cassette instead. No agent process is started and nothing is spent, so a recorded run can be repeated in CI for free (see [ADR-0009](adr/0009-record-replay-cassettes.md)). A call the cassette has no answer for is an error.
+
+<!-- slice:routing -->
 
 ## `graph`
 
-Configuration for the execution graph (DAG phases, ordering, timeouts).
+Limits on the graph of steps a run moves through.
 
 ### `graph.give_up`
 
@@ -89,18 +104,18 @@ this budget.
 ### `graph.max_steps`
 
 **Type**: Integer  
-**Default**: `20`  
-**Range**: `1` to `1000`
+**Default**: `60`  
+**Minimum**: `1`
 
-The maximum number of total steps (phases × retries) before aborting. If a phase fails and retries, each attempt counts as a step.
+The most steps one run may execute in total, counting every step each time it runs, including each pass through the fix loop. belay checks it before starting each step, and a run that reaches it is aborted with `graph: max steps exceeded`. It is a backstop for a graph that is not converging; `graph.give_up` is the limit meant to end a fix loop that is not making progress.
 
 ### `graph.node_timeout`
 
 **Type**: String (duration)  
-**Default**: `"10m"`  
-**Example**: `"30m"`, `"1h"`
+**Default**: `"15m"`  
+**Example**: `"30m"`, `"1h30m"`
 
-The timeout for a single node (phase) to complete. If a phase takes longer, it is cancelled and marked failed.
+The longest one step may run, written as a Go duration. A step still running at the deadline is cancelled, and the run is aborted with `graph: node timeout exceeded`, whatever the step returns afterwards. It must be greater than zero.
 
 ### `graph.approval`
 
@@ -120,34 +135,36 @@ With `false`, planning routes straight to coding. That is the right setting for
 an unattended or CI run, and the wrong one for the first time you point belay
 at a repository you care about.
 
+<!-- slice:queue -->
+
 ## `test`
 
-Configuration for test execution (phase 5).
+How the test step proves the code works.
 
 ### `test.runner`
 
 **Type**: String  
 **Default**: `"auto"`  
-**Valid values**: `"auto"`, `"go"`, `"npm"`, `"python"`, `"custom"`
+**Valid values**: `"auto"`, `"go"`, `"node"`, `"python"`, `"custom"`
 
 The test runner to invoke:
-- `"auto"`: Detect from file extensions (*.go → go test, package.json → npm test)
-- `"go"`: `go test ./... -cover`
-- `"npm"`: `npm test`
-- `"python"`: `pytest .`
-- `"custom"`: Use the command specified in `test.custom_cmd`
+- `"auto"`: Use the first of Go, Node and Python that the workspace's root looks like, in that order: a `go.mod`, a `package.json`, or a Python project. A repository that is two of them gets the earlier one every time; set this to pick the other.
+- `"go"`: `go test -json -count=1 ./...`
+- `"node"`: The package's own `test` script, through the package manager the repository uses (npm, yarn, pnpm or bun), asking jest, vitest or `node:test` for machine-readable output.
+- `"python"`: `pytest --tb=short -q -rfE`
+- `"custom"`: The command in `test.custom_cmd`
 
 ### `test.custom_cmd`
 
 **Type**: String  
-**Default**: (empty)  
+**Default**: `""` (empty)  
 **Example**: `"make test"`, `"./scripts/run-tests.sh"`
 
-When `test.runner` is `"custom"`, the exact command to run. Must exit with status 0 for pass, non-zero for fail.
+The command to run when `test.runner` is `"custom"`, which then requires it. Exit status 0 is a pass and anything else a failure; belay learns nothing else from it, so the fix step sees only the tail of the command's output. It is not run through a shell: pipes, redirection and globs do not work, so put them in a script and name the script here.
 
 ## `review`
 
-Configuration for code quality review gates (phases 6 and 7).
+The quality gate the review step applies to the run's change.
 
 ### `review.mode`
 
@@ -158,19 +175,17 @@ Configuration for code quality review gates (phases 6 and 7).
 The review strategy:
 - `"lint"`: Run local linters (golangci-lint, eslint, etc.). Fast, zero setup, no cost. In a git repository, golangci-lint counts only findings on lines that differ from `HEAD`, so findings committed before the run don't fail it. Where git can't tell, every finding counts. ESLint and Ruff always count every finding. For the limits, see [Troubleshooting](troubleshooting.md#quality-gate-fails-on-code-the-run-did-not-touch).
 - `"sonar"`: Query SonarQube server for code quality. Requires infrastructure setup.
-- `"ai"`: Run Claude Code as a reviewer (catches semantic bugs, style issues). Costs tokens.
+- `"ai"`: Ask SonarQube for its verdict through the Sonar MCP server (see `review.ai`). The loader accepts it, but `belay run` refuses it for now: this reviewer is not yet wired into the command.
 
 ### `review.fail_on`
 
 **Type**: String  
-**Default**: `"blocker"`  
-**Valid values**: `"error"`, `"warning"`, `"blocker"`, `"any"`
+**Default**: `"major"`  
+**Valid values**: `"blocker"`, `"critical"`, `"major"`, `"minor"`, `"info"`
 
-The severity threshold for failing the review:
-- `"error"`: Only error-level issues cause failure
-- `"warning"`: Warning and error issues cause failure
-- `"blocker"`: Only blocker-level issues cause failure (least strict)
-- `"any"`: Any issue (including notes) causes failure (most strict)
+The least severe issue that fails the quality gate, on SonarQube's scale from worst to least: `"blocker"`, `"critical"`, `"major"`, `"minor"`, `"info"`. An issue at this severity or worse fails the gate; anything less severe is reported but passes. `"blocker"` is the most lenient setting and `"info"` the strictest.
+
+It decides the gate under `review.mode` `"lint"` and `"ai"`. Under `"sonar"` the SonarQube server's own quality gate decides, because the scanner reports only the server's verdict and not the issues behind it.
 
 ### `review.sonar` (if `review.mode == "sonar"`)
 
@@ -180,65 +195,68 @@ Configuration for SonarQube reviewer.
 
 **Type**: String  
 **Default**: `"docker"`  
-**Valid values**: `"docker"`, `"server"`
+**Shipped values**: `"docker"`, `"binary"`
 
-How to access SonarQube:
-- `"docker"`: Spawn SonarQube in Docker container (requires Docker, `docker` binary in PATH)
-- `"server"`: Connect to existing SonarQube server (requires `review.sonar.server_url` and SONAR_TOKEN env var)
+How the SonarQube scanner is run. Either way it analyses the workspace and uploads the result to the SonarQube server named by the `SONAR_HOST_URL` environment variable, authenticating with `SONAR_TOKEN`:
+- `"docker"`: Run the scanner in a container from `review.sonar.image`. Needs `docker` on `PATH`.
+- `"binary"`: Run a `sonar-scanner` already installed on `PATH`.
+
+The loader checks only that this is not empty; another name is refused when the review runs.
 
 #### `review.sonar.image`
 
 **Type**: String  
 **Default**: `"sonarsource/sonar-scanner-cli"`
 
-Docker image to use when `review.sonar.runner == "docker"`. Example: `"sonarqube:11.0"`.
+The scanner image to run when `review.sonar.runner` is `"docker"`. It is the scanner, not a SonarQube server: the server is wherever `SONAR_HOST_URL` points. Add a tag to pin the scanner version.
 
 #### `review.sonar.quality_gate_wait`
 
-**Type**: String (duration)  
-**Default**: `"30s"`
+**Type**: Boolean  
+**Default**: `true`
 
-Time to wait for SonarQube to compute quality gate status after submitting analysis. If the gate is not ready after this timeout, analysis is marked failed.
+Whether the scanner waits for the SonarQube server to compute the quality gate, passed to it as `sonar.qualitygate.wait`. The gate is computed on the server, after the scan uploads its report, so the verdict belay acts on exists only if the scanner waits for it. With `false`, the scan uploads and exits without a verdict, and belay reports the review as undecided rather than as a pass.
 
 #### `review.sonar.quality_gate_timeout`
 
-**Type**: String (duration)  
-**Default**: `"10m"`
+**Type**: Integer  
+**Default**: `300`  
+**Minimum**: `1`
 
-Total time to wait for SonarQube analysis and quality gate computation before giving up.
+How long, in seconds, the scanner waits for the server's verdict, passed to it as `sonar.qualitygate.timeout`. It bounds only that wait: indexing, analysis and the upload come first, and belay allows the whole scan five minutes more than this before it stops the scanner. A gate still not computed when it runs out is reported as undecided, not as a failure, so it does not send the agent into the fix loop.
 
 ### `review.ai` (if `review.mode == "ai"`)
 
-Configuration for AI (Claude Code) reviewer.
+Configuration for the `"ai"` reviewer, which asks SonarQube for its quality gate verdict and the issues behind it through the Sonar MCP server, authenticating with `SONAR_TOKEN`. `belay run` does not use it yet (see `review.mode`), but the loader still validates these settings.
 
 #### `review.ai.mcp`
 
-MCP connection settings for the AI reviewer.
+How the reviewer reaches the Sonar MCP server.
 
 ##### `review.ai.mcp.mode`
 
 **Type**: String  
-**Default**: `"auto"`  
-**Valid values**: `"auto"`, `"stdio"`, `"docker"`
+**Default**: `"cloud"`  
+**Valid values**: `"cloud"`, `"server"`, `"docker"`
 
-How to connect to the MCP server:
-- `"auto"`: Auto-detect (stdio if available, otherwise Docker)
-- `"stdio"`: Connect via stdin/stdout (requires agent binary in PATH)
-- `"docker"`: Run agent in Docker container
+How to reach the MCP server:
+- `"cloud"`: Over HTTP, to SonarQube Cloud's MCP endpoint at `review.ai.mcp.url`.
+- `"server"`: Over HTTP, to the MCP endpoint of a SonarQube Server you run, at `review.ai.mcp.url`.
+- `"docker"`: Start the server from `review.ai.mcp.image` as a local container and talk to it over its standard input and output. Needs `docker` on `PATH`.
 
 ##### `review.ai.mcp.url`
 
 **Type**: String  
-**Default**: (empty; only used for remote MCP servers)
+**Default**: `""` (empty)
 
-URL to a remote MCP server (e.g., `"http://mcp-server:3000"`). Leave empty for local MCP via stdio or Docker.
+The MCP endpoint's URL for the `"cloud"` and `"server"` modes; `"docker"` ignores it. While `review.mode` is `"ai"`, the loader requires it for both: belay has no built-in address for SonarQube Cloud's endpoint, so `"cloud"` needs it as much as `"server"` does. Under any other `review.mode` it may stay empty.
 
 ##### `review.ai.mcp.image`
 
 **Type**: String  
-**Default**: `"anthropic/claude-code:latest"`
+**Default**: `"sonarsource/sonar-mcp-server"`
 
-Docker image to use when `review.ai.mcp.mode == "docker"`.
+The MCP server image to run when `review.ai.mcp.mode` is `"docker"`, which then requires it.
 
 ## `budget`
 
@@ -247,17 +265,17 @@ Cost and token limits to prevent unexpected bills (see [ADR-0007](adr/0007-budge
 ### `budget.max_usd`
 
 **Type**: Float  
-**Default**: `10.0`  
-**Example**: `"5.5"`, `"100.0"`
+**Default**: `5.00`  
+**Example**: `2.5`, `20`
 
-Maximum spend (in USD) before belay aborts. Set to `0` to disable cost limits (not recommended in production).
+The most a run may spend, in US dollars, as estimated from the agent's reported usage. belay checks it before each step, so a run stops before paying for one more step rather than after. `0` means no dollar ceiling, and the loader accepts it only together with `budget.on_exceed: warn`.
 
 ### `budget.max_tokens`
 
 **Type**: Integer  
-**Default**: `1000000`
+**Default**: `2000000`
 
-Maximum token count (input + output) before belay aborts. Set to `0` for unlimited.
+The most tokens, input and output together, a run may use across all its agent calls. It is checked alongside `budget.max_usd`, and whichever ceiling is reached first applies `budget.on_exceed`. `0` means no token ceiling.
 
 ### `budget.on_exceed`
 
@@ -271,14 +289,16 @@ What to do when budget is exceeded:
 
 ## `fanout`
 
-Configuration for parallel candidate generation (phase 4).
+Best-of-N: giving one goal several independent candidates at once, so the best can be kept.
+
+No run uses these settings yet. No step in belay's graph leads to the fanout node, so a run never reaches it, and nothing runs a candidate: the fanout node only prepares a workspace for each. Running candidates is planned, and ADR-0019 is reserved for it.
 
 ### `fanout.enabled`
 
 **Type**: Boolean  
 **Default**: `false`
 
-Whether to enable fanout (parallel code generation with multiple candidates).
+Registers the fanout and join nodes. No node routes to them, so this changes nothing a run does; `true` only makes the loader require a `fanout.candidates` of at least 2.
 
 ### `fanout.candidates`
 
@@ -286,18 +306,18 @@ Whether to enable fanout (parallel code generation with multiple candidates).
 **Default**: `3`  
 **Minimum**: `2`
 
-Number of parallel candidates to generate. Each candidate runs in isolation. Cost multiplies by this factor (3 candidates = 3× budget usage).
+Number of candidates the fanout node prepares, each in its own workspace. Nothing runs them yet; once something does, cost multiplies by about this factor.
 
 ### `fanout.isolator`
 
 **Type**: String  
 **Default**: `"dircopy"`  
-**Valid values**: `"dircopy"`
+**Shipped values**: `"dircopy"`
 
 Isolation strategy for candidates:
 - `"dircopy"`: Plain directory copies. Works on non-git targets and uses O(N × repo_size) disk — the trade [ADR-0004](adr/0004-directory-copies-for-fanout.md) accepted deliberately. Note that `.git` is **not** copied, so a candidate cannot run git commands.
 
-Git worktrees and containers are anticipated by the `belay.Isolator` interface but are not implemented; `dircopy` is the only value the loader accepts today.
+Git worktrees and containers are anticipated by the `belay.Isolator` interface but are not implemented; `dircopy` is the only isolator belay ships. The loader checks only that this is not empty.
 
 ### `fanout.select`
 
@@ -305,10 +325,16 @@ Git worktrees and containers are anticipated by the `belay.Isolator` interface b
 **Default**: `"fewest_issues"`  
 **Valid values**: `"fewest_issues"`, `"first_pass"`, `"fastest"`
 
-How to choose the winning candidate after fanout:
-- `"fewest_issues"`: The passing candidate with the fewest review issues
-- `"first_pass"`: The first candidate that clears the quality gate
-- `"fastest"`: The candidate that finished soonest
+How the join node chooses the winning candidate. Only a candidate whose tests passed can win:
+- `"fewest_issues"`: The candidate with the fewest review issues. A tie goes to the lowest candidate ID.
+- `"first_pass"`: The first candidate whose tests passed, in the order fanout recorded the candidates.
+- `"fastest"`: Meant to be the candidate that finished soonest, but no candidate's duration is recorded, so join picks the first candidate whose tests passed in recorded order, as `"first_pass"` does, and logs a warning that the choice is approximate.
+
+<!-- slice:output -->
+
+<!-- slice:plan -->
+
+<!-- slice:policy -->
 
 ## Environment Variables
 
@@ -331,14 +357,17 @@ export CLAUDE_CODE_OAUTH_TOKEN="<token from claude setup-token>"
 belay run "fix the bug"
 ```
 
-### `SONAR_TOKEN` (required if using SonarQube server)
+<!-- slice:backend -->
 
-Your SonarQube authentication token. Required if `review.sonar.runner == "server"`. Must be set in the shell; never include it in belay.yaml.
+### `SONAR_TOKEN` and `SONAR_HOST_URL` (SonarQube)
+
+`SONAR_TOKEN` is your SonarQube authentication token and `SONAR_HOST_URL` the address of the SonarQube server. A scan under `review.mode: sonar` needs both, whichever `review.sonar.runner` it uses; the `"ai"` reviewer needs the token. Set them in the shell; never include either in belay.yaml.
 
 Example:
 ```bash
 export SONAR_TOKEN="squ_..."
-belay run
+export SONAR_HOST_URL="https://sonarqube.example.com"
+belay run "fix the bug"
 ```
 
 ### `DOCKER_HOST` (optional)
@@ -347,19 +376,21 @@ Read by the `docker` CLI itself, not by belay. It therefore affects the SonarQub
 
 ## Example Configuration
 
+A whole `belay.yaml`. The values marked `# default` differ from belay's defaults on purpose, to show settings you might tighten; every other value is the default.
+
 ```yaml
 version: 1
 
 agent:
   backend: "claude-code"
   model: "sonnet"
-  max_turns: 5
+  max_turns: 5          # default 30
   mode: "live"
 
 graph:
   give_up: 3
-  max_steps: 20
-  node_timeout: "10m"
+  max_steps: 20         # default 60
+  node_timeout: "10m"   # default 15m
   approval: true
 
 test:
@@ -371,11 +402,11 @@ review:
 
 budget:
   max_usd: 5.0
-  max_tokens: 500000
+  max_tokens: 500000    # default 2000000
   on_exceed: "abort"
 
 fanout:
-  enabled: true
+  enabled: false
   candidates: 3
   isolator: "dircopy"
   select: "fewest_issues"
@@ -405,26 +436,23 @@ budget:
 
 ## Validation
 
-Belay validates the configuration on startup:
+belay checks the configuration before a run starts, and reports every problem it finds at once rather than stopping at the first:
 
-- Missing required fields (e.g., `version`) are errors
-- Invalid field types (e.g., `max_turns: "five"` instead of `5`) are errors
-- Unknown fields are warnings (allows forward compatibility)
-- Timeout and duration fields must be valid Go durations (e.g., `"10m"`, `"1h30m"`)
-
-If validation fails, belay exits with a clear error message and suggests fixes.
+- A key that names no setting is an error, not a warning, so a typo cannot be silently ignored. So is a key written twice.
+- A value of the wrong type (e.g., `max_turns: "five"` instead of `5`) is an error naming the file, the line and the setting.
+- A key that looks like a credential, such as `sonar_token` or `api_key`, is rejected wherever it appears. Secrets are read from the environment only.
+- A closed-set setting must hold one of its **Valid values**, and numeric limits must respect their minimums.
+- Durations must be Go durations (e.g., `"15m"`, `"1h30m"`).
+- `version` may be left out, in which case it is `1`; any other value is rejected.
 
 ## Configuration Precedence
 
-1. belay.yaml (file)
-2. Environment variables (override file)
-3. CLI flags (override both)
+Settings come only from the files listed under [File Location](#file-location), in that order, on top of the built-in defaults. No environment variable or command-line flag overrides an individual setting; to change one for a single run, put it in a file and pass that file with `--config`:
 
-Example:
 ```bash
-# belay.yaml says max_usd: 10.0
-# Override via CLI flag:
-belay run --budget-max-usd 5.0
+# belay.yaml says max_usd: 10.0; this run gets 2.5 and keeps everything else
+printf 'budget:\n  max_usd: 2.5\n' > /tmp/cheap.yaml
+belay run --config /tmp/cheap.yaml "fix the bug"
 ```
 
 ## References

@@ -231,6 +231,37 @@ func TestValidateRules(t *testing.T) {
 			},
 		},
 		{
+			// cloud is the default mode, and the reviewer dials
+			// review.ai.mcp.url for it exactly as for server: without one
+			// it fails with aireview.ErrMissingURL. belay run does not
+			// wire that reviewer in yet, so the loader is where the url
+			// is required, ready for when it does.
+			name: "ai review against sonarqube cloud without a url",
+			mutate: func(c *Config) {
+				c.Review.Mode = ReviewModeAI
+				c.Review.AI.MCP.Mode = MCPModeCloud
+			},
+			want: `review.ai.mcp.url: "" is not valid (want the URL of SonarQube Cloud's MCP endpoint, because review.ai.mcp.mode is "cloud")`, wantErr: true,
+		},
+		{
+			name: "ai review against sonarqube cloud with a url",
+			mutate: func(c *Config) {
+				c.Review.Mode = ReviewModeAI
+				c.Review.AI.MCP.Mode = MCPModeCloud
+				c.Review.AI.MCP.URL = "https://mcp.example.test"
+			},
+		},
+		{
+			// The defaults are review.mode lint with review.ai.mcp.mode
+			// cloud and no url, and they must keep validating.
+			name: "the default cloud mcp mode without a url is fine while review.mode is lint",
+			mutate: func(c *Config) {
+				c.Review.Mode = ReviewModeLint
+				c.Review.AI.MCP.Mode = MCPModeCloud
+				c.Review.AI.MCP.URL = ""
+			},
+		},
+		{
 			name: "ai review in docker without an image",
 			mutate: func(c *Config) {
 				c.Review.Mode = ReviewModeAI

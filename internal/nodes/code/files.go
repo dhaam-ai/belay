@@ -5,8 +5,15 @@ import (
 	"strings"
 )
 
-// changeSet resolves the set of repository-relative paths the reply reports
-// as changed.
+// ParseChangedFiles resolves the set of repository-relative paths an agent's
+// reply reports as changed.
+//
+// The rules below are shared with the fix node, which reads the same block
+// from a repair's reply: one parser holds every reply to one set of rules,
+// whichever node it answered, so a path this node refuses is refused there
+// too. The diff salvage is deliberately not shared — it is sound only for a
+// reply to a prompt that quotes no diff of its own, which is this node's and
+// not the fix node's. ParseChangedFilesBlock is what fix calls, and says why.
 //
 // # Precedence
 //
@@ -17,7 +24,7 @@ import (
 // write node verify an empty set — but it is a salvage path, not a supported
 // contract, and it is never consulted while a usable block is present:
 //
-//  1. The first non-empty fenced block tagged changedFilesTag wins outright.
+//  1. The first non-empty fenced block tagged ChangedFilesTag wins outright.
 //  2. Otherwise, paths are recovered from a unified diff in the reply, fenced
 //     or bare (see extractDiff).
 //  3. Otherwise the reply reports no change, which is a valid outcome: the
@@ -36,15 +43,10 @@ import (
 //
 // The returned slice is nil when nothing was reported, so the caller can
 // distinguish "reported nothing" from "reported an empty set".
-func changeSet(text string) ([]string, error) {
-	if raw, ok := changedFilesBlock(text); ok {
-		paths, err := cleanPaths(raw, sourceBlock)
-		if err != nil {
-			return nil, err
-		}
-		if len(paths) > 0 {
-			return paths, nil
-		}
+func ParseChangedFiles(text string) ([]string, error) {
+	paths, err := ParseChangedFilesBlock(text)
+	if err != nil || len(paths) > 0 {
+		return paths, err
 	}
 	diff := extractDiff(text)
 	if diff == "" {
@@ -53,17 +55,52 @@ func changeSet(text string) ([]string, error) {
 	return cleanPaths(changedFiles(diff), sourceDiff)
 }
 
+// ParseChangedFilesBlock resolves the changed-files block alone, holding it to
+// exactly the rules ParseChangedFiles does — and never salvaging paths from a
+// diff. A block that is absent, or present with no entries, reports nothing:
+// nil, nil.
+//
+// It exists because the salvage is only sound for a reply to a prompt that
+// quoted no diff itself. The code node's prompt quotes none, so a diff in its
+// reply is the agent's own work. The fix node's prompt quotes the failure it
+// wants repaired, and a test failure is routinely printed as a unified diff —
+// testify's "--- Expected / +++ Actual", a golden-file `diff -u` naming two
+// absolute paths. Salvaging from a repair's reply therefore either records a
+// file the run never touched ("Actual") or refuses the whole report over a
+// path the agent only quoted, which ends the run after the repair was made
+// and paid for. Reading the block alone cannot do either.
+//
+// What it gives up is a repair that emitted a diff instead of the block: its
+// files go unrecorded, and the prompt says as much to the agent. That is the
+// cheaper mistake — a file missing from the record costs a review that does
+// not look at it, where a phantom file misleads the reviewer, the next
+// prompt, state.json and `belay timeline` alike.
+func ParseChangedFilesBlock(text string) ([]string, error) {
+	raw, ok := changedFilesBlock(text)
+	if !ok {
+		return nil, nil
+	}
+	paths, err := cleanPaths(raw, sourceBlock)
+	if err != nil {
+		return nil, err
+	}
+	if len(paths) == 0 {
+		return nil, nil
+	}
+	return paths, nil
+}
+
 // Where a claimed path came from, for the error message. A malformed entry
 // in a block the prompt explicitly asked for is a different diagnosis from
 // one harvested out of a volunteered diff, and a post-mortem should not have
 // to guess which happened.
 const (
-	sourceBlock = "the " + changedFilesTag + " block"
+	sourceBlock = "the " + ChangedFilesTag + " block"
 	sourceDiff  = "the unified diff in the reply"
 )
 
 // changedFilesBlock returns the raw lines of the first non-empty fenced block
-// tagged changedFilesTag, and whether one was found.
+// tagged ChangedFilesTag, and whether one was found.
 //
 // Only the first is read. A reply carrying two such blocks has not followed
 // an instruction that says "exactly one", and concatenating them would invent
@@ -100,7 +137,7 @@ func isChangedFilesFenceOpen(line string) bool {
 		return false
 	}
 	info := strings.ToLower(strings.TrimSpace(strings.TrimLeft(s, "`")))
-	return info == changedFilesTag
+	return info == ChangedFilesTag
 }
 
 // cleanPaths validates and normalizes claimed paths, rejecting the whole set

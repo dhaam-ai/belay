@@ -1,6 +1,6 @@
 # belay
 
-belay is a durable, resumable orchestrator for autonomous coding agents. Instead of one unreliable AI call that crashes and loses work, it runs a persistent, multi-phase state machine — plan → approve → code → write → test → fix → review — where state is journaled after every node. When a run crashes, the next invocation resumes from the last completed node, not from the start.
+belay is a durable, resumable orchestrator for autonomous coding agents. Instead of one unreliable AI call that crashes and loses work, it runs a persistent, multi-step state machine — plan → approve → code → write → test → fix → review — where every node's result is saved and journaled before the next node starts. When a run crashes, `belay resume` picks it up after the last completed node, not from the start.
 
 **The Problem It Solves**: When you invoke a code-generating agent once, you get a response. If it crashes, you lose everything and re-run from zero, wasting tokens on work already done. If tests fail, you re-prompt by hand with no loop. If there is no budget cap, a prompt bug can burn money. If the generated code is never reviewed, it may break your standards. belay builds all the logic that wraps the agent — the crash recovery, the retry loops, the approval gates, the cost tracking, the quality gates — so you can point it at a repository and get reliable software generation without operator intervention.
 
@@ -191,11 +191,11 @@ belay run --dry-run "add a --json flag to the CLI output"
 
 This shows:
 - The goal you entered
-- Your budget and cost ceiling
-- What tools belay found (tests, linters)
-- What agent backend it will call
-- How many steps the graph will take
-- Where it would write files
+- The most it could spend, and what reaching that ceiling does
+- The configuration files it read, the agent it will call, and the tests and linter it found
+- Which credentials are set, without their values
+- The route through the graph, and when belay gives up
+- Where it would record the run
 - **But does not create anything or spend money.**
 
 Example output:
@@ -208,29 +208,29 @@ what you asked for
 
 where belay would work
   /path/to/your/project
-  belay found: Go project with tests
+  belay found: go
 
 the most it could spend
-  $5.00 or 1,000,000 tokens, whichever comes first
+  $5.00 or 2,000,000 tokens, whichever comes first
+  belay stops the run before the next step
 
 settings it would use
   read from    /path/to/your/project/belay.yaml
-  agent        claude-code, model sonnet, calling the agent for real, up to 5 turns per step
-  tests        go test -json -count=1 ./... (auto-detected)
-  quality gate golangci-lint (auto-detected), failing on major issues or worse
+  agent        claude-code, model sonnet, calling the agent for real, up to 30 turns per step
+  tests        go-test
+  quality gate golangci-lint, failing the run on major issues or worse
   credentials  ANTHROPIC_API_KEY is set; CLAUDE_CODE_OAUTH_TOKEN is not set; SONAR_TOKEN is not set
 
 the route it would take
   plan → approve → code → write → test → fix → review → done
-  graph.approval is true, so belay will stop after planning and wait for you
+  approve stops the run so you can read the plan before any code is written
+  it gives up after 3 rounds of the test-and-fix loop, or 50 steps in all
 
 what it would create
   /path/to/your/project/.belay/runs/<run-id>
   holding manifest.json, state.json, journal.ndjson and the plan
 
-belay would proceed with this run.
-
-Nothing was created and nothing was spent.
+Nothing was created and nothing was spent. Run the same command without --dry-run to start.
 ```
 
 ### 5. Start a real run
@@ -239,11 +239,11 @@ Nothing was created and nothing was spent.
 belay run "add a --json flag to the CLI output"
 ```
 
-belay writes a plan to `.belay/runs/<run-id>/plan.md` and stops, waiting for your approval. Read it.
+belay writes a plan to `.belay/runs/<run-id>/artifacts/plan.md`, prints where it is, and stops, waiting for your approval. Read it.
 
 ```bash
 # Look at the plan:
-cat .belay/runs/*/plan.md
+cat .belay/runs/*/artifacts/plan.md
 
 # If you like it, continue:
 belay resume
@@ -257,47 +257,64 @@ If something goes wrong, you can edit the plan before resuming, and belay will u
 # List all runs:
 belay runs
 
-# Watch one in real-time:
+# See how one unfolded, step by step:
 belay timeline <run-id>
 ```
 
 Example timeline output:
 
 ```
-20260905T153301Z-1f2e3d4c5b6a: "add a --json flag to the CLI output"
+run     20260905T142530Z-1f2e3d4c5b6a
+goal    add a --json flag to the CLI output
+status  finished
 
-Phase           Outcome    Time      Cost
-────────────────────────────────────────────
-plan            ok         12.3s     $0.04
-approve         ok (auto)  0.0s      $0.00
-code            ok         45.2s     $0.18
-write           ok         2.1s      $0.00
-test            failed     3.5s      $0.00
-  (1 test failing: handlers_test.go::TestJSONFlag)
-fix #1/3        ok         28.4s     $0.12
-test #2         failed     2.1s      $0.00
-  (1 test failing: handlers_test.go::TestJSONFlag)
-fix #2/3        ok         31.2s     $0.15
-test #3         ok         2.9s      $0.00
-review          ok         18.7s     $0.08
-────────────────────────────────────────────
-DONE            ok         146.4s    $0.57 ≤ $5.00
+   #  node       outcome   duration    cost
+   1  plan       finished     12.3s  $0.040  █████
+      plan archived to artifacts/plan.md (1843 bytes); next approve
+   2  approve    paused        0.0s  $0.000  █
+      Plan is waiting for your approval. Review or edit /home/you/app/.belay/runs/20260905T142530Z-1f2e3d4c5b6a/artifacts/plan.md, then continue with: belay resume 20260905T142530Z-1f2e3d4c5b6a
+      waited 4m 12.0s here, then resumed
+   3  approve    finished      0.0s  $0.000  █
+      Plan approved; proceeding to code.
+   4  code       finished     45.2s  $0.180  ██████████████████
+      code: claude-code reported changes to 3 file(s) (new session)
+   5  write      finished      0.1s  $0.000  █
+      verified 3 changed file(s): 3 present, 0 deleted; recorded artifacts/diff-0005.patch
+   6  test #1/3  finished      3.5s  $0.000  █
+      go-test: 12 tests, 1 failed
+   7  fix #1/2   finished     28.4s  $0.120  ███████████
+      fix attempt 1 of 3: 1 of 12 tests failing
+   8  test #2/3  finished      2.1s  $0.000  █
+      go-test: 12 tests, 1 failed
+   9  fix #2/2   finished     31.2s  $0.150  ████████████
+      fix attempt 2 of 3: 1 of 12 tests failing
+  10  test #3/3  finished      2.9s  $0.000  █
+      go-test: 12 tests, 0 failed
+  11  review     finished      6.4s  $0.000  ███
+      gate pass: no issues at or above fail_on=major (source=golangci-lint, report=artifacts/review-11.json)
+
+  loops       test ran 3 times, fix ran 2 times
+  loop cost   steps 6-10 cost $0.270 and 1m 08.1s — 55% of the run's spend
+  agent time  2m 12.1s across 11 nodes
+  wall clock  6m 37.1s   2026-09-05 14:25:31Z → 14:32:08Z
+  spend       $0.490 of the $5.00 ceiling
 
 Files changed:
-  cmd/cli.go (new function JSONOutput)
-  handlers_test.go (new tests for JSON mode)
-  go.sum (1 new dependency)
+  cmd/cli.go
+  go.sum
+  handlers_test.go
 ```
 
 ### 7. The output is yours to keep
 
-All state lives in `.belay/runs/<run-id>`:
-- `manifest.json` — the run's complete state (goal, changes, budget tracking)
-- `journal.ndjson` — append-only log of every state transition
-- `state.json` — current accumulated state (read by `belay resume`)
-- `plan.md` — the plan the agent generated
+Everything belay records about a run lives in `.belay/runs/<run-id>`:
+- `manifest.json` — what the run is and where it stands: its goal, status and current step, the settings it started with, and what it has spent
+- `state.json` — what the steps have produced so far, which every step reads: the plan, the files changed, the latest test and review results, how many repairs were made
+- `journal.ndjson` — an append-only record of every step's start and finish, from which `belay resume` works out where to pick up
+- `artifacts/` — the plan the agent generated (`artifacts/plan.md`), the agent's summary of the code it wrote, the diff each write step recorded, and the test and quality-gate reports
+- `nodes/` — for each step that called the agent, the prompt it sent and the reply it got
 
-If the run crashed mid-execution, your work is safe on disk. Restart with `belay resume` and it picks up where it left off.
+If you stopped the run with Ctrl-C, or it crashed mid-execution, your work is safe on disk. `belay resume` picks it up where it left off: the step that was interrupted runs again, and the steps that finished do not. A run that belay stopped on its own, at the budget ceiling, `graph.max_steps` or `graph.node_timeout`, has ended instead; raise the limit and start a new run.
 
 If you want to delete a run, `rm -rf .belay/runs/<run-id>` is safe.
 
@@ -314,7 +331,7 @@ If you want to delete a run, `rm -rf .belay/runs/<run-id>` is safe.
 │ │  ↓                                              │  │
 │ │ code (Agent)      → Generate code              │  │
 │ │  ↓                                              │  │
-│ │ write (Agent)     → Save files, format         │  │
+│ │ write (belay)     → Record the changed files   │  │
 │ │  ↓                                              │  │
 │ │ test (Runner)     → Run test suite             │  │
 │ │  ├─ pass? → review (next)                      │  │
@@ -331,39 +348,39 @@ If you want to delete a run, `rm -rf .belay/runs/<run-id>` is safe.
 └──────────────────────────────────────────────────────┘
 ```
 
-For every phase:
-1. **State** is read from disk (on resume, or initialized fresh)
-2. **The phase runs** (agent, test runner, linter, etc.)
-3. **Result is validated** (e.g., generated code is well-formed)
-4. **Result is persisted to journal** (so a crash does not lose it)
-5. **State is updated** with the result
-6. **Next phase is decided** (automatically or by human gate)
+For every step:
+1. **The limits are checked** — the budget ceiling and `graph.max_steps` — before anything is spent
+2. **The blackboard is read** from `state.json`, and the step's start is journaled
+3. **The node runs** (agent, test runner, linter, etc.)
+4. **Its result is checked**: it must have a status, and name the next node if it succeeded
+5. **Its changes are saved** to `state.json`
+6. **Its finish is journaled**, naming the next node — only after its changes are saved, so the journal never records a finished step whose changes are missing
 
-If a crash occurs mid-execution, the journal file may have a half-written last line, but earlier lines are durable. `belay resume` detects the incomplete line, discards it, and resumes from the last fully-written state. This is not an error; it is expected. durability.
+If a crash occurs mid-execution, the journal file may have a half-written last line, but earlier lines are durable. `belay resume` discards the incomplete line and picks up from the last complete record, running again the step that was cut off. This is expected, not an error.
 
 ## The Four Pillars
 
 ### 1. Durable + Resumable Runs
-Every phase's result is persisted to an append-only journal *before* the next phase starts. If a run crashes, the next `belay resume` reads the journal and picks up from the last completed phase, not from the beginning. Tokens spent on completed work are not wasted.
+Every step's result is saved, and its finish journaled, *before* the next step starts. If a run crashes, the next `belay resume` reads the journal and picks up after the last completed step, not from the beginning. Tokens spent on completed work are not wasted.
 
 ### 2. Approval Gates
-The `approve` phase pauses the run after the agent writes a plan. You can read it, edit it, and decide whether to proceed. This stops a runaway agent before it writes code. Runs also pause if quality gates fail and manual review is needed.
+The `approve` step pauses the run after the agent writes a plan. You can read it, edit it, and decide whether to proceed. This stops a runaway agent before it writes code. It is the only step that pauses a run for you. A failing quality gate does not pause: it sends the change to `fix`, like a failing test, and a run that `graph.give_up` repairs have not brought to passing tests and a passing gate ends as failed.
 
-### 3. Best-of-N Candidates (Fanout)
-Enable `fanout` in belay.yaml to generate N code candidates in parallel, each in its own isolated workspace. The `join` phase ranks them by test pass rate, coverage, and cost, and returns the best one. This exploits agent variance to get higher quality output. (Currently disabled; joining is manual; see *Maturity & Limitations* below.)
+### 3. Best-of-N Candidates (Fanout) — not working yet
+The aim is to give one goal N independent candidates, each in its own workspace, and keep the best, so that the variance between agent runs works for you. Two pieces of that exist: a `fanout` node that prepares one workspace per candidate, and a `join` node that picks a winner among the candidates whose tests passed. No run reaches either one, and nothing runs the candidates. See *Maturity & Limitations* below.
 
 ### 4. CLI-Agnostic Orchestration
 The graph definition and all orchestration logic are independent of which agent backend you use. The `belay.AgentBackend` interface is public: you can implement Claude, Codex, Gemini, or your own LLM. The same belay workflow runs against any backend without code changes.
 
 ## Configuration
 
-Every belay run reads `belay.yaml` from your project root (or via `--config <path>`). The file controls:
-- **agent**: which LLM backend, model, and mode (live, streaming, batch)
-- **graph**: approval gates, max retries, timeout per phase
+Every belay run reads `belay.yaml` from your project root. Your user config is read before it and a file you pass with `--config <path>` after it, merged setting by setting, so a setting in a later file wins. The file controls:
+- **agent**: which backend and model, and the mode: `live`, `record` or `replay`
+- **graph**: the approval gate, how many repairs before giving up, the step cap, and the timeout per step
 - **test**: auto-detect or custom test command
-- **review**: linter mode (local, SonarQube) or AI review
+- **review**: the quality gate: local linters (`lint`), SonarQube (`sonar`), or the AI reviewer (`ai`), which `belay run` does not use yet
 - **budget**: spend ceiling in USD and tokens
-- **fanout**: enable parallel candidates
+- **fanout**: best-of-N candidates, which no run uses yet (see *Maturity & Limitations*)
 
 See `docs/config.md` for the complete reference, including examples.
 
@@ -371,9 +388,9 @@ See `docs/config.md` for the complete reference, including examples.
 
 belay is built on a few core ideas:
 
-1. **State machine, not a list of tasks**: Each phase (plan, code, test, fix, review) is a node in a directed graph. Nodes can loop (test → fix → test) and branch (test success → review, test failure → fix). This makes the logic clear and testable.
+1. **State machine, not a list of tasks**: Each step (plan, approve, code, write, test, fix, review) is a node in a directed graph. Nodes can loop (test → fix → test) and branch (test success → review, test failure → fix). This makes the logic clear and testable.
 
-2. **Dispatcher owns durability**: A single `Dispatcher` orchestrates the graph, and it is responsible for persisting state. Phases themselves are pure functions: they take context, return a result, and never touch the filesystem. This separation makes phases testable in isolation and makes the durability logic auditable.
+2. **Dispatcher owns durability**: A single `Dispatcher` orchestrates the graph and writes the run's state as it goes: `state.json`, `manifest.json` and the journal. No node writes any of them: a node takes a context and returns a result, which the dispatcher saves. Nodes do touch the filesystem — they write files of their own under the run directory (the plan, diffs, reports, and each agent step's prompt and reply), the agent a node calls edits your working tree, and the test and review steps run tools in it — but none of that decides where a resumed run picks up. This separation makes nodes testable in isolation and makes the durability logic auditable.
 
 3. **Append-only journal**: All state transitions are written to an NDJSON journal file with `O_APPEND` and explicit fsync. This means a crash mid-write corrupts only the current record, not past ones. Resume logic detects and heals torn tails.
 
@@ -396,7 +413,7 @@ belay is **early but real**. Use it for:
 
 3. **Unix only**: belay's process runner, linter launcher, and workspace isolation use unix-specific system calls. Windows and macOS 11 (Monterey) are not supported. (Contributions welcome.)
 
-4. **Fanout is disabled by default**: Parallel candidate generation works, but joining (choosing the best candidate and merging it back) is currently manual. Set `fanout.enabled: true` in belay.yaml to spawn candidates, then inspect `.belay/runs/<run-id>/candidates/` and manually copy the best one back. The automatic join phase is unimplemented. See ADR-0004.
+4. **Fanout does not work yet**: The `fanout` and `join` nodes exist and are unit-tested, but no run reaches them. No step in belay's graph leads to `fanout`, so setting `fanout.enabled: true` changes nothing a run does. `belay run` also sets up no isolator, which `fanout` needs. The `fanout` node only prepares candidates: it creates one workspace per candidate and runs none of them, so no candidate ever has test results. `join` picks a winner among the candidates whose tests passed and copies nothing back, so promoting the winner would be manual (ADR-0004). Running candidates is planned, and ADR-0019 is reserved for it.
 
 5. **No published fix rate**: belay has a test harness (`test/fixrate`) that measures "what percentage of runs result in code that passes tests and linting?" but no published number yet. We are working on benchmarks. Do not rely on any claimed success rate.
 
@@ -428,7 +445,7 @@ See `docs/adr/0009-record-replay-cassettes.md` for the cassette format.
 
 ### Roadmap
 
-- [ ] Implement the join phase (automatic best-candidate selection and merge-back)
+- [ ] Run fanout candidates (ADR-0019) and promote the winner automatically; `join` already selects one
 - [ ] Windows and macOS 11 support (process isolation)
 - [ ] Codex and Gemini backends (implement `AgentBackend` for each)
 - [ ] Published fix-rate benchmarks

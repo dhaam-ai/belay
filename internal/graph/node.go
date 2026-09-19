@@ -168,7 +168,9 @@ type RunContext struct {
 
 	// NodeName is the name of the executing node, and Step its position in
 	// the run. Attempt is 1 on a first execution and increments when the
-	// dispatcher re-runs a node after a crash or a fix-loop retry.
+	// dispatcher re-runs a node whose attempt was cut short (crash or
+	// Ctrl-C). A later visit to the node, such as test's next round of the
+	// fix loop, starts at 1 again.
 	NodeName string
 	Step     int
 	Attempt  int

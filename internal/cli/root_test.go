@@ -150,6 +150,28 @@ func TestRootPersistentFlags(t *testing.T) {
 	}
 }
 
+// TestConfigFlagSaysItLayersOnTop keeps --config's help true to
+// config.Load: the file it names is merged field by field on top of the
+// user config and the workspace's belay.yaml, which are still read
+// (internal/config's TestLoadLayerPrecedence). Help that said "instead of"
+// sent a person looking for why a setting they never put in the --config
+// file still applied.
+func TestConfigFlagSaysItLayersOnTop(t *testing.T) {
+	flag := rootCmd.PersistentFlags().Lookup("config")
+	if flag == nil {
+		t.Fatal("--config is not a persistent root flag")
+	}
+	usage := flag.Usage
+	for _, phrase := range []string{"on top of", "belay.yaml", "wins"} {
+		if !strings.Contains(usage, phrase) {
+			t.Errorf("--config help does not say %q; got %q", phrase, usage)
+		}
+	}
+	if strings.Contains(usage, "instead of") {
+		t.Errorf("--config help says the file replaces the ones belay finds, but config.Load merges it on top of them; got %q", usage)
+	}
+}
+
 // Every command names the repository the same way.
 //
 // --workspace was briefly defined three times with three different
@@ -157,42 +179,60 @@ func TestRootPersistentFlags(t *testing.T) {
 // ADR 0010 exists to catch, and the predictable result of three people
 // writing commands in parallel. One persistent definition, asserted here so
 // it cannot drift back.
+//
+// The test walks the command tree rather than a list of names, so a command
+// added later is checked without anyone remembering to add it here. Only
+// the commands about belay itself, not a repository, are left out.
 func TestWorkspaceFlagIsSharedByEveryCommand(t *testing.T) {
 	const want = "the repository belay reads and edits"
 
-	for _, name := range []string{"run", "resume", "runs", "timeline"} {
-		var found *cobra.Command
-		for _, c := range rootCmd.Commands() {
-			if c.Name() == name {
-				found = c
-				break
+	var checked []string
+	var check func(cmd *cobra.Command)
+	check = func(cmd *cobra.Command) {
+		for _, c := range cmd.Commands() {
+			switch c.Name() {
+			case "version", "help", "completion":
+				continue
 			}
-		}
-		if found == nil {
-			t.Errorf("command %q is not registered on the root", name)
-			continue
-		}
-		// InheritedFlags exposes the root's PersistentFlags. Flags() merges
-		// them in too, but only lazily once the tree has been executed, so
-		// asking directly keeps this test independent of that ordering.
-		f := found.InheritedFlags().Lookup("workspace")
-		if f == nil {
-			f = found.Flags().Lookup("workspace")
-		}
-		if f == nil {
-			t.Errorf("%s: no --workspace flag; every command must name the repository the same way", name)
-			continue
-		}
-		if f.Usage != want {
-			t.Errorf("%s: --workspace usage = %q, want the shared %q", name, f.Usage, want)
-		}
-		if f.DefValue != "." {
-			t.Errorf("%s: --workspace default = %q, want %q", name, f.DefValue, ".")
+			checked = append(checked, c.CommandPath())
+			assertSharedWorkspaceFlag(t, c, want)
+			check(c)
 		}
 	}
+	check(rootCmd)
+
+	if len(checked) == 0 {
+		t.Fatal("no command on the root was checked; the walk found nothing to hold to the rule")
+	}
+	t.Logf("checked: %s", strings.Join(checked, ", "))
 
 	// Defined once, on the root, so there is nothing to drift.
 	if rootCmd.PersistentFlags().Lookup("workspace") == nil {
 		t.Error("--workspace is not a persistent root flag; per-command copies will diverge again")
+	}
+}
+
+// assertSharedWorkspaceFlag checks that cmd's --workspace is the root's.
+func assertSharedWorkspaceFlag(t *testing.T, cmd *cobra.Command, want string) {
+	t.Helper()
+	name := cmd.CommandPath()
+	// InheritedFlags exposes the root's PersistentFlags. Flags() merges
+	// them in too, but only lazily once the tree has been executed, so
+	// asking directly keeps this test independent of that ordering. A
+	// command's own --workspace hides the root's from InheritedFlags, and
+	// is then found, and judged, through Flags.
+	f := cmd.InheritedFlags().Lookup("workspace")
+	if f == nil {
+		f = cmd.Flags().Lookup("workspace")
+	}
+	if f == nil {
+		t.Errorf("%s: no --workspace flag; every command must name the repository the same way", name)
+		return
+	}
+	if f.Usage != want {
+		t.Errorf("%s: --workspace usage = %q, want the shared %q", name, f.Usage, want)
+	}
+	if f.DefValue != "." {
+		t.Errorf("%s: --workspace default = %q, want %q", name, f.DefValue, ".")
 	}
 }

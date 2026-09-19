@@ -1,5 +1,12 @@
 # Troubleshooting
 
+<!--
+Insertion markers. Each "slice:NAME" comment below marks where the work in
+flight for that slice adds its text: insert directly above the marker and
+leave the marker in place, so changes built in parallel land on different
+lines. Delete a marker once its slice has merged.
+-->
+
 This document covers common failure modes, their symptoms, and remedies.
 
 ## The Agent Edited Nothing
@@ -8,35 +15,35 @@ This document covers common failure modes, their symptoms, and remedies.
 
 **Possible Causes**:
 - The prompt was too vague or the goal was unachievable
-- The agent backend did not understand the task (check SystemPrompt in the config)
+- The agent backend did not understand the task (read what it was asked in `.belay/runs/<run-id>/nodes/<step>-code/prompt.txt`)
 - The working directory was wrong (verify WorkDir in logs)
 - The agent ran out of budget mid-task
 
 **Diagnosis**:
 1. Run `belay timeline <run-id>` to inspect the journal
-2. Look for node_finished records with Status="ok" but empty output
-3. Check the agent's Raw response field (if present in logs) for error messages
+2. Look for a code step whose note says the agent `reported no change`
+3. Read the agent's reply, including any error it reported, in `.belay/runs/<run-id>/nodes/<step>-code/response.json`
 4. Verify the goal in manifest.json is what you intended
 
 **Remedy**:
-- If the goal is unclear, edit belay.yaml to provide more context or a better prompt
-- If the agent ran out of budget, increase review.budget_limit_usd
-- If the working directory or model is wrong, edit belay.yaml and retry with `belay resume`
+- If the goal is unclear, start a new run with a clearer one: `belay run "what you want built"`. belay.yaml has no prompt setting; the goal is what the agent is given
+- If the agent ran out of budget, increase budget.max_usd
+- If the working directory or model is wrong, edit belay.yaml and start a new run; `belay resume` does not re-run a run that completed
 
 ## Run is Paused
 
-**Symptom**: `belay run` says the run is paused and refuses to continue.
+**Symptom**: `belay run` stops after the plan and says it "is waiting for you", with the path to the plan and a `belay resume <run-id>` command.
 
 **Cause**: The approve node paused the run awaiting human approval.
 
 **Diagnosis**:
-1. Run `belay timeline <run-id>` and look for the journal entry with Event="run_paused"
-2. The approve node's Note field may contain a URL or instructions
+1. Run `belay timeline <run-id>`: the approve step shows as paused, followed by "run paused here"
+2. The approve step's note names the plan to read and the command that continues the run
 
 **Remedy**:
-1. Review the proposed plan (in the manifest or logs)
-2. If approved, run `belay resume <run-id>` to continue
-3. If not approved, `belay run` the same config again to start fresh (runs have monotonic IDs; old runs are not re-executed)
+1. Read the plan at `.belay/runs/<run-id>/artifacts/plan.md`, and edit it if you want to
+2. If approved, run `belay resume <run-id>` to continue; resuming is the approval
+3. If not approved, start a new run with `belay run "what you want built"`. The paused run stays as it is
 
 ## Test Failed; Agent Cannot Fix It
 
@@ -49,20 +56,20 @@ This document covers common failure modes, their symptoms, and remedies.
 - The problem requires external setup (a database, a service) the agent cannot reach
 
 **Diagnosis**:
-1. Look at TestReport.Failures in the journal to see what tests failed
-2. Check agent invocation prompts in logs (the Prompt and SystemPrompt fields)
-3. Count how many times the fix node ran (look for attempt numbers in node_finished records)
-4. Check if the run hit the retry limit (ErrMaxSteps, usually 50 node executions)
+1. Read the failing tests in the test step's report, `.belay/runs/<run-id>/artifacts/test-<step>.json`
+2. Read what each repair was asked in `.belay/runs/<run-id>/nodes/<step>-fix/prompt.txt`, and what it answered in `response.json` beside it
+3. Count the repairs: `belay timeline <run-id>` numbers them, as `fix #1/3`. A node_finished record's attempt number counts re-runs after a crash, not repairs
+4. Check if the run hit the step limit (ErrMaxSteps, graph.max_steps: 60 node executions by default)
 
 **Remedy**:
 - If tests require external services, set them up and retry
-- If the agent needs more context, augment the goal or SystemPrompt in belay.yaml
-- If the loop is infinite, increase graph.give_up (default 10) to allow more fix attempts
+- If the agent needs more context, start a new run with a more specific goal
+- If the loop is infinite, increase graph.give_up (default 3) to allow more fix attempts
 - If the limit is reached, break the loop by reducing the goal to a smaller, more achievable task
 
 ## Toolchain Missing
 
-**Symptom**: Error message: "belay: required toolchain is not installed" and the run aborts immediately.
+**Symptom**: The run fails when it reaches the step that needs the tool, usually test or review, and the error belay prints names it: `belay: toolchain "golangci-lint" not found`. The steps before it, plan and code among them, have already run and spent.
 
 **Cause**: A required binary (go, pytest, golangci-lint, sonar-scanner, etc.) is not on PATH.
 
@@ -71,8 +78,8 @@ This document covers common failure modes, their symptoms, and remedies.
 2. Run the same command in a shell to see what the error is: `which <tool>`
 
 **Remedy**:
-- Install the toolchain and retry with `belay resume`
-- Or, if using a different test runner or linter, update belay.yaml (runner.name, review.mode)
+- Install the toolchain and start a new run. The run that hit the missing toolchain has failed, and `belay resume` refuses a failed run
+- Or, if using a different test runner or linter, update belay.yaml (test.runner, review.mode)
 
 **Note**: This is distinct from "test failure". A missing toolchain returns an error and refuses to proceed, forcing human intervention. A test failure returns a TestReport and automatically triggers the fix loop. Belay makes this distinction so the remedy is clear: install software vs. edit code.
 
@@ -106,46 +113,48 @@ This document covers common failure modes, their symptoms, and remedies.
 **Cause**: Cumulative cost of all agent invocations crossed the configured ceiling.
 
 **Diagnosis**:
-1. Check review.budget_limit_usd in belay.yaml
+1. Check budget.max_usd and budget.max_tokens in belay.yaml
 2. Look at Usage.USD fields in journal records to see which invocations cost the most
 3. Check if Usage.Estimated = true; estimated costs are lower-confidence
 
 **Remedy**:
-- Increase review.budget_limit_usd in belay.yaml (if the project is worth it)
+With `budget.on_exceed: abort` the run has ended, and `belay resume` will not continue it. Change belay.yaml, then start a new run:
+- Increase budget.max_usd in belay.yaml (if the project is worth it)
 - Use a cheaper model (adjust agent.model in belay.yaml)
 - Scope the goal to fewer changes (smaller diffs cost fewer tokens)
 - If costs are overestimated, they may drop in a future API pricing update
 
-## Crashed Run
+## Interrupted or Crashed Run
 
-**Symptom**: `belay run` was interrupted (killed, network down, process exited) and a run directory exists at `.belay/runs/<run-id>/`.
+**Symptom**: You pressed Ctrl-C, or `belay run` or `belay resume` was killed, lost its terminal or exited part-way, and a run directory exists at `.belay/runs/<run-id>/`.
+
+**Expected Behavior**: The run can be continued. The first Ctrl-C (or a SIGTERM) pauses it: belay closes the step it was in, records the pause, says "belay stopped because you asked it to", and exits with code 3. A second Ctrl-C, a kill or a crash stops belay at once and leaves that step open, and `belay resume` closes it on the way back in. Either way, resuming runs the interrupted step again from its start, and does not run the steps that had finished.
 
 **Diagnosis**:
-1. Run `belay timeline <run-id>` to see how far the run got
-2. Look at the journal's final record: if it ends in run_paused or run_completed, the run is finished; if it ends in node_finished, the run can resume
+1. Run `belay runs`: an interrupted run is listed as paused (after Ctrl-C) or running (after a crash), and both can be resumed
+2. Run `belay timeline <run-id>` to see how far the run got. The interrupted step shows as stopped after Ctrl-C, or as interrupted after a crash
+3. Look at the journal's final record: if it is run_completed, run_failed or run_aborted, the run has ended and cannot be resumed; anything else can be
 
 **Remedy**:
-1. Run `belay resume <run-id>` to continue from where it stopped
+1. Run `belay resume <run-id>` to continue from where it stopped, or `belay resume` for the most recent run still waiting
 2. The journal file is automatically healed on resume (any torn tail is discarded)
 3. If the same crash happens repeatedly, it may indicate a stuck node (increase graph.node_timeout in belay.yaml)
 
-## Fanout Refused
+**Note**: A step cut off part-way may already have spent money that the agent had not yet reported. The run's recorded cost leaves it out, as it does for a crash.
 
-**Symptom**: Error message: "graph: fanout disabled" or "join is not implemented"
+## Fanout Does Nothing
 
-**Cause**: Fanout (best-of-N candidates) is disabled in this version.
+**Symptom**: belay.yaml sets `fanout.enabled: true`, but the run never creates candidates: `belay timeline` shows no fanout or join step.
 
-**Diagnosis**:
-- Check config.Fanout.Enabled in belay.yaml (should be false)
-- Or the plan node returned Next="fanout" but fanout is disabled
+**Cause**: No run reaches fanout in this version. No step in belay's graph leads to the fanout node, whatever `fanout.enabled` says, and `belay run` sets up no isolator, which fanout needs. Even the fanout node only prepares candidate workspaces; nothing runs a candidate. This is a known limitation, not a configuration mistake.
 
 **Remedy**:
-- Fanout is currently disabled (see ADR-0004); do not configure code nodes to return Next="fanout"
-- In a future version when join is implemented, set config.Fanout.Enabled = true in belay.yaml
+- None yet. Running candidates is planned, and ADR-0019 is reserved for it
+- Leave `fanout.enabled` false. Setting it true changes nothing a run does; it only makes belay.yaml require `fanout.candidates` of at least 2
 
 ## SonarQube Connection Failed
 
-**Symptom**: Review node aborts with error: "sonar: could not connect" or "sonar: authentication failed"
+**Symptom**: The review step fails with `belay/sonar: SONAR_TOKEN is not set in the environment`, `belay/sonar: SONAR_HOST_URL is not set in the environment`, or `belay/sonar: docker (docker runner) did not produce a quality gate verdict (exit 1)` followed by the scanner's last error line. With `review.sonar.runner: binary` the tool is `sonar-scanner` instead of `docker`.
 
 **Cause**: 
 - SonarQube server is unreachable (wrong URL, network down, firewall)
@@ -153,15 +162,15 @@ This document covers common failure modes, their symptoms, and remedies.
 - Docker is not installed (in Docker mode)
 
 **Diagnosis**:
-1. Check review.mode in belay.yaml (must be "sonar-server" or "sonar-docker")
-2. For server mode, verify SONAR_TOKEN is set and the server URL is correct
-3. For Docker mode, verify `docker` is on PATH and the daemon is running
-4. Try connecting manually: `curl -H "Authorization: Bearer $SONAR_TOKEN" $SONAR_URL/api/system/status`
+1. Check that review.mode in belay.yaml is "sonar", and which runner review.sonar.runner names: "docker" (the default) or "binary"
+2. Verify SONAR_TOKEN is set, and SONAR_HOST_URL is the server's URL
+3. With the docker runner, verify `docker` is on PATH and the daemon is running
+4. Try connecting manually: `curl -H "Authorization: Bearer $SONAR_TOKEN" $SONAR_HOST_URL/api/system/status`
 
 **Remedy**:
-- Server mode: Set SONAR_TOKEN environment variable and verify the server URL
-- Docker mode: Install Docker or switch to server mode
-- If the server is temporarily down, `belay resume` will retry the review node
+- Set the SONAR_TOKEN and SONAR_HOST_URL environment variables
+- With the docker runner: install Docker, or set review.sonar.runner to "binary" and install `sonar-scanner`
+- If the server is temporarily down, start a new run once it is back. The run whose review could not reach it has failed, and `belay resume` refuses a failed run
 - If authentication fails, rotate your token and retry
 
 ## Quality Gate Failed
@@ -171,9 +180,9 @@ This document covers common failure modes, their symptoms, and remedies.
 **Expected Behavior**: This is not an error; it is the design. The run tries to fix the issues automatically.
 
 **Diagnosis**:
-1. Look at QualityReport.Issues in the journal to see what problems were found
+1. Read the issues in the review step's report, `.belay/runs/<run-id>/artifacts/review-<step>.json`
 2. Check the Severity of each issue and compare against review.fail_on
-3. Look at the linter or reviewer's Name to see which tool produced the report
+3. The review step's note in `belay timeline <run-id>` names the tool that produced the report (`source=`) and the report's path
 
 **Remedy**:
 - If the fixes are working, wait for the fix loop to complete
@@ -253,6 +262,7 @@ belay 0.1.1 and earlier always counted every finding, and ESLint and Ruff still 
 2. The timeout is likely due to a slow operation: test suite, code generation, sonar-scanner on a large repo
 
 **Remedy**:
+The run has ended, and `belay resume` will not continue it. Change belay.yaml, then start a new run:
 - Increase graph.node_timeout in belay.yaml
 - Or reduce the scope (fewer tests, smaller code changes, scoped SonarQube analysis)
 - If timeouts happen repeatedly on the same node, there may be an infinite loop or a genuine performance problem
@@ -266,7 +276,7 @@ belay 0.1.1 and earlier always counted every finding, and ESLint and Ruff still 
 **Expected Behavior**: This is a bug in the node implementation, not a user error.
 
 **Diagnosis**:
-1. Look at the error message; it usually specifies what field was invalid (e.g., "unknown next node", "invalid status", "nil patch")
+1. Look at the error message; it says what was invalid: `Status is unset`, or `Status is OK but Next is empty (use graph.End to finish)`
 2. This typically happens only during development or if belay itself has a bug
 
 **Remedy**:
@@ -275,7 +285,7 @@ belay 0.1.1 and earlier always counted every finding, and ESLint and Ruff still 
 
 ## Max Steps Exceeded
 
-**Symptom**: Error message: "graph: max steps exceeded" and run aborts after 50 (or configured) node executions.
+**Symptom**: Error message: "graph: max steps exceeded" and run aborts after 60 (or configured) node executions.
 
 **Cause**: The run performed too many node executions without reaching END. Usually, the fix loop is looping forever.
 
@@ -284,7 +294,8 @@ belay 0.1.1 and earlier always counted every finding, and ESLint and Ruff still 
 2. If the pattern shows fix → test → fix → test repeating, the agent cannot make progress
 
 **Remedy**:
-- Increase graph.max_steps in belay.yaml (default 50)
+The run has ended, and `belay resume` will not continue it. Change belay.yaml or the goal, then start a new run:
+- Increase graph.max_steps in belay.yaml (default 60)
 - Or reduce the goal so fewer fixes are needed
 - Or break the work into smaller runs (smaller goals are easier to fix)
 - If fixes are not making progress, the issue may be fundamentally hard and require manual intervention
@@ -308,15 +319,27 @@ belay 0.1.1 and earlier always counted every finding, and ESLint and Ruff still 
 
 ## Configuration Error
 
-**Symptom**: `belay run` fails immediately with error like "config: unknown backend" or "config: invalid fail_on severity".
+**Symptom**: `belay run` fails immediately with `belay: that configuration cannot be used:` followed by one line per problem, such as `review.fail_on: "bogus" is not valid (want one of: blocker, critical, major, minor, info)`. A value of the wrong type names the file and line. An `agent.backend` belay does not have stops it with `belay will not start this run.` and `belay does not have a backend called "nope".` Nothing is created and nothing is spent.
 
 **Cause**: belay.yaml has a syntax error or invalid value.
 
 **Diagnosis**:
-1. Run `belay config validate belay.yaml` (or similar command; check `belay --help`)
+1. Run `belay --dry-run run "your goal"`. It loads and checks the configuration and reports every problem, without creating or spending anything. belay has no `config` command
 2. Look for typos in field names, invalid enum values, or missing required fields
 
 **Remedy**:
 - Check docs/config.md for the schema
 - Fix the YAML syntax or values and retry
-- Common mistakes: wrong agent.backend name, fail_on not in [info, minor, major, critical, blocker], budget_limit_usd as a string instead of a number
+- Common mistakes: wrong agent.backend name, fail_on not in [info, minor, major, critical, blocker], budget.max_usd as a string instead of a number
+
+<!-- slice:output -->
+
+<!-- slice:plan -->
+
+<!-- slice:fork -->
+
+<!-- slice:queue -->
+
+<!-- slice:policy -->
+
+<!-- slice:backend -->

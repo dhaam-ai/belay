@@ -34,8 +34,10 @@ func TestNewState_Defaults(t *testing.T) {
 	if err != nil {
 		t.Fatalf("marshal: %v", err)
 	}
-	if !containsJSONArray(t, data, "candidates") || !containsJSONArray(t, data, "history") {
-		t.Errorf("expected empty-array serialization for candidates/history, got %s", data)
+	for _, key := range []string{"candidates", "history", "requires"} {
+		if !containsJSONArray(t, data, key) {
+			t.Errorf("expected %s to serialize as an empty array, got %s", key, data)
+		}
 	}
 }
 
@@ -289,6 +291,13 @@ func TestNewTest_DoesNotAliasInputFailures(t *testing.T) {
 func TestTest_JSONKeySetMatchesSpec(t *testing.T) {
 	projected := NewTest(belay.TestReport{Total: 1, Passed: 1}, "artifacts/test.json")
 	assertExactJSONKeys(t, projected, []string{"passed", "total", "failed", "failures", "report_path"})
+}
+
+func TestState_JSONKeySetMatchesSpec(t *testing.T) {
+	assertExactJSONKeys(t, NewState("goal"), []string{
+		"schema_version", "requires", "goal", "plan", "code", "test", "review",
+		"fix", "candidates", "winner", "history",
+	})
 }
 
 func TestPlan_JSONKeySetMatchesSpec(t *testing.T) {

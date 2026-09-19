@@ -10,6 +10,7 @@ import (
 	"github.com/google/go-cmp/cmp"
 
 	"github.com/dhaam-ai/belay/internal/graph"
+	"github.com/dhaam-ai/belay/internal/nodes/code"
 	"github.com/dhaam-ai/belay/internal/state"
 	"github.com/dhaam-ai/belay/pkg/belay"
 )
@@ -183,6 +184,58 @@ func TestBuildPromptFailedGate(t *testing.T) {
 	major := strings.Index(got, "revive:exported")
 	if blocker < 0 || major < 0 || blocker > major {
 		t.Errorf("blocker must be listed before major issues; got blocker at %d, major at %d\n%s", blocker, major, got)
+	}
+}
+
+// TestBuildPromptAsksForTheChangedFilesBlock: Run records the files a repair
+// reports, so the prompt has to ask for the report, in the block Run reads
+// back. The example the prompt shows is parsed here with the very parser Run
+// calls — the block-only one, since a repair's reply may quote a diff — so the
+// instruction and the parser cannot drift apart.
+func TestBuildPromptAsksForTheChangedFilesBlock(t *testing.T) {
+	tests := []struct {
+		name string
+		in   promptInput
+		// wantRecorded is whether the prompt should say the files already
+		// listed stay recorded: only true when it lists some.
+		wantRecorded bool
+	}{
+		{
+			name: "failing tests, files already recorded",
+			in: promptInput{Cause: causeTests, Attempt: 1, GiveUp: 3,
+				Test: failingTestState(), ChangedFiles: []string{"internal/auth/login.go"}},
+			wantRecorded: true,
+		},
+		{
+			name: "failed gate, nothing recorded yet",
+			in:   promptInput{Cause: causeReview, Attempt: 1, GiveUp: 3, Review: failedGateReview()},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := buildPrompt(tt.in)
+
+			example, err := code.ParseChangedFilesBlock(got)
+			if err != nil {
+				t.Fatalf("Run's parser refused the prompt's example block: %v\n--- prompt ---\n%s", err, got)
+			}
+			if len(example) == 0 {
+				t.Errorf("the prompt shows no changed-files block Run's parser reads\n--- prompt ---\n%s", got)
+			}
+			for _, want := range []string{
+				"every file this repair created, modified or deleted",
+				"a path outside the repository fails the run",
+				"If this repair changed no file, emit no block.",
+			} {
+				if !strings.Contains(got, want) {
+					t.Errorf("prompt missing %q\n--- prompt ---\n%s", want, got)
+				}
+			}
+			const recorded = "stay recorded whether or not you list them again"
+			if has := strings.Contains(got, recorded); has != tt.wantRecorded {
+				t.Errorf("prompt says %q: %v, want %v\n--- prompt ---\n%s", recorded, has, tt.wantRecorded, got)
+			}
+		})
 	}
 }
 

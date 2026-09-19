@@ -2,6 +2,12 @@ version: "2"
 
 run:
   timeout: 5m
+  # The e2e and fix-rate suites are ordinary Go behind a build tag, and
+  # without their tags here golangci-lint never sees those files at all --
+  # not even gofmt. They are linted with everything else.
+  build-tags:
+    - e2e
+    - fixrate
 
 linters:
   enable:
@@ -16,3 +22,10 @@ linters:
     - errorlint
     - gocritic
     - misspell
+
+# gofmt as a formatter makes `golangci-lint run` report any file gofmt
+# would change, so an unformatted file fails the Lint job instead of
+# waiting for someone to run gofmt -l by hand.
+formatters:
+  enable:
+    - gofmt

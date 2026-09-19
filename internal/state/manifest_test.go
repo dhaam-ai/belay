@@ -404,6 +404,13 @@ func TestNewManifest_Defaults(t *testing.T) {
 	if m.Agent.Backend != cfg.Agent.Backend || m.Agent.Model != cfg.Agent.Model || m.Agent.Mode != string(cfg.Agent.Mode) {
 		t.Errorf("Agent = %+v, want backend=%q model=%q mode=%q", m.Agent, cfg.Agent.Backend, cfg.Agent.Model, cfg.Agent.Mode)
 	}
+	data, err := json.Marshal(m)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	if !containsJSONArray(t, data, "requires") {
+		t.Errorf("expected requires to serialize as an empty array, got %s", data)
+	}
 }
 
 func TestManifest_Touch(t *testing.T) {
@@ -475,7 +482,7 @@ func TestLoadManifest_UnknownSchemaVersion(t *testing.T) {
 func TestManifest_JSONKeySetMatchesSpec(t *testing.T) {
 	m := NewManifest(time.Now(), "run-1", "/work", "goal", config.Default())
 	want := []string{
-		"schema_version", "run_id", "created_at", "updated_at", "workspace", "goal",
+		"schema_version", "requires", "run_id", "created_at", "updated_at", "workspace", "goal",
 		"status", "current_node", "step", "config_digest", "config_snapshot", "budget", "agent",
 	}
 	assertExactJSONKeys(t, m, want)

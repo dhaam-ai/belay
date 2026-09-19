@@ -29,7 +29,11 @@ const (
 	ExitFailed = 1
 	// ExitAborted reports a run stopped by one of the dispatcher's guards
 	// rather than by the work itself: the budget ceiling, the MaxSteps cap,
-	// a node timeout, or cancellation of the caller's context.
+	// a node timeout, or cancellation of the caller's context. A
+	// cancellation that Options.PauseOnCancel turns into a pause exits
+	// with it too: the invocation still stopped short of where the graph
+	// would have taken it, and a script must be able to tell that from a
+	// pause the graph chose. Outcome.Status says the run can be resumed.
 	ExitAborted = 3
 	// ExitPaused reports that a plain Run refused to advance a run whose
 	// journal ends in run_paused. It is distinct from ExitOK because the
@@ -66,6 +70,11 @@ var (
 	ErrNoResumePoint = errors.New("graph: journal resolved to no next node")
 	// ErrInvalidOptions means NewDispatcher was given an unusable Options.
 	ErrInvalidOptions = errors.New("graph: invalid dispatcher options")
+	// ErrInterrupted means the caller cancelled the run and
+	// Options.PauseOnCancel paused it rather than ending it. It wraps
+	// context.Canceled as well. The run is resumable: Resume re-runs the
+	// node that was interrupted.
+	ErrInterrupted = errors.New("graph: run interrupted; resuming re-runs the interrupted node")
 )
 
 // nodeErrorNotePrefix marks a node_finished note that came from a node
@@ -140,6 +149,17 @@ type Options struct {
 	// caller holding them should pass exec.NewRedactor(...).Redact here.
 	// Defaults to a no-op, which still collapses whitespace and truncates.
 	Redact func(string) string
+	// PauseOnCancel pauses the run, rather than ending it, when ctx is
+	// cancelled, so Resume can continue it. An attempt the cancellation
+	// interrupted is closed as one to run again, and Resume re-runs its
+	// node at the next attempt; a cancellation between nodes pauses the
+	// run before the next one starts. Run returns ErrInterrupted. See
+	// "Cancellation" on Dispatcher.
+	//
+	// It is off by default, so a caller that never set it still gets the
+	// run ended as aborted. `belay run` and `belay resume` set it, because
+	// their help promises that Ctrl-C leaves a run `belay resume` picks up.
+	PauseOnCancel bool
 
 	// Adapters, passed through to every RunContext. Any may be nil when the
 	// configuration selects none; a node that needs a nil adapter is
@@ -193,6 +213,48 @@ type Options struct {
 // node_finished is always appended before the run_completed, run_failed,
 // run_paused or run_aborted that ends the run.
 //
+// # Cancellation: end the run, or pause it
+//
+// A cancelled context stops the run either way. What differs is whether it can
+// be continued. By default the dispatcher ends it as aborted, as it always
+// has, so a caller that never asked for anything else sees no change. With
+// Options.PauseOnCancel it pauses the run instead: the interrupted attempt is
+// closed with the record heal writes for an attempt a crash left open
+// (journal.Record.Interrupted), run_paused follows it, and Resume re-runs the
+// node at the next attempt. That is the crash-recovery path with the journal
+// already healed. The attempt number, the step count, the discarded Result and
+// the re-run are what a kill at the same moment would have produced — an
+// interrupted execution is not counted as a step, exactly as a killed one is
+// not (see settle) — but the journal says the run was asked to stop, and the
+// manifest says paused rather than running.
+//
+// Pausing needs no event or status of its own, and no capability in the
+// run's requires list. A capability keeps out a belay that would misread the
+// run, and no release can misread this one. v0.1.x refuses schema version 2
+// outright (ADR-0011), and the release that brings version 2 brings with it
+// the two rules a paused attempt depends on: journal.ResolveStart re-runs an
+// interrupted attempt at the next attempt number instead of reusing the
+// number, and `belay resume` approves only a plan the gate paused to ask
+// about, never one a Ctrl-C stopped at the gate. Without those, a resume
+// would continue the run, and continue it wrongly.
+//
+// A cancellation that arrives between nodes pauses the run before the next
+// one starts, with no attempt opened. Resume then starts that node afresh.
+//
+// Only cancellation pauses. A node timeout is the dispatcher's own guard and
+// still ends the run, as the budget ceiling and the step cap do: they are
+// verdicts on the run, and a resume would only meet them again.
+//
+// # Before the first write: establish the run
+//
+// Opening the journal writes to a run: journal.Open creates the file and heals
+// a torn tail. So dispatch reads the manifest, then calls state.Store.Preflight
+// — which refuses a run this belay may not read, and saves the manifest at the
+// current schema version — and only then opens anything. A run declaring a
+// capability this belay lacks in state.json alone was otherwise healed,
+// appended to and, at the first guard, ended for good, although belay had
+// already established it could not read it (ADR-0011).
+//
 // # What the dispatcher owns
 //
 // The dispatcher opens, writes and closes the *journal.Journal, and it is the
@@ -206,6 +268,8 @@ type Dispatcher struct {
 	logger   *slog.Logger
 	now      func() time.Time
 	redact   func(string) string
+
+	pauseOnCancel bool
 
 	agent    belay.AgentBackend
 	runner   belay.TestRunner
@@ -235,6 +299,9 @@ func NewDispatcher(opts Options) (*Dispatcher, error) {
 		logger:   opts.Logger,
 		now:      opts.Now,
 		redact:   opts.Redact,
+
+		pauseOnCancel: opts.PauseOnCancel,
+
 		agent:    opts.Agent,
 		runner:   opts.Runner,
 		linter:   opts.Linter,
@@ -277,6 +344,16 @@ func (d *Dispatcher) dispatch(ctx context.Context, resuming bool) (Outcome, erro
 	man, err := d.store.LoadManifest()
 	if err != nil {
 		return Outcome{ExitCode: ExitFailed}, fmt.Errorf("graph: load manifest: %w", err)
+	}
+
+	// Before the first write to this run, and so before the journal is
+	// opened: establish that belay may read the whole run, and bring the
+	// manifest up to the version belay writes. Store.Preflight says why both
+	// belong here rather than further in. The manifest is loaded first only
+	// because a manifest this belay cannot read is not a run it can dispatch
+	// at all.
+	if err := d.store.Preflight(); err != nil {
+		return Outcome{ExitCode: ExitFailed}, fmt.Errorf("graph: %w", err)
 	}
 
 	// Open before reading: Open heals a torn tail left by a previous crash,
@@ -339,7 +416,8 @@ func (d *Dispatcher) dispatch(ctx context.Context, resuming bool) (Outcome, erro
 //     first as corruption, and refuses to open such a file ever again — so
 //     retrying without closing the dead attempt would brick the run's journal
 //     on its first crash. heal closes it as aborted, naming the same node in
-//     Next so that a crash during recovery itself still resolves back here.
+//     Next so that a crash during recovery itself still resolves back here,
+//     at the attempt after the one it closed (journal.Record.Interrupted).
 //
 //   - A terminal node_finished with no run-level marker after it: the process
 //     died between ending a node and recording that the run ended. Left alone,
@@ -359,11 +437,7 @@ func (d *Dispatcher) heal(jrnl *journal.Journal, records []journal.Record, start
 	switch last.Event {
 	case journal.EventNodeStarted:
 		note := fmt.Sprintf("interrupted: no completion record for attempt %d (the process died inside this node); re-running", last.Attempt)
-		if _, err := jrnl.Append(journal.Record{
-			Event: journal.EventNodeFinished, Node: last.Node, Attempt: last.Attempt,
-			Status: journal.StatusAborted, Next: last.Node,
-			Usage: journalUsage(belay.Usage{}), Note: note,
-		}); err != nil {
+		if _, err := jrnl.Append(interruptedAttempt(last.Node, last.Attempt, 0, note)); err != nil {
 			return false, fmt.Errorf("graph: close interrupted %q: %w", last.Node, err)
 		}
 		d.logger.Warn("belay/graph: recovered an interrupted node",
@@ -372,7 +446,7 @@ func (d *Dispatcher) heal(jrnl *journal.Journal, records []journal.Record, start
 		return true, nil
 
 	case journal.EventNodeFinished:
-		event, runState, okToHeal := owedRunMarker(last.Status)
+		event, runState, okToHeal := owedRunMarker(last)
 		if !okToHeal {
 			return false, nil
 		}
@@ -390,11 +464,33 @@ func (d *Dispatcher) heal(jrnl *journal.Journal, records []journal.Record, start
 	}
 }
 
-// owedRunMarker maps a terminal node status onto the run-level record that
-// should have followed it. A StatusOK node is not terminal — the loop decides
-// what follows it — so it owes nothing.
-func owedRunMarker(status journal.Status) (journal.Event, journal.RunState, bool) {
-	switch status {
+// interruptedAttempt is the node_finished that closes an attempt the
+// dispatcher will run again: aborted, naming its own node as Next, with no
+// usage recorded (journal.Record.Interrupted). heal writes it for an attempt a
+// crash left open, and pauseInsideNode for one a cancellation cut short.
+// Building both here keeps them the one shape that ResolveStart resumes at the
+// next attempt and owedRunMarker owes nothing for.
+func interruptedAttempt(node string, attempt int, elapsed time.Duration, note string) journal.Record {
+	return journal.Record{
+		Event: journal.EventNodeFinished, Node: node, Attempt: attempt,
+		DurationMS: elapsed.Milliseconds(), Status: journal.StatusAborted, Next: node,
+		Usage: journalUsage(belay.Usage{}), Note: note,
+	}
+}
+
+// owedRunMarker maps a node_finished that ended the run onto the run-level
+// record that should have followed it. A StatusOK node is not terminal — the
+// loop decides what follows it — so it owes nothing.
+//
+// Neither does an attempt closed as interrupted (journal.Record.Interrupted),
+// although its status is aborted. heal writes one and then re-runs its node,
+// so a crash right after it leaves exactly that record last. Owing run_aborted
+// for it would end, for good, a run whose only fault was dying twice.
+func owedRunMarker(last journal.Record) (journal.Event, journal.RunState, bool) {
+	if last.Interrupted() {
+		return journal.EventUnknown, journal.RunStateRunnable, false
+	}
+	switch last.Status {
 	case journal.StatusFailed:
 		return journal.EventRunFailed, journal.RunStateFailed, true
 	case journal.StatusAborted:
@@ -512,6 +608,14 @@ func (d *Dispatcher) loop(
 			return d.endRun(jrnl, man, ledger, journal.EventRunAborted, state.RunStatusAborted,
 				ExitAborted, current, steps, d.note(err.Error()), err)
 		}
+		// A run its caller has cancelled starts nothing more. Started on a
+		// context that is already done, the node would be cut off at once,
+		// or, if it never looks at its context, do its work only to have it
+		// thrown away. This comes after the two guards: a run they would
+		// end is ended now, not paused to meet them again on resume.
+		if d.pauseOnCancel && errors.Is(ctx.Err(), context.Canceled) {
+			return d.pauseInterrupted(jrnl, man, ledger, current, steps)
+		}
 
 		node, err := d.registry.Get(current)
 		if err != nil {
@@ -535,28 +639,17 @@ func (d *Dispatcher) loop(
 				fmt.Errorf("graph: journal node_started for %q: %w", current, err)
 		}
 
-		logger := d.logger.With(
-			slog.String("node", current), slog.Int("step", step), slog.Int("attempt", attempt))
+		rc := d.runContext(man, st, ledger, current, step, attempt)
+		// Held apart from rc: the node receives rc by pointer, and what the
+		// dispatcher logs after the node returns must not depend on what
+		// the node did to it.
+		logger := rc.Logger
 		logger.Info("belay/graph: node started")
 
-		layout := d.store.Layout()
-		exec := d.execute(ctx, node, &RunContext{
-			Goal: man.Goal, State: st, Config: d.cfg, Layout: layout,
-			// Supplied, not derived: six nodes previously reconstructed
-			// the workspace by walking up from the run directory, which
-			// yields belay's own tree for a zero Layout.
-			Workspace: layout.WorkspaceDir(),
-			RunID:     man.RunID,
-			Budget:    ledger.Snapshot(d.cfg.Budget.MaxUSD),
-			NodeName:  current, Step: step, Attempt: attempt, Logger: logger,
-			Agent: d.agent, Runner: d.runner, Linter: d.linter,
-			Reviewer: d.reviewer, Isolator: d.isolator,
-		})
-
-		man.Step = step
+		exec := d.execute(ctx, node, rc)
 		steps++
 
-		out, err := d.settle(jrnl, man, ledger, node.Name(), attempt, started.Seq, steps, exec, logger)
+		out, err := d.settle(jrnl, man, ledger, node.Name(), attempt, started.Seq, step, steps, exec, logger)
 		if out != nil {
 			return *out, err
 		}
@@ -565,6 +658,42 @@ func (d *Dispatcher) loop(
 		}
 
 		current, attempt = exec.res.Next, 1
+	}
+}
+
+// runContext builds the RunContext for one execution of node: the only place
+// one is assembled, so everything a node is allowed to see is decided here.
+//
+// It reads and returns; it writes nothing. That keeps it out of the ordering
+// contract on Dispatcher: building a node's view of the run is not a durable
+// effect, so a crash while doing it loses nothing and leaves nothing to heal.
+//
+// Config is d.cfg, the configuration this process loaded. On a resume that is
+// read from disk again and can differ from what the run started with. A value
+// that must stay the same for the whole of a run belongs on man, which was
+// written when the run was created, and a field carrying one should be filled
+// from man rather than from d.cfg; internal/nodes states the same rule for
+// the shape of the graph.
+//
+// It does not decide which node runs, or check the budget or the step cap:
+// the loop has done all three before a node needs a context.
+func (d *Dispatcher) runContext(
+	man *state.Manifest, st state.State, ledger *budget.Ledger, node string, step, attempt int,
+) *RunContext {
+	layout := d.store.Layout()
+	return &RunContext{
+		Goal: man.Goal, State: st, Config: d.cfg, Layout: layout,
+		// Supplied, not derived: six nodes previously reconstructed the
+		// workspace by walking up from the run directory, which yields
+		// belay's own tree for a zero Layout.
+		Workspace: layout.WorkspaceDir(),
+		RunID:     man.RunID,
+		Budget:    ledger.Snapshot(d.cfg.Budget.MaxUSD),
+		NodeName:  node, Step: step, Attempt: attempt,
+		Logger: d.logger.With(
+			slog.String("node", node), slog.Int("step", step), slog.Int("attempt", attempt)),
+		Agent: d.agent, Runner: d.runner, Linter: d.linter,
+		Reviewer: d.reviewer, Isolator: d.isolator,
 	}
 }
 
@@ -619,18 +748,27 @@ func (d *Dispatcher) execute(ctx context.Context, n Node, rc *RunContext) nodeOu
 //nolint:gocritic // the branching here is the run's terminal-state table; splitting it hides the shape.
 func (d *Dispatcher) settle(
 	jrnl *journal.Journal, man *state.Manifest, ledger *budget.Ledger,
-	node string, attempt int, startedSeq uint64, steps int, exec nodeOutcome, logger *slog.Logger,
+	node string, attempt int, startedSeq uint64, step, steps int, exec nodeOutcome, logger *slog.Logger,
 ) (*Outcome, error) {
-	// The three rejected paths. None of them applies a Patch or records
-	// Usage: each means the Result is untrustworthy or absent, and a run
-	// that ends here executes nothing further, so under-counting a failed
-	// node's spend cannot let a later node overspend.
+	// The rejected paths. None of them applies a Patch or records Usage:
+	// each means the Result is untrustworthy or absent. A run that ends here
+	// executes nothing further, so under-counting a failed node's spend
+	// cannot let a later node overspend. A run paused by a cancellation does
+	// continue, and its interrupted node's spend goes uncounted exactly as a
+	// crashed one's does: a node cut off part-way has not reported what it
+	// spent.
+	//
+	// The timeout is checked first. It is the dispatcher's own guard, and a
+	// node that outlived it is not excused by a cancellation that arrived
+	// while it did.
 	switch {
 	case exec.timedOut:
 		err := fmt.Errorf("%w: %q exceeded graph.node_timeout=%s", ErrNodeTimeout, node, d.cfg.Graph.NodeTimeout)
 		return d.terminal(jrnl, man, ledger, node, attempt, steps, exec.elapsed,
 			journal.StatusAborted, journal.EventRunAborted, state.RunStatusAborted, ExitAborted,
 			d.note(err.Error()), err, logger)
+	case exec.canceled && d.pauseOnCancel:
+		return d.pauseInsideNode(jrnl, man, ledger, node, attempt, steps, exec.elapsed, logger)
 	case exec.canceled:
 		err := fmt.Errorf("%w: %q canceled: %w", ErrNodeAborted, node, context.Canceled)
 		return d.terminal(jrnl, man, ledger, node, attempt, steps, exec.elapsed,
@@ -649,7 +787,17 @@ func (d *Dispatcher) settle(
 			fmt.Errorf("%w: %q returned an unusable Result: %w", ErrNodeFailed, node, err), logger)
 	}
 
-	// Accepted. Apply the patch FIRST — see the ordering contract on
+	// Accepted, and only now is this execution one of the run's steps.
+	// man.Step counts the executions the run acted on: it is what
+	// graph.max_steps is measured against, and what names a node's evidence
+	// directory. An execution that timed out, failed or was interrupted
+	// produced no Result to act on, and a kill at the same moment would have
+	// counted nothing either — the process died before it could write the
+	// manifest. Counting one would spend a step of the run's budget on an
+	// interruption, and move the re-run's evidence directory beside the
+	// attempt it replaces instead of over it.
+	man.Step = step
+	// Apply the patch FIRST — see the ordering contract on
 	// Dispatcher. History is keyed on the node_started record's Seq: a real,
 	// already-durable journal sequence number unique to this attempt, which
 	// is what makes re-applying this patch after a crash idempotent.
@@ -720,6 +868,44 @@ func (d *Dispatcher) settle(
 			fmt.Errorf("%w: %q returned StatusFailed", ErrNodeFailed, node))
 		return &out, err
 	}
+}
+
+// pauseInsideNode pauses a run whose context was cancelled while the node was
+// running, so that Resume can re-run it. It closes the interrupted attempt
+// with the record heal writes for one a crash left open, then appends
+// run_paused: the order journal.Validate requires. A crash between the two
+// leaves that record last, which owedRunMarker owes nothing for, so the run is
+// still resumable.
+//
+// Whatever the node returned is discarded. A node cut off part-way cannot
+// vouch for its Result, and re-running it from the blackboard it started from
+// is what the Node contract already makes safe.
+func (d *Dispatcher) pauseInsideNode(
+	jrnl *journal.Journal, man *state.Manifest, ledger *budget.Ledger,
+	node string, attempt, steps int, elapsed time.Duration, logger *slog.Logger,
+) (*Outcome, error) {
+	logger.Warn("belay/graph: run interrupted; pausing it so the node re-runs on resume")
+
+	note := fmt.Sprintf("interrupted: belay was asked to stop while attempt %d was running; resuming re-runs it", attempt)
+	if _, err := jrnl.Append(interruptedAttempt(node, attempt, elapsed, note)); err != nil {
+		return &Outcome{ExitCode: ExitFailed, Node: node, Steps: steps, Usage: ledger.Total()},
+			fmt.Errorf("graph: journal node_finished for %q: %w", node, err)
+	}
+
+	out, err := d.pauseInterrupted(jrnl, man, ledger, node, steps)
+	return &out, err
+}
+
+// pauseInterrupted ends this dispatch of a run its caller cancelled, pausing
+// the run at node so that Resume continues it from there. It must not be
+// called while a node_started is open; pauseInsideNode closes one first.
+func (d *Dispatcher) pauseInterrupted(
+	jrnl *journal.Journal, man *state.Manifest, ledger *budget.Ledger, node string, steps int,
+) (Outcome, error) {
+	return d.endRun(jrnl, man, ledger, journal.EventRunPaused, state.RunStatusPaused,
+		ExitAborted, node, steps,
+		fmt.Sprintf("interrupted at %q; use `belay resume` to continue", node),
+		fmt.Errorf("%w: at %q: %w", ErrInterrupted, node, context.Canceled))
 }
 
 // terminal closes an open node_started with a node_finished carrying status,

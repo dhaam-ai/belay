@@ -645,6 +645,89 @@ func TestDurability_PausedRunRefusesPlainRun_ThenAdvancesUnderResume(t *testing.
 	}
 }
 
+// TestDurability_CtrlCPausesTheRun_ResumeReRunsTheInterruptedNode is the
+// promise `belay run --help` makes: press Ctrl-C whenever you like, and
+// `belay resume` picks the run up from the last completed step.
+//
+// A person interrupts the run while code is running. The process does not
+// die: the dispatcher, built as `belay run` builds it, closes the interrupted
+// attempt and pauses the run. A fresh dispatcher (process 2, `belay resume`)
+// then re-runs code, which never finished, and not plan, which did, and takes
+// the run to the end.
+func TestDurability_CtrlCPausesTheRun_ResumeReRunsTheInterruptedNode(t *testing.T) {
+	h := newDurabilityRun(t, config.Default(), "stop when I say so")
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	plan := &durabilityNode{name: graph.NodePlan, steps: []durabilityStep{{
+		res: graph.Result{Next: graph.NodeCode, Status: journal.StatusOK, Patch: state.Patch{
+			Code: &state.Code{SessionID: "sess-plan"},
+		}},
+	}}}
+	code := &durabilityNode{name: graph.NodeCode, steps: []durabilityStep{{interrupt: cancel}}}
+
+	out, err := h.pausingDispatcher(plan, code).Run(ctx)
+	if !errors.Is(err, graph.ErrInterrupted) || !errors.Is(err, context.Canceled) {
+		t.Fatalf("Run() error = %v, want one wrapping both ErrInterrupted and context.Canceled", err)
+	}
+	if out.Status != state.RunStatusPaused || out.Node != graph.NodeCode {
+		t.Fatalf("Outcome = {%v, node %q}, want {paused, node %q}", out.Status, out.Node, graph.NodeCode)
+	}
+	// The same literal exit code a Ctrl-C has always produced: the invocation
+	// was stopped short, whatever the run can do next.
+	if out.ExitCode != 3 {
+		t.Errorf("Outcome.ExitCode = %d, want the literal exit code 3", out.ExitCode)
+	}
+
+	// What the interruption left on disk: a valid journal ending in a pause,
+	// and a manifest that `belay resume` will choose.
+	if m := h.manifest(); m.Status != state.RunStatusPaused || m.CurrentNode != graph.NodeCode {
+		t.Fatalf("manifest = {%v, %q}, want {paused, %q}", m.Status, m.CurrentNode, graph.NodeCode)
+	}
+	res, err := journal.ResolveStart(h.readJournal().Records)
+	if err != nil {
+		t.Fatalf("journal.ResolveStart() after the interruption = %v, want nil", err)
+	}
+	if res.State != journal.RunStatePaused || res.Node != graph.NodeCode || res.Attempt != 2 {
+		t.Fatalf("resume point = %+v, want paused at code, attempt 2", res)
+	}
+
+	// Process 2: `belay resume`, with a context nobody cancels.
+	plan2 := durabilityOK(graph.NodePlan, graph.NodeCode)
+	code2 := durabilityOK(graph.NodeCode, graph.End)
+	out, err = h.pausingDispatcher(plan2, code2).Resume(context.Background())
+	if err != nil {
+		t.Fatalf("Resume() error = %v, want nil", err)
+	}
+	if out.Status != state.RunStatusCompleted {
+		t.Fatalf("Outcome.Status = %v, want completed", out.Status)
+	}
+	if plan2.calls != 0 {
+		t.Errorf("plan ran %d times on resume, want 0: it finished before the interruption", plan2.calls)
+	}
+	if code2.calls != 1 || code2.attempts[0] != 2 {
+		t.Fatalf("code ran %d times at attempts %v on resume, want 1 call at attempt 2", code2.calls, code2.attempts)
+	}
+	if code2.seenCode[0].SessionID != "sess-plan" {
+		t.Errorf("the re-run saw Code = %+v, want what plan left on the blackboard", code2.seenCode[0])
+	}
+
+	want := []string{
+		"run_started",
+		"plan#1 started", "plan#1 finished ok -> code",
+		// The interrupted attempt is closed exactly as crash recovery closes
+		// a dead one: aborted, naming itself as the node to run again.
+		"code#1 started", "code#1 finished aborted -> code",
+		"run_paused",
+		"run_resumed",
+		"code#2 started", "code#2 finished ok -> END",
+		"run_completed",
+	}
+	if got := h.timeline(); !durabilityEqualStrings(got, want) {
+		t.Errorf("timeline =\n  %v\nwant\n  %v", got, want)
+	}
+}
+
 // TestDurability_CompletedRunRefusesResume_DistinguishablyNotAnError is
 // acceptance scenario 7. Resuming a completed run is a no-op success, not an
 // error -- and that is exactly how a caller must tell it apart from a run

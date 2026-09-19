@@ -300,8 +300,8 @@ var scenarios = []scenario{
 			})
 		},
 		newAIReview: newAIReviewToolchainMissing,
-		wantGate: belay.GateError,
-		wantErr:  map[string]bool{nameScanner: true, nameAIReview: true},
+		wantGate:    belay.GateError,
+		wantErr:     map[string]bool{nameScanner: true, nameAIReview: true},
 	},
 }
 

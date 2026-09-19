@@ -21,20 +21,22 @@ const (
 // strings, which cannot contain a backtick.
 const fence = "```"
 
-// changedFilesTag is the info string on the fenced block the prompt asks for
-// and that parseChangedFiles reads back.
+// ChangedFilesTag is the info string on the fenced block the prompt asks for
+// and that ParseChangedFiles reads back. The fix node's prompt asks for the
+// same block by this name, so a repair reports its files the way the
+// original change did.
 //
 // It is deliberately not a language name. No syntax highlighter claims
 // "changed-files", so a block carrying it cannot be something a model
 // pretty-printed for its own reasons: its presence is evidence the agent
 // answered this specific instruction, which is what lets the parser prefer it
 // over anything else in the reply.
-const changedFilesTag = "changed-files"
+const ChangedFilesTag = "changed-files"
 
 // changedFilesExample is the block shape the prompt demonstrates. It is built
 // from the same constants the parser matches on, so the instruction and the
 // implementation cannot drift apart.
-const changedFilesExample = fence + changedFilesTag + "\n" +
+const changedFilesExample = fence + ChangedFilesTag + "\n" +
 	"internal/calc/calc.go\n" +
 	"internal/calc/calc_test.go\n" +
 	fence
@@ -177,7 +179,7 @@ func buildRequest(rc *graph.RunContext, workDir, plan string) belay.AgentRequest
 		WorkDir:      workDir,
 		AllowedTools: editTools(),
 		MaxTurns:     rc.Config.Agent.MaxTurns,
-		Model:        rc.Config.Agent.Model,
+		Model:        rc.Config.Agent.ModelFor(graph.NodeCode),
 		SessionID:    rc.State.Code.SessionID,
 	}
 }
@@ -197,11 +199,11 @@ func buildPrompt(rc *graph.RunContext, workDir, plan string) string {
 		rc.State.Plan.Path,
 		strings.TrimSpace(plan),
 		workDir,
-		changedFilesTag,
+		ChangedFilesTag,
 		changedFilesExample,
 	)
 	if rc.State.Code.SessionID != "" {
-		fmt.Fprintf(&b, resumeTemplate, fileList(rc.State.Code.ChangedFiles), changedFilesTag)
+		fmt.Fprintf(&b, resumeTemplate, fileList(rc.State.Code.ChangedFiles), ChangedFilesTag)
 	}
 	return b.String()
 }

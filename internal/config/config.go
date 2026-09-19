@@ -198,6 +198,28 @@ type Agent struct {
 	Mode AgentMode `yaml:"mode"`
 }
 
+// ModelFor returns the model the backend is told to use when the node named
+// node calls the agent. Today that is a.Model for every node.
+//
+// It exists so that routing, sending different nodes of one run to
+// different models, has exactly one place to live. Every node that builds an
+// agent request asks here instead of reading a.Model itself, so routing will
+// change this body and no node. It takes the node's name rather than a graph
+// type because internal/graph imports this package; callers pass the
+// graph.Node* constants.
+//
+// It deliberately does not validate node. An unknown name, the empty string
+// included, gets a.Model like any other rather than an empty model, which is
+// how an agent request asks for the backend's own default: a model the user
+// never chose, and one the cost estimator has no name to price by. The
+// result depends only on a and node, so a node the dispatcher re-runs on
+// resume asks for the same model the interrupted attempt did.
+//
+//nolint:revive // node is unused until routing lands; it is the seam's whole point, so it stays named.
+func (a Agent) ModelFor(node string) string {
+	return a.Model
+}
+
 // Graph configures the dispatcher's state machine.
 type Graph struct {
 	// GiveUp caps how many times the fix loop may retry a failing gate.
@@ -252,7 +274,8 @@ type AI struct {
 type MCP struct {
 	// Mode selects the transport.
 	Mode MCPMode `yaml:"mode"`
-	// URL addresses an already-running server. Required by MCPModeServer.
+	// URL addresses the server over HTTP. MCPModeCloud and MCPModeServer
+	// require it while Review.Mode is ReviewModeAI.
 	URL string `yaml:"url"`
 	// Image is the server container image used by MCPModeDocker.
 	Image string `yaml:"image"`
@@ -761,35 +784,88 @@ func (s Snapshot) Canonical() string {
 }
 
 // Snapshot returns every setting in c keyed by its dotted path.
+//
+// Each top-level section reports its own settings through its own snapshot
+// method, and Snapshot only gathers them. A new section therefore adds one
+// method and one line to the list below, rather than rows in a shared map
+// literal that every change to the schema would otherwise edit. Each method
+// writes only keys under its own section's name, so no two can collide;
+// TestSnapshotCoversEveryField checks that together they cover the schema.
 func (c Config) Snapshot() Snapshot {
+	s := Snapshot{"version": strconv.Itoa(c.Version)}
+	for _, section := range []Snapshot{
+		c.Agent.snapshot(),
+		c.Graph.snapshot(),
+		c.Test.snapshot(),
+		c.Review.snapshot(),
+		c.Budget.snapshot(),
+		c.Fanout.snapshot(),
+	} {
+		maps.Copy(s, section)
+	}
+	return s
+}
+
+// snapshot returns the agent.* settings for [Config.Snapshot].
+func (a Agent) snapshot() Snapshot {
 	return Snapshot{
-		"version":                           strconv.Itoa(c.Version),
-		"agent.backend":                     c.Agent.Backend,
-		"agent.model":                       c.Agent.Model,
-		"agent.max_turns":                   strconv.Itoa(c.Agent.MaxTurns),
-		"agent.mode":                        string(c.Agent.Mode),
-		"graph.give_up":                     strconv.Itoa(c.Graph.GiveUp),
-		"graph.max_steps":                   strconv.Itoa(c.Graph.MaxSteps),
-		"graph.node_timeout":                c.Graph.NodeTimeout.String(),
-		"graph.approval":                    strconv.FormatBool(c.Graph.Approval),
-		"test.runner":                       string(c.Test.Runner),
-		"test.custom_cmd":                   c.Test.CustomCmd,
-		"review.mode":                       string(c.Review.Mode),
-		"review.fail_on":                    string(c.Review.FailOn),
-		"review.sonar.runner":               c.Review.Sonar.Runner,
-		"review.sonar.image":                c.Review.Sonar.Image,
-		"review.sonar.quality_gate_wait":    strconv.FormatBool(c.Review.Sonar.QualityGateWait),
-		"review.sonar.quality_gate_timeout": strconv.Itoa(c.Review.Sonar.QualityGateTimeout),
-		"review.ai.mcp.mode":                string(c.Review.AI.MCP.Mode),
-		"review.ai.mcp.url":                 c.Review.AI.MCP.URL,
-		"review.ai.mcp.image":               c.Review.AI.MCP.Image,
-		"budget.max_usd":                    strconv.FormatFloat(c.Budget.MaxUSD, 'f', -1, 64),
-		"budget.max_tokens":                 strconv.FormatInt(c.Budget.MaxTokens, 10),
-		"budget.on_exceed":                  string(c.Budget.OnExceed),
-		"fanout.enabled":                    strconv.FormatBool(c.Fanout.Enabled),
-		"fanout.candidates":                 strconv.Itoa(c.Fanout.Candidates),
-		"fanout.isolator":                   c.Fanout.Isolator,
-		"fanout.select":                     string(c.Fanout.Select),
+		"agent.backend":   a.Backend,
+		"agent.model":     a.Model,
+		"agent.max_turns": strconv.Itoa(a.MaxTurns),
+		"agent.mode":      string(a.Mode),
+	}
+}
+
+// snapshot returns the graph.* settings for [Config.Snapshot].
+func (g Graph) snapshot() Snapshot {
+	return Snapshot{
+		"graph.give_up":      strconv.Itoa(g.GiveUp),
+		"graph.max_steps":    strconv.Itoa(g.MaxSteps),
+		"graph.node_timeout": g.NodeTimeout.String(),
+		"graph.approval":     strconv.FormatBool(g.Approval),
+	}
+}
+
+// snapshot returns the test.* settings for [Config.Snapshot].
+func (t Test) snapshot() Snapshot {
+	return Snapshot{
+		"test.runner":     string(t.Runner),
+		"test.custom_cmd": t.CustomCmd,
+	}
+}
+
+// snapshot returns the review.* settings, including the nested sonar and
+// ai.mcp ones, for [Config.Snapshot].
+func (r Review) snapshot() Snapshot {
+	return Snapshot{
+		"review.mode":                       string(r.Mode),
+		"review.fail_on":                    string(r.FailOn),
+		"review.sonar.runner":               r.Sonar.Runner,
+		"review.sonar.image":                r.Sonar.Image,
+		"review.sonar.quality_gate_wait":    strconv.FormatBool(r.Sonar.QualityGateWait),
+		"review.sonar.quality_gate_timeout": strconv.Itoa(r.Sonar.QualityGateTimeout),
+		"review.ai.mcp.mode":                string(r.AI.MCP.Mode),
+		"review.ai.mcp.url":                 r.AI.MCP.URL,
+		"review.ai.mcp.image":               r.AI.MCP.Image,
+	}
+}
+
+// snapshot returns the budget.* settings for [Config.Snapshot].
+func (b Budget) snapshot() Snapshot {
+	return Snapshot{
+		"budget.max_usd":    strconv.FormatFloat(b.MaxUSD, 'f', -1, 64),
+		"budget.max_tokens": strconv.FormatInt(b.MaxTokens, 10),
+		"budget.on_exceed":  string(b.OnExceed),
+	}
+}
+
+// snapshot returns the fanout.* settings for [Config.Snapshot].
+func (f Fanout) snapshot() Snapshot {
+	return Snapshot{
+		"fanout.enabled":    strconv.FormatBool(f.Enabled),
+		"fanout.candidates": strconv.Itoa(f.Candidates),
+		"fanout.isolator":   f.Isolator,
+		"fanout.select":     string(f.Select),
 	}
 }
 

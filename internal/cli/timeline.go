@@ -13,6 +13,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode"
 	"unicode/utf8"
 
 	"github.com/dhaam-ai/belay/internal/journal"
@@ -34,8 +35,8 @@ const (
 	// not an error in the timeline's own operation: a failing test node is
 	// exactly what a fix loop is for.
 	TimelineFailed TimelineOutcome = "failed"
-	// TimelinePaused is a node that suspended the run, such as an approval
-	// gate waiting on a human.
+	// TimelinePaused is a node that paused the run, such as an approval gate
+	// waiting on a human.
 	TimelinePaused TimelineOutcome = "paused"
 	// TimelineStopped is a node whose execution was cut short.
 	TimelineStopped TimelineOutcome = "stopped"
@@ -97,8 +98,8 @@ type TimelineEntry struct {
 	// Iterations is the total number of visits to Node across the whole run.
 	Iterations int
 	// Attempt is the journal's attempt counter for this visit. It is greater
-	// than 1 only when a previous attempt of this same visit died without
-	// finishing — a crash recovery, not a loop iteration.
+	// than 1 only when an earlier attempt at this same visit was cut short
+	// (crash or Ctrl-C) and run again — a re-run, not a loop iteration.
 	Attempt int
 	// Outcome is what happened, in the reader's vocabulary.
 	Outcome TimelineOutcome
@@ -127,7 +128,8 @@ type TimelineEntry struct {
 func (e TimelineEntry) Repeated() bool { return e.Iterations > 1 }
 
 // Rerun reports whether this entry is a second or later attempt at the same
-// visit to the node, meaning an earlier attempt died mid-execution.
+// visit to the node, meaning an earlier attempt was cut short (crash or
+// Ctrl-C).
 func (e TimelineEntry) Rerun() bool { return e.Attempt > 1 }
 
 // TimelineMarker is a run-level event between two node executions: the
@@ -147,13 +149,15 @@ type TimelineMarker struct {
 	Gap time.Duration
 }
 
-// TimelineLoop names a node that ran more than once, and how many times.
-// It is derived from journal.Stats, which already counts executions per
-// node, so the timeline never recounts what the journal package derives.
+// TimelineLoop names a node the run came back to, and how many times it
+// visited it. It is what makes the test-and-fix cycle legible as a cycle.
 type TimelineLoop struct {
 	// Node is the repeated node.
 	Node string
-	// Executions is how many times it completed.
+	// Executions is how many times the run visited it — visits, not journal
+	// records. A gate that paused for a person and ran again when they
+	// resumed the run was visited once (see resumesTheSameVisit), so a run
+	// that never looped reports no loop at all.
 	Executions int
 }
 
@@ -232,6 +236,12 @@ type Timeline struct {
 	// the process is killed between write and the next record: expected, and
 	// reported as such.
 	InterruptedMidWrite bool
+	// ChangedFiles is every file the run has changed so far, relative to the
+	// workspace: state.json's Code.ChangedFiles, which the code node starts
+	// and each fix adds to. LoadTimeline sorts it and lists each file once.
+	// It is empty when state.json could not be read, as Goal is when the
+	// manifest could not be.
+	ChangedFiles []string
 }
 
 // InterruptedMidNode reports whether the run stopped with a node still
@@ -281,14 +291,12 @@ func BuildTimeline(sel TimelineSelection, manifest *state.Manifest, res journal.
 		tl.Totals.BudgetLimitUSD = manifest.Budget.LimitUSD
 	}
 
-	// journal.Stats already derives per-node execution counts and summed
-	// durations, and is documented to degrade rather than fail on a damaged
-	// history. Loop detection and total agent time come from it verbatim.
+	// journal.Stats already sums per-node durations and is documented to
+	// degrade rather than fail on a damaged history, so total agent time comes
+	// from it verbatim. Loops do not: Stats counts records, and a visit to a
+	// node can span two of them (see resumesTheSameVisit).
 	for _, s := range journal.Stats(res.Records) {
 		tl.Totals.AgentDuration += s.TotalDuration
-		if s.Executions > 1 {
-			tl.Loops = append(tl.Loops, TimelineLoop{Node: s.Node, Executions: s.Executions})
-		}
 	}
 
 	visits := make(map[string]int)
@@ -309,7 +317,9 @@ func BuildTimeline(sel TimelineSelection, manifest *state.Manifest, res journal.
 				started = open.Time
 			}
 			open = nil
-			visits[rec.Node]++
+			if !resumesTheSameVisit(tl.Entries, rec.Node) {
+				visits[rec.Node]++
+			}
 			tl.Entries = append(tl.Entries, TimelineEntry{
 				Index:      len(tl.Entries) + 1,
 				Node:       rec.Node,
@@ -353,7 +363,9 @@ func BuildTimeline(sel TimelineSelection, manifest *state.Manifest, res journal.
 	// belongs in the order, with the honest admission that its duration and
 	// cost were never recorded.
 	if open != nil {
-		visits[open.Node]++
+		if !resumesTheSameVisit(tl.Entries, open.Node) {
+			visits[open.Node]++
+		}
 		tl.Interrupted = true
 		tl.InterruptedNode = open.Node
 		tl.Entries = append(tl.Entries, TimelineEntry{
@@ -369,6 +381,15 @@ func BuildTimeline(sel TimelineSelection, manifest *state.Manifest, res journal.
 	for i := range tl.Entries {
 		tl.Entries[i].Iterations = visits[tl.Entries[i].Node]
 	}
+	// Named in the order the run first reached them, so the summary reads in
+	// the same direction as the table.
+	named := make(map[string]bool, len(visits))
+	for _, e := range tl.Entries {
+		if visits[e.Node] > 1 && !named[e.Node] {
+			named[e.Node] = true
+			tl.Loops = append(tl.Loops, TimelineLoop{Node: e.Node, Executions: visits[e.Node]})
+		}
+	}
 	tl.Totals.Nodes = len(tl.Entries)
 
 	if n := len(res.Records); n > 0 {
@@ -382,6 +403,32 @@ func BuildTimeline(sel TimelineSelection, manifest *state.Manifest, res journal.
 	tl.applyLoopCost()
 	tl.applyRunState(res.Records, manifest)
 	return tl
+}
+
+// resumesTheSameVisit reports whether the next execution of node continues the
+// visit the last entry began, rather than being a second visit to it.
+//
+// A node_finished that names its own node as what comes next has not finished
+// its visit: it is the approve gate pausing for a person, or an attempt a
+// Ctrl-C or a crash cut short (journal.Record.Interrupted). Either way the
+// execution that follows is the same visit taken up again — the graph did not
+// route anywhere and come back. Counting two would report every run with
+// graph.approval on as having looped at the gate, and would open the
+// loop-cost span there, charging the fix loop for the plan, the code and the
+// write that came between.
+//
+// A node that genuinely routes to itself is a loop, and is not this: its
+// record is a StatusOK verdict with a Next, which is the graph deciding to go
+// round again.
+func resumesTheSameVisit(entries []TimelineEntry, node string) bool {
+	if len(entries) == 0 {
+		return false
+	}
+	prev := entries[len(entries)-1]
+	if prev.Node != node || prev.Next != node {
+		return false
+	}
+	return prev.Outcome == TimelinePaused || prev.Outcome == TimelineStopped
 }
 
 // applyLoopCost measures the stretch of the run spent looping: from the first
@@ -661,7 +708,28 @@ func LoadTimeline(workspace, runID string) (Timeline, error) {
 	if m, ok := timelineLoadManifest(workspace, sel.RunID); ok {
 		manifest = &m
 	}
-	return BuildTimeline(sel, manifest, res), nil
+	tl := BuildTimeline(sel, manifest, res)
+	tl.ChangedFiles = timelineChangedFiles(layout)
+	return tl, nil
+}
+
+// timelineChangedFiles reads the files a run has changed from its state.json,
+// sorted and each once.
+//
+// It reads state.json rather than the journal because that is where the list
+// lives: the code node records it, and each fix adds what its repair touched.
+// Like timelineLoadManifest it reports a file it cannot read as nothing to
+// show rather than as an error, so a timeline of a damaged run still renders.
+// It sorts and de-duplicates itself rather than trusting the list, which the
+// code node records in the order the agent reported it.
+func timelineChangedFiles(layout state.Layout) []string {
+	st, err := state.LoadState(layout.StatePath())
+	if err != nil {
+		return nil
+	}
+	files := slices.Clone(st.Code.ChangedFiles)
+	slices.Sort(files)
+	return slices.Compact(files)
 }
 
 // timelineNoValue is what the timeline prints where a number would be
@@ -929,9 +997,38 @@ func RenderTimeline(w io.Writer, tl Timeline, color bool) error {
 	}
 	timelineWriteTable(&b, s, tl)
 	timelineWriteSummary(&b, s, tl)
+	timelineWriteChangedFiles(&b, s, tl)
 
 	_, err := io.WriteString(w, b.String())
 	return err
+}
+
+// timelineWriteChangedFiles writes the files the run changed, one per line,
+// after everything else: the table says what the run did and what it cost,
+// and this says what it left behind. A run that changed nothing gets no
+// section, rather than a heading over an empty list.
+//
+// The paths are an agent's report, which belay checks for escaping the
+// repository but not for control characters, so those are dropped here: a
+// path must not be able to rewrite the terminal it is printed to.
+func timelineWriteChangedFiles(b *strings.Builder, s timelineStyle, tl Timeline) {
+	if len(tl.ChangedFiles) == 0 {
+		return
+	}
+	fmt.Fprintf(b, "\n%s\n", s.paint(timelineDim, "Files changed:"))
+	for _, path := range tl.ChangedFiles {
+		fmt.Fprintf(b, "  %s\n", timelineDropControl(path))
+	}
+}
+
+// timelineDropControl removes every control character from s.
+func timelineDropControl(s string) string {
+	return strings.Map(func(r rune) rune {
+		if unicode.IsControl(r) {
+			return -1
+		}
+		return r
+	}, s)
 }
 
 // timelineWriteHeader writes the identity block: which run this is, how it
@@ -1112,7 +1209,8 @@ const TimelineJSONVersion = 1
 //	  "entries":      [ …entry ],  // always present, possibly empty
 //	  "markers":      [ …marker ],
 //	  "loops":        [ {"node": string, "executions": number} ],
-//	  "totals":       { …totals }
+//	  "totals":       { …totals },
+//	  "changed_files": [ string ]  // sorted, each once; always present, possibly empty
 //	}
 //
 // An entry is one node execution:
@@ -1150,6 +1248,7 @@ type timelineJSONDoc struct {
 	Markers      []timelineJSONMarker      `json:"markers"`
 	Loops        []timelineJSONLoop        `json:"loops"`
 	Totals       timelineJSONTotals        `json:"totals"`
+	ChangedFiles []string                  `json:"changed_files"`
 }
 
 // timelineJSONInterruption reports a run that stopped without recording an
@@ -1247,9 +1346,10 @@ func timelineToJSON(tl Timeline) timelineJSONDoc {
 		Interrupted: tl.Interrupted,
 		// Collections are always present as arrays, never null, so a
 		// consumer can iterate without a nil check.
-		Entries: make([]timelineJSONEntry, 0, len(tl.Entries)),
-		Markers: make([]timelineJSONMarker, 0, len(tl.Markers)),
-		Loops:   make([]timelineJSONLoop, 0, len(tl.Loops)),
+		Entries:      make([]timelineJSONEntry, 0, len(tl.Entries)),
+		Markers:      make([]timelineJSONMarker, 0, len(tl.Markers)),
+		Loops:        make([]timelineJSONLoop, 0, len(tl.Loops)),
+		ChangedFiles: append(make([]string, 0, len(tl.ChangedFiles)), tl.ChangedFiles...),
 		Totals: timelineJSONTotals{
 			Nodes:           tl.Totals.Nodes,
 			AgentDurationMS: tl.Totals.AgentDuration.Milliseconds(),
@@ -1336,7 +1436,8 @@ func newTimelineCmd() *cobra.Command {
 		Use:   "timeline [run-id]",
 		Short: "Show one run's execution order, timing and cost",
 		Long: `Show how one run actually unfolded: every node in the order it ran, how
-long each took, what each cost, and where the run looped.
+long each took, what each cost, and where the run looped. The files the run
+changed are listed last.
 
 With no run id, the most recent run in the workspace is used and named in the
 output. A node that ran more than once is numbered — "test #2/3" — so a fix

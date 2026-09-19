@@ -2,8 +2,10 @@ package graph_test
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"testing"
 	"time"
@@ -127,6 +129,23 @@ func (h *harness) dispatcher(t *testing.T, nodes ...graph.Node) *graph.Dispatche
 	d, err := graph.NewDispatcher(graph.Options{
 		Store: h.store, Registry: reg, Config: h.cfg,
 		Now: func() time.Time { return time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC) },
+	})
+	if err != nil {
+		t.Fatalf("NewDispatcher() error = %v", err)
+	}
+	return d
+}
+
+// pausingDispatcher is dispatcher with Options.PauseOnCancel set to pause,
+// which is how `belay run` and `belay resume` build theirs.
+func (h *harness) pausingDispatcher(t *testing.T, pause bool, nodes ...graph.Node) *graph.Dispatcher {
+	t.Helper()
+	reg := graph.NewRegistry()
+	reg.MustRegister(nodes...)
+	d, err := graph.NewDispatcher(graph.Options{
+		Store: h.store, Registry: reg, Config: h.cfg,
+		Now:           func() time.Time { return time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC) },
+		PauseOnCancel: pause,
 	})
 	if err != nil {
 		t.Fatalf("NewDispatcher() error = %v", err)
@@ -1041,4 +1060,579 @@ func TestDispatcher_CrashBetweenNodeFinishedAndRunMarker(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestDispatcher_CrashAfterClosingAnInterruptedAttemptStillReRunsIt covers
+// the window inside recovery itself: heal has closed the dead attempt, naming
+// its own node as Next, and the process died before the retry's
+// node_started. That record is an attempt closed so it can be run again, not
+// an abort that ended the run, so nothing is owed: the next process re-runs
+// the node at the attempt after the closed one and finishes the run.
+func TestDispatcher_CrashAfterClosingAnInterruptedAttemptStillReRunsIt(t *testing.T) {
+	h := newRun(t, config.Default(), "crash during recovery")
+	h.seedJournal(t,
+		journal.Record{Event: journal.EventRunStarted},
+		journal.Record{Event: journal.EventNodeStarted, Node: graph.NodePlan, Attempt: 1},
+		journal.Record{
+			Event: journal.EventNodeFinished, Node: graph.NodePlan, Attempt: 1,
+			Status: journal.StatusAborted, Next: graph.NodePlan,
+		},
+	)
+	plan := ok(graph.NodePlan, graph.NodeCode)
+	code := ok(graph.NodeCode, graph.End)
+
+	out, err := h.dispatcher(t, plan, code).Run(context.Background())
+	if err != nil {
+		t.Fatalf("Run() error = %v, want nil: the run was interrupted, not ended", err)
+	}
+	if out.Status != state.RunStatusCompleted {
+		t.Fatalf("Outcome.Status = %v, want completed", out.Status)
+	}
+	if plan.calls != 1 || plan.attempts[0] != 2 {
+		t.Errorf("plan ran %d times at attempts %v, want 1 call at attempt 2", plan.calls, plan.attempts)
+	}
+
+	want := []string{
+		"run_started",
+		"plan#1 started", "plan#1 finished aborted -> plan",
+		"plan#2 started", "plan#2 finished ok -> code",
+		"code#1 started", "code#1 finished ok -> END",
+		"run_completed",
+	}
+	if got := h.timeline(t); !equalStrings(got, want) {
+		t.Errorf("timeline =\n  %v\nwant\n  %v", got, want)
+	}
+}
+
+// interruptingNode stands in for a person pressing Ctrl-C while it runs: it
+// cancels the run's context, waits for the cancellation to reach it, and
+// returns what a node that honours its context returns then. With finish
+// set it ignores the cancellation instead and reports success, as a node
+// that never looks at its context would.
+type interruptingNode struct {
+	name   string
+	cancel context.CancelFunc
+	finish bool
+	calls  int
+	// seenStep records the RunContext.Step of each execution, which is the
+	// step number the run would have spent on it.
+	seenStep []int
+}
+
+func (n *interruptingNode) Name() string { return n.name }
+
+func (n *interruptingNode) Run(ctx context.Context, rc *graph.RunContext) (graph.Result, error) {
+	n.calls++
+	n.seenStep = append(n.seenStep, rc.Step)
+	n.cancel()
+	<-ctx.Done()
+	if n.finish {
+		return Result{
+			Next: graph.End, Status: journal.StatusOK,
+			Patch: state.Patch{Fix: &state.Fix{Attempts: 9}},
+		}, nil
+	}
+	return Result{}, ctx.Err()
+}
+
+// TestDispatcher_CancellationEndsOrPausesTheRun is the Ctrl-C contract.
+// By default a cancelled context ends the run as aborted, which Resume then
+// refuses; that row is a guard for every caller of the dispatcher that never
+// asked for anything else. With Options.PauseOnCancel the run is paused
+// instead: the interrupted attempt is closed as one that will be run again,
+// its Result is thrown away, and Resume re-runs the node at the next attempt
+// and carries on to the end.
+func TestDispatcher_CancellationEndsOrPausesTheRun(t *testing.T) {
+	tests := []struct {
+		name          string
+		pause         bool
+		finish        bool
+		wantErr       []error
+		wantStatus    state.RunStatus
+		wantTimeline  []string
+		wantResumeErr error
+	}{
+		{
+			name:       "guard: by default the run ends as aborted",
+			wantErr:    []error{graph.ErrNodeAborted, context.Canceled},
+			wantStatus: state.RunStatusAborted,
+			wantTimeline: []string{
+				"run_started", "plan#1 started", "plan#1 finished ok -> code",
+				"code#1 started", "code#1 finished aborted", "run_aborted",
+			},
+			wantResumeErr: graph.ErrRunEnded,
+		},
+		{
+			name:       "PauseOnCancel pauses the run at the interrupted node",
+			pause:      true,
+			wantErr:    []error{graph.ErrInterrupted, context.Canceled},
+			wantStatus: state.RunStatusPaused,
+			wantTimeline: []string{
+				"run_started", "plan#1 started", "plan#1 finished ok -> code",
+				"code#1 started", "code#1 finished aborted -> code", "run_paused",
+			},
+		},
+		{
+			name:       "PauseOnCancel discards what a node finishing anyway returned",
+			pause:      true,
+			finish:     true,
+			wantErr:    []error{graph.ErrInterrupted, context.Canceled},
+			wantStatus: state.RunStatusPaused,
+			wantTimeline: []string{
+				"run_started", "plan#1 started", "plan#1 finished ok -> code",
+				"code#1 started", "code#1 finished aborted -> code", "run_paused",
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			h := newRun(t, config.Default(), "stop when asked")
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+
+			code := &interruptingNode{name: graph.NodeCode, cancel: cancel, finish: tt.finish}
+			d := h.pausingDispatcher(t, tt.pause, ok(graph.NodePlan, graph.NodeCode), code)
+
+			out, err := d.Run(ctx)
+			for _, want := range tt.wantErr {
+				if !errors.Is(err, want) {
+					t.Errorf("Run() error = %v, want one wrapping %v", err, want)
+				}
+			}
+			if out.Status != tt.wantStatus || out.ExitCode != graph.ExitAborted || out.Node != graph.NodeCode {
+				t.Errorf("Outcome = {%v, exit %d, node %q}, want {%v, exit %d, node %q}",
+					out.Status, out.ExitCode, out.Node, tt.wantStatus, graph.ExitAborted, graph.NodeCode)
+			}
+			if got := h.timeline(t); !equalStrings(got, tt.wantTimeline) {
+				t.Errorf("timeline =\n  %v\nwant\n  %v", got, tt.wantTimeline)
+			}
+			man := h.manifest(t)
+			if man.Status != tt.wantStatus || man.CurrentNode != graph.NodeCode {
+				t.Errorf("manifest = {%v, %q}, want {%v, %q}", man.Status, man.CurrentNode, tt.wantStatus, graph.NodeCode)
+			}
+			if got := h.state(t).Fix.Attempts; got != 0 {
+				t.Errorf("state.Fix.Attempts = %d, want 0: an interrupted node's patch must not land", got)
+			}
+
+			// A later process resumes, with a context nobody cancels.
+			plan2 := ok(graph.NodePlan, graph.NodeCode)
+			code2 := ok(graph.NodeCode, graph.End)
+			out, err = h.pausingDispatcher(t, tt.pause, plan2, code2).Resume(context.Background())
+			if tt.wantResumeErr != nil {
+				if !errors.Is(err, tt.wantResumeErr) {
+					t.Fatalf("Resume() error = %v, want one wrapping %v", err, tt.wantResumeErr)
+				}
+				if code2.calls != 0 {
+					t.Errorf("code ran %d times resuming an ended run, want 0", code2.calls)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("Resume() error = %v, want nil", err)
+			}
+			if out.Status != state.RunStatusCompleted {
+				t.Fatalf("Resume() Outcome.Status = %v, want completed", out.Status)
+			}
+			if plan2.calls != 0 {
+				t.Errorf("plan ran %d times on resume, want 0: it finished before the interruption", plan2.calls)
+			}
+			if code2.calls != 1 || code2.attempts[0] != 2 {
+				t.Errorf("code ran %d times at attempts %v on resume, want 1 call at attempt 2", code2.calls, code2.attempts)
+			}
+			want := append(append([]string{}, tt.wantTimeline...),
+				"run_resumed", "code#2 started", "code#2 finished ok -> END", "run_completed")
+			if got := h.timeline(t); !equalStrings(got, want) {
+				t.Errorf("timeline after resume =\n  %v\nwant\n  %v", got, want)
+			}
+		})
+	}
+}
+
+// outlivesItsDeadline stands in for a node that runs past graph.node_timeout
+// and is then caught by a Ctrl-C as well: it waits for its own deadline, and
+// only once that has fired does it cancel the run's context and return. Both
+// have happened by the time the dispatcher looks, in that order, with no
+// sleep to make it so.
+type outlivesItsDeadline struct {
+	name   string
+	cancel context.CancelFunc
+}
+
+func (n outlivesItsDeadline) Name() string { return n.name }
+
+func (n outlivesItsDeadline) Run(ctx context.Context, _ *graph.RunContext) (graph.Result, error) {
+	<-ctx.Done()
+	n.cancel()
+	return Result{Next: graph.End, Status: journal.StatusOK}, nil
+}
+
+// TestDispatcher_PauseOnCancelDoesNotExcuseATimeout: a node that outlives
+// graph.node_timeout is stopped by a guard, not by the person running belay,
+// and PauseOnCancel leaves that verdict alone — including when the person
+// running belay also pressed Ctrl-C while the node overran. The timeout is
+// checked first; a cancellation that arrives while a node outlives its
+// deadline does not turn the dispatcher's verdict into a pause that resuming
+// would only meet again.
+func TestDispatcher_PauseOnCancelDoesNotExcuseATimeout(t *testing.T) {
+	tests := []struct {
+		name string
+		node func(cancel context.CancelFunc) graph.Node
+	}{
+		{
+			name: "the run's context left alone",
+			node: func(context.CancelFunc) graph.Node {
+				return &fakeNode{name: graph.NodePlan, steps: []nodeStep{{
+					res:       Result{Next: graph.End, Status: journal.StatusOK},
+					sleep:     150 * time.Millisecond,
+					ignoreCtx: true,
+				}}}
+			},
+		},
+		{
+			name: "the run's context cancelled after the deadline",
+			node: func(cancel context.CancelFunc) graph.Node {
+				return outlivesItsDeadline{name: graph.NodePlan, cancel: cancel}
+			},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := config.Default()
+			cfg.Graph.NodeTimeout = config.NewDuration(20 * time.Millisecond)
+			h := newRun(t, cfg, "too slow")
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+
+			out, err := h.pausingDispatcher(t, true, tt.node(cancel)).Run(ctx)
+			if !errors.Is(err, graph.ErrNodeTimeout) {
+				t.Fatalf("Run() error = %v, want one wrapping ErrNodeTimeout", err)
+			}
+			if out.Status != state.RunStatusAborted {
+				t.Errorf("Outcome.Status = %v, want aborted", out.Status)
+			}
+			want := []string{"run_started", "plan#1 started", "plan#1 finished aborted", "run_aborted"}
+			if got := h.timeline(t); !equalStrings(got, want) {
+				t.Errorf("timeline =\n  %v\nwant\n  %v", got, want)
+			}
+		})
+	}
+}
+
+// TestDispatcher_GuardsComeBeforeTheCancellationPause: a run the budget
+// ceiling or graph.max_steps would end is ended, even when its context was
+// cancelled before the next node. Pausing it instead would hand `belay
+// resume` a run that can only meet the same guard again — and, for the budget,
+// a person who pressed Ctrl-C would be told the run is waiting for them when
+// it has in fact spent everything it may.
+func TestDispatcher_GuardsComeBeforeTheCancellationPause(t *testing.T) {
+	tests := []struct {
+		name    string
+		cfg     config.Config
+		seed    func(*state.Manifest)
+		wantErr error
+	}{
+		{
+			name:    "already over the budget ceiling",
+			cfg:     budgetCfg(5.00, 0),
+			seed:    func(m *state.Manifest) { m.Budget = state.Budget{LimitUSD: 5.00, SpentUSD: 7.50} },
+			wantErr: belay.ErrBudgetExceeded,
+		},
+		{
+			name: "already at graph.max_steps",
+			cfg: func() config.Config {
+				cfg := config.Default()
+				cfg.Graph.MaxSteps = 3
+				return cfg
+			}(),
+			seed:    func(m *state.Manifest) { m.Step = 3 },
+			wantErr: graph.ErrMaxSteps,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			h := newRun(t, tt.cfg, "stop when asked")
+			man := h.manifest(t)
+			tt.seed(&man)
+			if err := h.store.SaveManifest(man); err != nil {
+				t.Fatalf("SaveManifest() error = %v", err)
+			}
+			ctx, cancel := context.WithCancel(context.Background())
+			cancel()
+
+			plan := ok(graph.NodePlan, graph.End)
+			out, err := h.pausingDispatcher(t, true, plan).Run(ctx)
+			if !errors.Is(err, tt.wantErr) {
+				t.Fatalf("Run() error = %v, want one wrapping %v", err, tt.wantErr)
+			}
+			if errors.Is(err, graph.ErrInterrupted) {
+				t.Errorf("Run() error = %v: the guard's verdict was turned into a pause", err)
+			}
+			if out.Status != state.RunStatusAborted || out.ExitCode != graph.ExitAborted {
+				t.Errorf("Outcome = {%v, exit %d}, want {aborted, exit %d}", out.Status, out.ExitCode, graph.ExitAborted)
+			}
+			if plan.calls != 0 {
+				t.Errorf("plan ran %d times, want 0", plan.calls)
+			}
+			want := []string{"run_started", "run_aborted"}
+			if got := h.timeline(t); !equalStrings(got, want) {
+				t.Errorf("timeline =\n  %v\nwant\n  %v", got, want)
+			}
+		})
+	}
+}
+
+// TestDispatcher_PauseOnCancelStartsNoNodeOnceCancelled: once the caller
+// has cancelled, a pausing dispatcher starts nothing more. The run pauses
+// where it stands, with no attempt opened on a context that is already done
+// and none thrown away, and Resume starts that node at its first attempt.
+func TestDispatcher_PauseOnCancelStartsNoNodeOnceCancelled(t *testing.T) {
+	h := newRun(t, config.Default(), "stopped before it began")
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	plan := ok(graph.NodePlan, graph.End)
+	out, err := h.pausingDispatcher(t, true, plan).Run(ctx)
+	if !errors.Is(err, graph.ErrInterrupted) || !errors.Is(err, context.Canceled) {
+		t.Fatalf("Run() error = %v, want one wrapping both ErrInterrupted and context.Canceled", err)
+	}
+	if out.Status != state.RunStatusPaused || out.ExitCode != graph.ExitAborted ||
+		out.Node != graph.NodePlan || out.Steps != 0 {
+		t.Errorf("Outcome = {%v, exit %d, node %q, %d steps}, want {paused, exit %d, node %q, 0 steps}",
+			out.Status, out.ExitCode, out.Node, out.Steps, graph.ExitAborted, graph.NodePlan)
+	}
+	if plan.calls != 0 {
+		t.Errorf("plan ran %d times after the run was cancelled, want 0", plan.calls)
+	}
+	if got, want := h.timeline(t), []string{"run_started", "run_paused"}; !equalStrings(got, want) {
+		t.Errorf("timeline =\n  %v\nwant\n  %v", got, want)
+	}
+	if m := h.manifest(t); m.Status != state.RunStatusPaused || m.CurrentNode != graph.NodePlan {
+		t.Errorf("manifest = {%v, %q}, want {paused, %q}", m.Status, m.CurrentNode, graph.NodePlan)
+	}
+
+	plan2 := ok(graph.NodePlan, graph.End)
+	if _, err := h.pausingDispatcher(t, true, plan2).Resume(context.Background()); err != nil {
+		t.Fatalf("Resume() error = %v, want nil", err)
+	}
+	if plan2.calls != 1 || plan2.attempts[0] != 1 {
+		t.Errorf("plan ran %d times at attempts %v on resume, want 1 call at attempt 1", plan2.calls, plan2.attempts)
+	}
+}
+
+// downgradeToVersion1 rewrites a run document as belay v0.1.x wrote it:
+// schema_version 1, and no requires list, which is the shape those binaries
+// read and the only shape they will resume.
+func downgradeToVersion1(t *testing.T, path string) {
+	t.Helper()
+	editRunDocument(t, path, func(doc map[string]json.RawMessage) {
+		doc["schema_version"] = json.RawMessage(`1`)
+		delete(doc, "requires")
+	})
+}
+
+// editRunDocument applies edit to the JSON object at path, leaving every
+// other key exactly as it was written.
+func editRunDocument(t *testing.T, path string, edit func(map[string]json.RawMessage)) {
+	t.Helper()
+	raw, err := os.ReadFile(path) //nolint:gosec // a path the test's own harness built under t.TempDir()
+	if err != nil {
+		t.Fatalf("read %s: %v", path, err)
+	}
+	var doc map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &doc); err != nil {
+		t.Fatalf("decode %s: %v", path, err)
+	}
+	edit(doc)
+	out, err := json.Marshal(doc)
+	if err != nil {
+		t.Fatalf("encode %s: %v", path, err)
+	}
+	if err := os.WriteFile(path, out, 0o600); err != nil {
+		t.Fatalf("write %s: %v", path, err)
+	}
+}
+
+// schemaVersionOnDisk reads a run document's schema_version raw. A loader
+// would migrate the document and report the version it produced, not the one
+// a crash at this moment would leave behind.
+func schemaVersionOnDisk(t *testing.T, path string) int {
+	t.Helper()
+	raw, err := os.ReadFile(path) //nolint:gosec // a path the test's own harness built under t.TempDir()
+	if err != nil {
+		t.Fatalf("read %s: %v", path, err)
+	}
+	var probe struct {
+		SchemaVersion int `json:"schema_version"`
+	}
+	if err := json.Unmarshal(raw, &probe); err != nil {
+		t.Fatalf("decode %s: %v", path, err)
+	}
+	return probe.SchemaVersion
+}
+
+// TestDispatcher_RefusesARunItMayNotReadBeforeWritingToIt is ADR-0011's
+// promise, at the dispatcher: a run requiring a capability this belay does not
+// have is refused before anything is written to it.
+//
+// A capability may be declared in state.json alone, and the dispatcher read
+// the manifest, opened the journal, healed it and appended to it long before
+// it ever loaded state.json. On a run a crash had left mid-node that wrote a
+// node_finished into a run this belay was never allowed to read — and, once
+// the loop reached a guard, run_aborted and an aborted manifest, ending for
+// good a run whose only fault was having been written by a newer belay.
+func TestDispatcher_RefusesARunItMayNotReadBeforeWritingToIt(t *testing.T) {
+	tests := []struct {
+		name    string
+		seed    []journal.Record
+		records int
+	}{
+		{name: "a fresh run: the journal is not even created"},
+		{
+			name: "a run a crash left inside a node: nothing is healed",
+			seed: []journal.Record{
+				{Event: journal.EventRunStarted},
+				{Event: journal.EventNodeStarted, Node: graph.NodePlan, Attempt: 1},
+			},
+			records: 2,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			h := newRun(t, config.Default(), "add tests")
+			if len(tt.seed) > 0 {
+				h.seedJournal(t, tt.seed...)
+			}
+			editRunDocument(t, h.layout.StatePath(), func(doc map[string]json.RawMessage) {
+				doc["requires"] = json.RawMessage(`["output.branch"]`)
+			})
+
+			plan := ok(graph.NodePlan, graph.End)
+			out, err := h.dispatcher(t, plan).Resume(context.Background())
+			if !errors.Is(err, state.ErrUnknownCapability) {
+				t.Fatalf("Resume() error = %v, want one wrapping state.ErrUnknownCapability", err)
+			}
+			if out.ExitCode != graph.ExitFailed {
+				t.Errorf("exit code = %d, want %d", out.ExitCode, graph.ExitFailed)
+			}
+			if plan.calls != 0 {
+				t.Errorf("plan ran %d times in a run belay may not read, want 0", plan.calls)
+			}
+
+			if tt.records == 0 {
+				if _, err := os.Stat(h.layout.JournalPath()); !errors.Is(err, fs.ErrNotExist) {
+					t.Errorf("the journal exists (%v); belay wrote to a run it refused", err)
+				}
+			} else if got := len(h.records(t)); got != tt.records {
+				t.Errorf("the journal has %d records, want the %d it had; belay wrote to a run it refused:\n  %v",
+					got, tt.records, h.timeline(t))
+			}
+			if m := h.manifest(t); m.Status != state.RunStatusRunning {
+				t.Errorf("manifest status = %v, want it left as %v", m.Status, state.RunStatusRunning)
+			}
+		})
+	}
+}
+
+// TestDispatcher_SavesTheManifestAtTheCurrentVersionBeforeItWritesAnything is
+// the other half of ADR-0011's promise. A version-1 run resumed here has both
+// its documents rewritten at version 2 as they are saved, and whichever goes
+// first decides what belay v0.1.x makes of a crash in between: a version-1
+// manifest over a version-2 state.json is a run it accepts, resumes, and
+// writes into. So the manifest goes first, before the journal is even opened.
+//
+// The journal is made unopenable to prove the ordering: the dispatch fails at
+// the first write it attempts, and the manifest is already at version 2.
+func TestDispatcher_SavesTheManifestAtTheCurrentVersionBeforeItWritesAnything(t *testing.T) {
+	h := newRun(t, config.Default(), "add tests")
+	downgradeToVersion1(t, h.layout.StatePath())
+	downgradeToVersion1(t, h.layout.ManifestPath())
+	// A directory where the journal goes: journal.Open cannot write a byte,
+	// which stands in for a crash at belay's first write to this run.
+	if err := os.MkdirAll(h.layout.JournalPath(), 0o750); err != nil {
+		t.Fatalf("MkdirAll: %v", err)
+	}
+
+	plan := ok(graph.NodePlan, graph.End)
+	if _, err := h.dispatcher(t, plan).Resume(context.Background()); err == nil {
+		t.Fatal("Resume() = nil with an unopenable journal")
+	}
+	if plan.calls != 0 {
+		t.Errorf("plan ran %d times, want 0", plan.calls)
+	}
+	if got := schemaVersionOnDisk(t, h.layout.ManifestPath()); got != state.ManifestSchemaVersion {
+		t.Errorf("manifest.json is at schema version %d before belay's first write to the run, want %d",
+			got, state.ManifestSchemaVersion)
+	}
+}
+
+// TestDispatcher_AnInterruptedAttemptDoesNotConsumeAStep pins what an
+// interruption costs the run: nothing. Options.PauseOnCancel promises the
+// attempt number, the discarded Result and the re-run "a kill at the same
+// moment would have produced", and a kill costs no step — the crashed process
+// never got to write the manifest.
+//
+// A step is not bookkeeping. graph.max_steps is counted in them, so a person
+// who presses Ctrl-C twice has fewer steps left to finish the run with than
+// one who was killed twice; and a node's evidence directory is named after
+// its step, so the re-run of an interrupted node would write beside the
+// attempt it replaces rather than over it.
+func TestDispatcher_AnInterruptedAttemptDoesNotConsumeAStep(t *testing.T) {
+	t.Run("Ctrl-C inside the node", func(t *testing.T) {
+		h := newRun(t, config.Default(), "stop when asked")
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+
+		code := &interruptingNode{name: graph.NodeCode, cancel: cancel}
+		_, err := h.pausingDispatcher(t, true, ok(graph.NodePlan, graph.NodeCode), code).Run(ctx)
+		if !errors.Is(err, graph.ErrInterrupted) {
+			t.Fatalf("Run() error = %v, want one wrapping ErrInterrupted", err)
+		}
+		if got := code.seenStep; len(got) != 1 || got[0] != 2 {
+			t.Fatalf("the interrupted attempt ran at steps %v, want [2]", got)
+		}
+		if got := h.manifest(t).Step; got != 1 {
+			t.Errorf("manifest.Step = %d after an interrupted attempt, want 1: only plan finished", got)
+		}
+
+		code2 := ok(graph.NodeCode, graph.End)
+		if _, err := h.pausingDispatcher(t, true, ok(graph.NodePlan, graph.NodeCode), code2).
+			Resume(context.Background()); err != nil {
+			t.Fatalf("Resume() error = %v, want nil", err)
+		}
+		if got := code2.seenStep; len(got) != 1 || got[0] != 2 {
+			t.Errorf("the re-run ran at steps %v, want [2]: the same step the interrupted attempt had", got)
+		}
+	})
+
+	// The same run as a kill leaves it: plan finished and counted, code
+	// opened and never closed. This is the behaviour the row above must
+	// match, and it is a guard, not a change.
+	t.Run("a kill at the same moment", func(t *testing.T) {
+		h := newRun(t, config.Default(), "survive a kill")
+		h.seedJournal(t,
+			journal.Record{Event: journal.EventRunStarted},
+			journal.Record{Event: journal.EventNodeStarted, Node: graph.NodePlan, Attempt: 1},
+			journal.Record{
+				Event: journal.EventNodeFinished, Node: graph.NodePlan, Attempt: 1,
+				Status: journal.StatusOK, Next: graph.NodeCode, Usage: &journal.Usage{},
+			},
+			journal.Record{Event: journal.EventNodeStarted, Node: graph.NodeCode, Attempt: 1},
+		)
+		man := h.manifest(t)
+		man.Step = 1
+		man.CurrentNode = graph.NodeCode
+		if err := h.store.SaveManifest(man); err != nil {
+			t.Fatalf("SaveManifest: %v", err)
+		}
+
+		code := ok(graph.NodeCode, graph.End)
+		if _, err := h.dispatcher(t, ok(graph.NodePlan, graph.NodeCode), code).
+			Resume(context.Background()); err != nil {
+			t.Fatalf("Resume() error = %v, want nil", err)
+		}
+		if got := code.seenStep; len(got) != 1 || got[0] != 2 {
+			t.Errorf("the re-run after a kill ran at steps %v, want [2]", got)
+		}
+	})
 }

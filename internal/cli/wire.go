@@ -39,18 +39,6 @@ const (
 // because a cassette recorded by one run is replayed by a different run.
 const defaultCassetteName = "cassette.json"
 
-// defaultRoute is the path a standard run walks, mirroring nodes.Default.
-//
-// It is written out here rather than read back from the registry because a
-// graph.Registry is a set of nodes and not an order — Registry.Names returns
-// map keys. A person asking "where am I and what happens next" needs the
-// order, so it is stated once, and TestDefaultRouteMatchesRegistry keeps this
-// list and nodes.Default from drifting apart.
-var defaultRoute = []string{
-	graph.NodePlan, graph.NodeApprove, graph.NodeCode,
-	graph.NodeWrite, graph.NodeTest, graph.NodeFix, graph.NodeReview,
-}
-
 // resolveRequest is what a caller knows before belay resolves anything: the
 // directory to work in and the flags that were set.
 type resolveRequest struct {
@@ -90,7 +78,10 @@ type runPlan struct {
 	linter   belay.Linter
 	reviewer belay.Reviewer
 	registry *graph.Registry
-	redact   func(string) string
+	// route is the order registry is walked in, for showing a person; see
+	// resolveRegistry.
+	route  []string
+	redact func(string) string
 
 	// recorder is the record-mode wrapper whose cassette must be saved when
 	// the run ends. It is nil in every other mode.
@@ -194,8 +185,26 @@ func resolve(req resolveRequest) (*runPlan, error) {
 	p.resolveGate(execer)
 	p.resolveAgent()
 	p.resolveRegistry()
+	p.warnAboutFanout()
 
 	return p, nil
+}
+
+// warnAboutFanout says that fanout.enabled changes nothing yet.
+//
+// It is a warning rather than a blocker: the setting is valid, the loader
+// checks it, and a run with it on is exactly the run it would be with it off.
+// That is the problem. Somebody who turned it on is expecting N attempts at
+// their goal and watching what N attempts would cost, and belay would take
+// one attempt and say nothing about it. Silence is only safe for a setting
+// that does what it says.
+func (p *runPlan) warnAboutFanout() {
+	if !p.config.Fanout.Enabled {
+		return
+	}
+	p.warn("fanout.enabled is true, but nothing runs the candidates yet: no step of the graph leads to "+
+		"the fanout node, so this run takes the ordinary route once and fanout.candidates (%d) changes "+
+		"nothing it does or spends. ADR-0019 is reserved for the decision.", p.config.Fanout.Candidates)
 }
 
 // resolveWorkspace turns the --workspace flag into the absolute path the rest
@@ -344,8 +353,11 @@ func (p *runPlan) resolveGate(execer *exec.Runner) {
 			p.warn("%s is not set, so the SonarQube scan will not be able to authenticate.", sonarTokenEnv)
 		}
 	case config.ReviewModeAI:
+		// docs/config.md describes the mode and this refusal; the two say
+		// the same thing. The reviewer exists (internal/nodes/aireview);
+		// what is missing is the wiring that would construct it here.
 		p.block(
-			"review.mode is \"ai\", and the agent-driven reviewer is not built yet.",
+			"review.mode is \"ai\": belay would ask SonarQube for its verdict through the Sonar MCP server, but that reviewer is not wired in yet.",
 			"set review.mode to \"lint\" or \"sonar\" in belay.yaml",
 		)
 	default:
@@ -410,7 +422,7 @@ func (p *runPlan) resolveAgent() {
 		return
 	}
 
-	backend, err := replay.New(mode, claude.New(p.logger), nil, replay.Provenance{
+	backend, err := replay.New(mode, p.newLiveAgent(), nil, replay.Provenance{
 		BelayVersion: Version,
 		Model:        p.config.Agent.Model,
 		RecordedAt:   time.Now().UTC(),
@@ -428,10 +440,42 @@ func (p *runPlan) resolveAgent() {
 	if mode == replay.ModeRecord {
 		p.recorder = backend
 	}
-	if os.Getenv(anthropicKeyEnv) == "" && os.Getenv(claudeOAuthTokenEnv) == "" {
-		p.warn("neither %s nor %s is set; belay will rely on however the claude command line is already signed in.",
-			anthropicKeyEnv, claudeOAuthTokenEnv)
+	for _, w := range agentWarnings(p.config) {
+		p.warn("%s", w)
 	}
+}
+
+// newLiveAgent builds the backend agent.backend names, the one that calls a
+// real model. resolveAgent calls it only for a run that will call one, live
+// or recording, which keeps a replayed run from constructing a backend at all.
+//
+// Choosing a backend by name is a switch over the backends belay ships rather
+// than a table of constructors, because a backend can need checks of its own
+// before it is used, and a switch keeps them beside the backend they check.
+// It returns nil for a name it does not know. resolveAgent has already
+// refused every other name before calling it.
+func (p *runPlan) newLiveAgent() belay.AgentBackend {
+	switch p.config.Agent.Backend {
+	case claude.BackendName:
+		return claude.New(p.logger)
+	default:
+		return nil
+	}
+}
+
+// agentWarnings lists what a person should know, without being stopped by it,
+// about the backend a live or recording run will call. It reads whether a
+// credential is set, and never its value. Each warning is about one backend,
+// so each is given only when cfg names that backend.
+func agentWarnings(cfg config.Config) []string {
+	var warnings []string
+	signedOut := os.Getenv(anthropicKeyEnv) == "" && os.Getenv(claudeOAuthTokenEnv) == ""
+	if cfg.Agent.Backend == claude.BackendName && signedOut {
+		warnings = append(warnings, fmt.Sprintf(
+			"neither %s nor %s is set; belay will rely on however the claude command line is already signed in.",
+			anthropicKeyEnv, claudeOAuthTokenEnv))
+	}
+	return warnings
 }
 
 // resolveReplayAgent loads the cassette a replayed run answers from.
@@ -455,8 +499,22 @@ func (p *runPlan) resolveReplayAgent() {
 	p.agent = backend
 }
 
-// resolveRegistry builds the node graph the dispatcher walks.
+// resolveRegistry builds the node graph the dispatcher walks, and the route
+// belay shows a person, together. Whatever options nodes.Default is given,
+// nodes.Route must be given too, or belay shows one graph and walks another.
+//
+// It is where a resume will rebuild both from the chosen run's manifest, once
+// a manifest pins anything that shapes the graph (internal/nodes says why a
+// run's graph must not follow belay.yaml as it is when the run is resumed).
+// Nothing is pinned yet, so today it builds both from belay.yaml as loaded,
+// before a resume has chosen its run; the first pinned option must make a
+// resume call it again with the chosen run's pins. It never refuses a run:
+// a pin this plan cannot honour is resumePreflight's to report.
+//
+// The route is set even when the registry cannot be built, so that a dry run
+// refusing to start still shows the route it would have taken.
 func (p *runPlan) resolveRegistry() {
+	p.route = nodes.Route(p.config)
 	registry, err := nodes.Default(p.config)
 	if err != nil {
 		p.block(

@@ -83,12 +83,14 @@ func AllRepair(files []string) ScriptedPlan {
 	return ScriptedPlan{FileStrategy: m}
 }
 
-// changedFilesTag is the fenced-block info string belay's code node
-// (internal/nodes/code) asks for and parses back out of an agent's reply.
-// It is a stable, documented part of the AgentBackend<->code-node
-// protocol (see that package's prompt.go), not an internal symbol this
-// package imports — replicating the exact string here is how any
-// AgentBackend, real or fake, is expected to report what it touched.
+// changedFilesTag is the fenced-block info string belay's code and fix
+// nodes both ask for, and parse back out of an agent's reply
+// (code.ParseChangedFiles in the code node, code.ParseChangedFilesBlock in
+// fix): the fix prompt asks for the code node's block by the code node's
+// tag (code.ChangedFilesTag in internal/nodes/code's prompt.go). It is a stable, documented part of the protocol between an
+// AgentBackend and those two nodes, not a symbol this package imports —
+// replicating the exact string here is how any AgentBackend, real or fake,
+// is expected to report what it touched.
 const changedFilesTag = "changed-files"
 
 // scriptedAgent holds the state NewScriptedAgent's handler closes over.
@@ -134,11 +136,13 @@ const planPromptText = "Implement the goal directly in the repository: restore o
 // against internal/nodes' own prompt text (which is unexported and, more
 // to the point, not a contract this package should couple itself to): the
 // plan node always sends exactly Read/Glob/Grep with no Edit, per
-// internal/nodes/plan's readOnlyTools; the code node always includes Edit;
-// the fix node sends no AllowedTools at all (meaning "use the backend's
-// default," per belay.AgentRequest's own doc comment), which this
-// function also treats as an editing call, since fix has nothing else to
-// ask this fake for.
+// internal/nodes/plan's readOnlyTools, and the code and fix nodes both
+// send Read/Grep/Glob/Edit/Write, per each package's editTools. An empty
+// AllowedTools, which no node sends, is treated as an editing call too.
+//
+// Both editing calls get the same reply, a changed-files block naming
+// what this call touched: the code node and, since it records a repair's
+// files in state.Code.ChangedFiles, the fix node both read it.
 func (a *scriptedAgent) invoke(_ context.Context, req belay.AgentRequest) (belay.AgentResponse, error) {
 	if isReadOnlyRequest(req) {
 		return belay.AgentResponse{Text: planPromptText, Usage: belay.Usage{}}, nil
@@ -281,11 +285,11 @@ func packageNameOf(path string) (string, error) {
 	return "", fmt.Errorf("fixrate: no package clause found in %s", path)
 }
 
-// changedFilesReply renders the prose-plus-fenced-block reply
-// internal/nodes/code's prompt asks for (see that package's prompt.go,
-// changedFilesTag/changedFilesExample): a short summary, then exactly one
-// fence tagged changedFilesTag holding one repository-relative path per
-// line.
+// changedFilesReply renders the prose-plus-fenced-block reply the code
+// and fix prompts ask for (see internal/nodes/code's prompt.go,
+// ChangedFilesTag/changedFilesExample, and internal/nodes/fix's prompt.go):
+// a short summary, then exactly one fence tagged changedFilesTag holding
+// one repository-relative path per line.
 func changedFilesReply(touched []string) string {
 	var b strings.Builder
 	if len(touched) == 0 {

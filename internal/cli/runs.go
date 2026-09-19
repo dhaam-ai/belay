@@ -94,7 +94,8 @@ type RunSummary struct {
 	// and Reason is zero when it is true.
 	Unreadable bool `json:"unreadable"`
 	// Reason is a short, plain explanation of why Unreadable is true, such
-	// as "no manifest.json". It is empty for a readable run.
+	// as "no manifest.json", or "needs a newer belay (output.branch)" for a
+	// run a newer belay wrote. It is empty for a readable run.
 	Reason string `json:"reason"`
 	// Status is the lifecycle word the table prints: running, paused,
 	// finished, failed, stopped, unknown, or unreadable.
@@ -262,6 +263,10 @@ func runsUnreadable(id, path string, modTime time.Time, reason string) RunSummar
 	}
 }
 
+// runsNeedsNewerBelay is the reason the listing gives for a run a newer belay
+// wrote, in the words ADR-0011 promises.
+const runsNeedsNewerBelay = "needs a newer belay"
+
 // runsUnreadableReason turns a manifest load failure into a short phrase for a
 // person reading a list.
 //
@@ -270,13 +275,35 @@ func runsUnreadable(id, path string, modTime time.Time, reason string) RunSummar
 // internals next to their other runs reads as "something is badly wrong
 // with belay" rather than "this one run is damaged". RunSummary.Path says
 // where to look for anyone who wants the detail.
+//
+// A run a newer belay wrote is not damaged, and calling it that sends a
+// person looking for a fault that is not there. Its reason says what fixes
+// it instead, and leads with that so the table's cut never hides it. For a
+// required capability it also names the capability, which says which
+// feature the run was started with; the names come from the file, so they
+// are cleaned like every other string printed here. For a newer schema
+// version the number would tell a person nothing they can act on, so it is
+// left out; belay resume gives the whole error. An older version that no
+// migration covers was not written by any belay this one can name, and
+// keeps its plain "unsupported" reason.
 func runsUnreadableReason(err error) string {
-	var versionErr *state.ManifestVersionError
+	var (
+		capabilityErr *state.CapabilityError
+		versionErr    *state.ManifestVersionError
+	)
 	switch {
 	case errors.Is(err, fs.ErrNotExist):
 		return "no manifest.json"
 	case errors.Is(err, fs.ErrPermission):
 		return "manifest.json is not readable"
+	case errors.As(err, &capabilityErr):
+		names := make([]string, len(capabilityErr.Unknown))
+		for i, name := range capabilityErr.Unknown {
+			names[i] = sanitizeRunsText(name)
+		}
+		return fmt.Sprintf("%s (%s)", runsNeedsNewerBelay, strings.Join(names, ", "))
+	case errors.As(err, &versionErr) && versionErr.Newer():
+		return runsNeedsNewerBelay
 	case errors.As(err, &versionErr):
 		return fmt.Sprintf("unsupported manifest version %d", versionErr.Got)
 	default:
@@ -657,7 +684,9 @@ got, when it started, and what it has spent against its ceiling. A cost
 marked with a tilde includes estimated usage rather than reported figures.
 
 A run directory belay cannot read is listed as "unreadable" rather than
-skipped, so a damaged run is never silently missing from the list.`,
+skipped, so a damaged run is never silently missing from the list. A run a
+newer belay wrote is listed the same way, as "needs a newer belay": upgrade
+belay to read or continue it.`,
 	Args: cobra.NoArgs,
 	RunE: func(cmd *cobra.Command, _ []string) error {
 		workspace, err := runsWorkspaceDir(cmd)

@@ -56,6 +56,41 @@ func TestResolveStartTable(t *testing.T) {
 			want: Result{State: RunStateRunnable, Node: "plan", Attempt: 4},
 		},
 		{
+			// The shape the dispatcher leaves when it closes an attempt it
+			// will re-run: aborted, naming its own node as Next. A crash
+			// between that record and the retry's node_started must not
+			// reuse the closed attempt's number.
+			name: "an attempt closed as interrupted is re-run at attempt+1",
+			records: []Record{
+				{Seq: 1, Event: EventRunStarted},
+				{Seq: 2, Node: "code", Attempt: 1, Event: EventNodeStarted},
+				{Seq: 3, Node: "code", Attempt: 1, Event: EventNodeFinished, Status: StatusAborted, Next: "code"},
+			},
+			want: Result{State: RunStateRunnable, Node: "code", Attempt: 2},
+		},
+		{
+			name: "a run paused after an interrupted attempt re-runs it at attempt+1",
+			records: []Record{
+				{Seq: 1, Event: EventRunStarted},
+				{Seq: 2, Node: "code", Attempt: 2, Event: EventNodeStarted},
+				{Seq: 3, Node: "code", Attempt: 2, Event: EventNodeFinished, Status: StatusAborted, Next: "code"},
+				{Seq: 4, Event: EventRunPaused},
+			},
+			want: Result{State: RunStatePaused, Node: "code", Attempt: 3},
+		},
+		{
+			// Guard: a gate that pauses names itself too, but it finished
+			// its work. Resuming is a new visit, at attempt 1.
+			name: "a paused gate naming itself is a new visit at attempt 1",
+			records: []Record{
+				{Seq: 1, Event: EventRunStarted},
+				{Seq: 2, Node: "approve", Attempt: 1, Event: EventNodeStarted},
+				{Seq: 3, Node: "approve", Attempt: 1, Event: EventNodeFinished, Status: StatusPaused, Next: "approve"},
+				{Seq: 4, Event: EventRunPaused},
+			},
+			want: Result{State: RunStatePaused, Node: "approve", Attempt: 1},
+		},
+		{
 			name: "run_paused blocks a plain run but still resolves a position",
 			records: []Record{
 				{Seq: 1, Event: EventRunStarted},

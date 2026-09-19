@@ -22,8 +22,9 @@ import (
 )
 
 // ManifestSchemaVersion is the schema version SaveManifest writes and the
-// only version LoadManifest accepts without a registered migration.
-const ManifestSchemaVersion = 1
+// only version LoadManifest accepts without a registered migration. It is 2
+// for the same reason StateSchemaVersion is.
+const ManifestSchemaVersion = 2
 
 // ErrUnsupportedManifestVersion reports a manifest.json whose
 // schema_version LoadManifest does not know how to read and has no
@@ -37,21 +38,32 @@ type ManifestVersionError struct {
 	Got int
 }
 
-// Error implements error.
+// Error implements error. Like VersionError's, it says to upgrade belay
+// only for a version above ManifestSchemaVersion.
 func (e *ManifestVersionError) Error() string {
+	if e.Newer() {
+		return fmt.Sprintf("state: manifest.json schema version %d is newer than this belay reads (%d); upgrade belay to continue this run",
+			e.Got, ManifestSchemaVersion)
+	}
 	return fmt.Sprintf("state: manifest.json schema version %d is not supported (want %d)", e.Got, ManifestSchemaVersion)
 }
 
 // Unwrap reports ErrUnsupportedManifestVersion.
 func (e *ManifestVersionError) Unwrap() error { return ErrUnsupportedManifestVersion }
 
+// Newer reports whether the version found is above ManifestSchemaVersion,
+// which means a newer belay wrote the document.
+func (e *ManifestVersionError) Newer() bool { return e.Got > ManifestSchemaVersion }
+
 // ManifestMigration upgrades a raw manifest.json document exactly one
 // schema version forward, analogous to Migration.
 type ManifestMigration func(raw []byte) ([]byte, error)
 
-// manifestMigrations holds no entries today: ManifestSchemaVersion is
-// manifest.json's only version so far.
-var manifestMigrations = map[int]ManifestMigration{}
+// manifestMigrations holds every registered ManifestMigration, keyed by
+// the version it upgrades from. Version 1, which every released belay
+// wrote, upgrades to 2 by migrateFromVersion1, the same step state.json
+// takes.
+var manifestMigrations = map[int]ManifestMigration{1: migrateFromVersion1}
 
 // ErrUnknownRunStatus reports a string that does not name a RunStatus.
 var ErrUnknownRunStatus = errors.New("state: unknown run status")
@@ -66,16 +78,18 @@ const (
 	RunStatusUnknown RunStatus = iota
 	// RunStatusRunning is a run the dispatcher is actively advancing.
 	RunStatusRunning
-	// RunStatusPaused is a run suspended for human input — typically plan
-	// approval — that "belay resume" can continue.
+	// RunStatusPaused is a run paused for human input — typically plan
+	// approval — or because its caller cancelled it and asked for a pause, as
+	// Ctrl-C does under `belay run` and `belay resume`. "belay resume" can
+	// continue it.
 	RunStatusPaused
 	// RunStatusCompleted is a run that reached a terminal success node.
 	RunStatusCompleted
 	// RunStatusFailed is a run that reached a terminal failure, such as the
 	// fix loop giving up.
 	RunStatusFailed
-	// RunStatusAborted is a run stopped before it could finish, such as by
-	// user request or a budget ceiling.
+	// RunStatusAborted is a run stopped before it could finish, such as at a
+	// budget ceiling, or by a cancellation its caller did not ask to pause.
 	RunStatusAborted
 )
 
@@ -181,6 +195,10 @@ type AgentInfo struct {
 type Manifest struct {
 	// SchemaVersion is this document's schema version.
 	SchemaVersion int `json:"schema_version"`
+	// Requires lists the capabilities this document's fields depend on,
+	// sorted and without duplicates; see "Capabilities" in the package
+	// documentation. Empty, never nil, for a run that depends on none.
+	Requires []string `json:"requires"`
 	// RunID is this run's identifier — also the name of its directory
 	// under .belay/runs/. See NewRunID.
 	RunID string `json:"run_id"`
@@ -214,8 +232,8 @@ type Manifest struct {
 }
 
 // NewManifest returns the manifest for a freshly started run: SchemaVersion
-// current, Status running, Step zero, CreatedAt and UpdatedAt both now, and
-// Budget seeded from cfg.Budget.MaxUSD.
+// current, Requires empty, Status running, Step zero, CreatedAt and
+// UpdatedAt both now, and Budget seeded from cfg.Budget.MaxUSD.
 //
 // cfg's Snapshot is passed through RedactSnapshot before being embedded.
 // internal/config's own documentation states that a configuration file
@@ -234,6 +252,7 @@ func NewManifest(now time.Time, runID, workspace, goal string, cfg config.Config
 	}
 	return Manifest{
 		SchemaVersion:  ManifestSchemaVersion,
+		Requires:       []string{},
 		RunID:          runID,
 		CreatedAt:      now,
 		UpdatedAt:      now,
@@ -256,7 +275,8 @@ func NewManifest(now time.Time, runID, workspace, goal string, cfg config.Config
 func (m *Manifest) Touch(now time.Time) { m.UpdatedAt = now }
 
 // LoadManifest reads and decodes the manifest.json at path, applying any
-// registered migration exactly as LoadState does for state.json.
+// registered migration and checking the document's requires list exactly
+// as LoadState does for state.json.
 func LoadManifest(path string) (Manifest, error) {
 	raw, err := readFile(path)
 	if err != nil {
@@ -287,6 +307,10 @@ func decodeManifest(raw []byte) (Manifest, error) {
 			return Manifest{}, fmt.Errorf("state: migrate manifest.json from version %d: %w", probe.SchemaVersion, err)
 		}
 		raw = migrated
+	}
+
+	if err := checkRequires("manifest.json", raw); err != nil {
+		return Manifest{}, err
 	}
 
 	var m Manifest
@@ -611,4 +635,72 @@ func (s *Store) SaveManifest(m Manifest) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return SaveManifest(s.layout.ManifestPath(), m)
+}
+
+// Preflight establishes that belay may work on this run, and makes the run
+// safe for it to write to. Every caller about to write anything to an
+// existing run calls it first: the dispatcher before it opens the journal,
+// `belay resume` before it records an approval.
+//
+// It does two things, in this order.
+//
+// It reads state.json. A capability the run requires that this belay does not
+// have, or a schema version it cannot read, is a refusal — and a capability
+// may live in state.json alone (ADR-0011), so a caller that loaded only the
+// manifest has established nothing. Refusing here is what keeps belay from
+// healing a journal, appending to it and ending a run it was never allowed to
+// read in the first place.
+//
+// It then saves manifest.json at the current schema version, if it is below
+// it. A run's documents are upgraded as they are loaded, and whichever is
+// written first decides what an older belay makes of a crash in between.
+// Every reader of a run — `belay runs`, `belay resume`, the dispatcher —
+// reads the manifest first, so upgrading the manifest first leaves an older
+// belay the version it refuses (ADR-0011) rather than a version-1 manifest
+// over a version-2 state.json, which it accepts and resumes. Nothing else
+// about the manifest changes: a preflight is not a lifecycle event, so
+// UpdatedAt is left alone.
+//
+// A manifest at a version above this belay's is left untouched, and is not
+// this function's refusal to make: the caller loaded it, or chose not to,
+// and LoadManifest is where that error belongs.
+//
+// It is not the CLI's resumePreflight (internal/cli), which `belay resume`
+// runs earlier, dry run included: that one writes nothing, and turns a pin
+// in the manifest the resuming configuration cannot honour into a blocker
+// reported beside the others. Preflight is the last check before a write,
+// refuses with an error, and saves the manifest itself when it is below the
+// current schema version.
+func (s *Store) Preflight() error {
+	if _, err := s.LoadState(); err != nil {
+		return err
+	}
+	return s.upgradeManifest()
+}
+
+// upgradeManifest saves manifest.json at the current schema version when the
+// document on disk is below it. See Preflight for why it goes first.
+func (s *Store) upgradeManifest() error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	path := s.layout.ManifestPath()
+	raw, err := readFile(path)
+	if err != nil {
+		return err
+	}
+	var probe struct {
+		SchemaVersion int `json:"schema_version"`
+	}
+	if err := json.Unmarshal(raw, &probe); err != nil {
+		return fmt.Errorf("state: decode manifest.json: %w", err)
+	}
+	if probe.SchemaVersion >= ManifestSchemaVersion {
+		return nil
+	}
+	m, err := decodeManifest(raw)
+	if err != nil {
+		return err
+	}
+	return SaveManifest(path, m)
 }

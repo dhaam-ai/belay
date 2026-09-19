@@ -3,32 +3,40 @@ package cli
 import (
 	"bytes"
 	"context"
+	"encoding/csv"
 	"errors"
+	"fmt"
 	"log/slog"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/google/go-cmp/cmp"
 	"github.com/spf13/cobra"
+	"github.com/spf13/pflag"
 
 	"github.com/dhaam-ai/belay/internal/graph"
+	"github.com/dhaam-ai/belay/internal/journal"
 	"github.com/dhaam-ai/belay/internal/nodes/approve"
 	"github.com/dhaam-ai/belay/internal/state"
+	"github.com/dhaam-ai/belay/pkg/belay"
 )
 
 // runCLI executes the command tree the way a shell would, with both streams
 // captured.
 //
 // The command tree is a package-level singleton, because subcommands register
-// themselves through init(); flag values therefore outlive one invocation and
-// have to be reset by hand. Tests using it must not run in parallel.
+// themselves through init(); flag values therefore outlive one invocation.
+// runCLI puts every flag in the tree back to its default first, so a command
+// or flag added later is covered without editing this helper. Tests using it
+// must not run in parallel.
 func runCLI(t *testing.T, args ...string) (stdout, stderr string, err error) {
 	t.Helper()
 
-	rootFlags.configPath, rootFlags.verbose, rootFlags.noColor, rootFlags.dryRun = "", false, false, false
-	rootFlags.workspace, runFlags.cassette = ".", ""
+	resetFlags(t, rootCmd)
 
 	var out, errOut bytes.Buffer
 	rootCmd.SetOut(&out)
@@ -40,18 +48,46 @@ func runCLI(t *testing.T, args ...string) (stdout, stderr string, err error) {
 		rootCmd.SetArgs(nil)
 	})
 
-	resetHelpFlags()
 	err = rootCmd.Execute()
 	return out.String(), errOut.String(), err
 }
 
-// resetHelpFlags clears the --help flag cobra sets on whichever command last
-// printed help. Without it, one `belay run --help` in a test file turns every
-// later invocation into another help screen.
-func resetHelpFlags() {
-	for _, cmd := range append([]*cobra.Command{rootCmd}, rootCmd.Commands()...) {
-		_ = cmd.Flags().Set("help", "false")
+// resetFlags sets every flag of cmd and of every command under it back to its
+// default, and forgets that it was set. That includes the --help flag cobra
+// adds to whichever command last printed help, which would otherwise turn
+// every later invocation into another help screen.
+func resetFlags(t *testing.T, cmd *cobra.Command) {
+	t.Helper()
+	reset := func(f *pflag.Flag) {
+		if err := setToDefault(f); err != nil {
+			t.Fatalf("reset --%s on %q to %q: %v", f.Name, cmd.Name(), f.DefValue, err)
+		}
+		f.Changed = false
 	}
+	cmd.PersistentFlags().VisitAll(reset)
+	cmd.Flags().VisitAll(reset)
+	for _, sub := range cmd.Commands() {
+		resetFlags(t, sub)
+	}
+}
+
+// setToDefault sets f to its DefValue. A list flag needs Replace: its Set
+// appends once the flag has been set, so setting the default would add the
+// defaults to what the last invocation left.
+func setToDefault(f *pflag.Flag) error {
+	list, ok := f.Value.(pflag.SliceValue)
+	if !ok {
+		return f.Value.Set(f.DefValue)
+	}
+	inner := strings.TrimSuffix(strings.TrimPrefix(f.DefValue, "["), "]")
+	if inner == "" {
+		return list.Replace(nil)
+	}
+	values, err := csv.NewReader(strings.NewReader(inner)).Read()
+	if err != nil {
+		return err
+	}
+	return list.Replace(values)
 }
 
 // assertPlainText is the non-TTY contract: piping belay anywhere must produce
@@ -60,6 +96,61 @@ func assertPlainText(t *testing.T, label, s string) {
 	t.Helper()
 	if strings.ContainsRune(s, '\x1b') {
 		t.Errorf("%s contains an ANSI escape sequence; output to a non-terminal must be plain:\n%q", label, s)
+	}
+}
+
+// TestRunCLIStartsEachInvocationFromTheDefaults pins runCLI's promise to
+// every test that uses it: a flag one invocation sets does not carry into
+// the next, whichever command owns the flag. The command tree is one
+// package-level value, so without the reset a --json from one test would
+// silently change the output of the next.
+func TestRunCLIStartsEachInvocationFromTheDefaults(t *testing.T) {
+	ws := t.TempDir()
+
+	asJSON, _, err := runCLI(t, "runs", "--workspace", ws, "--json")
+	if err != nil {
+		t.Fatalf("belay runs --json: %v", err)
+	}
+	if !strings.HasPrefix(strings.TrimSpace(asJSON), "{") {
+		t.Fatalf("belay runs --json did not print JSON, so this test proves nothing:\n%s", asJSON)
+	}
+
+	plain, _, err := runCLI(t, "runs", "--workspace", ws)
+	if err != nil {
+		t.Fatalf("belay runs: %v", err)
+	}
+	if strings.HasPrefix(strings.TrimSpace(plain), "{") {
+		t.Errorf("--json from the previous invocation carried into this one:\n%s", plain)
+	}
+}
+
+// TestSetToDefaultRestoresAListFlag covers the flag kind whose Set appends
+// once the flag has been set, so that setting its default would keep what
+// the last invocation left. No command has a list flag yet; runCLI must not
+// start leaking one when a command does.
+func TestSetToDefaultRestoresAListFlag(t *testing.T) {
+	tests := []struct {
+		name     string
+		defaults []string
+	}{
+		{name: "empty default", defaults: []string{}},
+		{name: "default with values", defaults: []string{"a", "b,c"}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			flags := pflag.NewFlagSet("test", pflag.ContinueOnError)
+			got := flags.StringSlice("names", tt.defaults, "")
+			if err := flags.Parse([]string{"--names", "x", "--names", "y"}); err != nil {
+				t.Fatalf("parse: %v", err)
+			}
+
+			if err := setToDefault(flags.Lookup("names")); err != nil {
+				t.Fatalf("setToDefault: %v", err)
+			}
+			if !slices.Equal(*got, tt.defaults) {
+				t.Errorf("--names = %q after reset, want its default %q", *got, tt.defaults)
+			}
+		})
 	}
 }
 
@@ -79,11 +170,17 @@ func TestRunHelpReadsAsEnglish(t *testing.T) {
 		"belay resume",
 		"--dry-run",
 		"without creating anything or spending anything",
+		// The write step records the files the agent changed; the agent
+		// has already saved them (internal/nodes/write).
+		"records which files it changed",
 	}
 	for _, phrase := range want {
 		if !strings.Contains(out, phrase) {
 			t.Errorf("belay run --help never mentions %q", phrase)
 		}
+	}
+	if strings.Contains(out, "saves the files") {
+		t.Error(`belay run --help says belay "saves the files"; the agent edits them in place, and belay only records them`)
 	}
 }
 
@@ -99,10 +196,96 @@ func TestResumeHelpReadsAsEnglish(t *testing.T) {
 		"says which one it picked",
 		"resuming is how you approve",
 		"belay runs",
+		// belay run --help promises that a run stopped with Ctrl-C is
+		// picked up by resume; resume's own help must agree.
+		"Ctrl-C",
+		"runs that step again",
+		// A run whose manifest.json belay cannot read is reported, not
+		// hidden: named, belay says what is wrong with it and where it is;
+		// unnamed, belay passes over it rather than refusing to choose.
+		"damaged",
+		"says what is wrong with it",
+		"passes over it",
 	} {
 		if !strings.Contains(out, phrase) {
 			t.Errorf("belay resume --help never mentions %q", phrase)
 		}
+	}
+}
+
+// TestReadmeDryRunExampleIsWhatADryRunPrints keeps README.md's dry-run
+// "Example output" exactly what `belay run --dry-run` prints for the
+// belay.yaml the quickstart tells a person to paste, read from the README
+// itself, with the API key its third step sets. The example once showed
+// 1,000,000 tokens and 5 turns a step, a line belay never printed, and none
+// of the lines saying what reaching the ceiling does or when belay gives up,
+// while belay printed the defaults, 2,000,000 and 30.
+//
+// Nothing about the machine reaches the output: the workspace is a temporary
+// directory, printed as /path/to/your/project; XDG_CONFIG_HOME points at an
+// empty directory, so no user config is read; and the credentials line and
+// its warning read only whether each variable is set, which this test sets.
+//
+// Regenerate the example with -update (see updateReadme), never by hand.
+func TestReadmeDryRunExampleIsWhatADryRunPrints(t *testing.T) {
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	t.Setenv(anthropicKeyEnv, "sk-ant-readme-example")
+	t.Setenv(claudeOAuthTokenEnv, "")
+	t.Setenv(sonarTokenEnv, "")
+
+	path := filepath.Join("..", "..", "README.md")
+	raw, err := os.ReadFile(path) //nolint:gosec // this repository's own README, at a fixed relative path
+	if err != nil {
+		t.Fatalf("read README.md: %v", err)
+	}
+	readme := string(raw)
+
+	const goal = "add a --json flag to the CLI output"
+	if !strings.Contains(readme, `belay run --dry-run "`+goal+`"`) {
+		t.Fatalf("README.md no longer runs belay run --dry-run %q; the example below it would describe a different goal", goal)
+	}
+	_, quickstart, found := strings.Cut(readme, "### 2. Create a belay.yaml")
+	if !found {
+		t.Fatal(`README.md has no "### 2. Create a belay.yaml" section to take the configuration from`)
+	}
+	_, quickstart, found = strings.Cut(quickstart, "```yaml\n")
+	if !found {
+		t.Fatal("README.md's belay.yaml step has no yaml block")
+	}
+	config, _, found := strings.Cut(quickstart, "```\n")
+	if !found {
+		t.Fatal("README.md's belay.yaml block has no closing fence")
+	}
+
+	ws := goWorkspace(t)
+	writeConfig(t, ws, config)
+	out, _, err := runCLI(t, "run", "--dry-run", "--workspace", ws, goal)
+	if err != nil {
+		t.Fatalf("belay run --dry-run with the README's belay.yaml: %v\n%s", err, out)
+	}
+	printed := strings.ReplaceAll(out, ws, "/path/to/your/project")
+
+	const opening = "Example output:\n\n```\n"
+	head, rest, found := strings.Cut(readme, opening)
+	if !found {
+		t.Fatalf("README.md has no %q block", strings.TrimSpace(opening))
+	}
+	example, tail, found := strings.Cut(rest, "```\n")
+	if !found {
+		t.Fatal("README.md's example dry-run output has no closing fence")
+	}
+
+	if *updateReadme {
+		// #nosec G703 -- path is the constant relative path to this
+		// repository's own README, and -update is a maintainer's flag.
+		if err := os.WriteFile(path, []byte(head+opening+printed+"```\n"+tail), 0o600); err != nil {
+			t.Fatalf("rewrite README.md: %v", err)
+		}
+		t.Log("README.md's example dry-run output rewritten from what belay run --dry-run prints")
+		return
+	}
+	if diff := cmp.Diff(printed, example); diff != "" {
+		t.Errorf("README.md's example is not what belay run --dry-run prints (-printed +README):\n%s", diff)
 	}
 }
 
@@ -145,6 +328,70 @@ func TestDryRunCreatesNothing(t *testing.T) {
 		if !strings.Contains(out, phrase) {
 			t.Errorf("the dry run never says %q; got:\n%s", phrase, out)
 		}
+	}
+}
+
+// TestDryRunWithApprovalOffShowsTheRouteWithoutTheGate: a dry run prints the
+// walk the run really takes, and with graph.approval false the plan node
+// routes straight to code, so the gate is not on it. Printing it there
+// contradicted the line underneath, which says belay will not stop.
+func TestDryRunWithApprovalOffShowsTheRouteWithoutTheGate(t *testing.T) {
+	ws := goWorkspace(t)
+	writeConfig(t, ws, "version: 1\ngraph:\n  approval: false\n")
+
+	out, _, err := runCLI(t, "--dry-run", "run", "--workspace", ws, "add tests")
+	if err != nil {
+		t.Fatalf("belay --dry-run run: %v\n%s", err, out)
+	}
+	const want = "plan → code → write → test → fix → review → done"
+	if !strings.Contains(out, want) {
+		t.Errorf("the dry run never says %q; got:\n%s", want, out)
+	}
+	if !strings.Contains(out, "graph.approval is false") {
+		t.Errorf("the dry run should still explain why there is no gate; got:\n%s", out)
+	}
+}
+
+// TestDryRunSaysFanoutDoesNothingYet: fanout.enabled is a setting belay
+// accepts and acts on in no way at all — no step of the graph leads to the
+// fanout node, so a run never reaches it. Someone who turned it on is
+// expecting N attempts and paying attention to the cost; a dry run that says
+// nothing lets them believe they are getting them.
+func TestDryRunSaysFanoutDoesNothingYet(t *testing.T) {
+	tests := []struct {
+		name    string
+		config  string
+		wantSay bool
+	}{
+		{
+			name:    "fanout enabled",
+			config:  "version: 1\nfanout:\n  enabled: true\n  candidates: 3\n",
+			wantSay: true,
+		},
+		{name: "fanout left alone", config: "version: 1\n"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ws := goWorkspace(t)
+			writeConfig(t, ws, tt.config)
+
+			out, _, err := runCLI(t, "--dry-run", "run", "--workspace", ws, "add tests")
+			if err != nil {
+				t.Fatalf("belay --dry-run run: %v\n%s", err, out)
+			}
+			const phrase = "fanout.enabled is true"
+			if said := strings.Contains(out, phrase); said != tt.wantSay {
+				t.Errorf("the dry run says %q: %v, want %v; got:\n%s", phrase, said, tt.wantSay, out)
+			}
+			if !tt.wantSay {
+				return
+			}
+			for _, want := range []string{"worth knowing", "nothing runs the candidates", "ADR-0019"} {
+				if !strings.Contains(out, want) {
+					t.Errorf("the warning never says %q; got:\n%s", want, out)
+				}
+			}
+		})
 	}
 }
 
@@ -256,6 +503,128 @@ func TestRunArgumentErrors(t *testing.T) {
 	}
 }
 
+// TestCreateRunLaysDownTheRunItWasAskedFor pins createRun's promise to its
+// caller: the run it makes is under the workspace and id the caller chose,
+// the dispatcher can load both of its files, and belay resume can find it.
+func TestCreateRunLaysDownTheRunItWasAskedFor(t *testing.T) {
+	ws := goWorkspace(t)
+	plan, err := resolve(resolveRequest{workspace: ws, logger: quietLogger()})
+	if err != nil {
+		t.Fatalf("resolve: %v", err)
+	}
+	const runID = "20260905T120000Z-abcdef123456"
+
+	store, err := createRun(plan, runSpec{Workspace: ws, RunID: runID, Goal: "add tests"})
+	if err != nil {
+		t.Fatalf("createRun: %v", err)
+	}
+	if store == nil {
+		t.Fatal("createRun returned no store and no error")
+	}
+	if got := store.Layout().RunID(); got != runID {
+		t.Errorf("run id = %q, want the one the caller chose, %q", got, runID)
+	}
+
+	manifest, err := store.LoadManifest()
+	if err != nil {
+		t.Fatalf("load manifest: %v", err)
+	}
+	if manifest.RunID != runID || manifest.Workspace != ws || manifest.Goal != "add tests" {
+		t.Errorf("manifest names run %q in %q for %q, want run %q in %q for %q",
+			manifest.RunID, manifest.Workspace, manifest.Goal, runID, ws, "add tests")
+	}
+	blackboard, err := store.LoadState()
+	if err != nil {
+		t.Fatalf("load state: %v", err)
+	}
+	if blackboard.Goal != "add tests" {
+		t.Errorf("state goal = %q, want %q", blackboard.Goal, "add tests")
+	}
+
+	chosen, err := chooseRun(ws, "")
+	if err != nil {
+		t.Fatalf("belay resume cannot find the run createRun made: %v", err)
+	}
+	if chosen.id != runID {
+		t.Errorf("belay resume chose %q, want %q", chosen.id, runID)
+	}
+}
+
+// TestCreateRunWritesTheManifestLast closes the window between run
+// creation's two writes. A manifest is what makes a directory a run: belay
+// resume and belay runs read manifest.json and nothing else. Each row puts a
+// directory where one of the two files must go, so writing it fails, and
+// checks that nothing which looks for runs takes what is left for one. The
+// idea is slice 3's (design:replay-queue), which found the bug.
+//
+// Each row then takes the obstacle away and creates the same run again, which
+// must succeed: a caller that retries after a failure converges on one whole
+// run rather than being stuck with half of one.
+func TestCreateRunWritesTheManifestLast(t *testing.T) {
+	tests := []struct {
+		name    string
+		blocked func(state.Layout) string
+	}{
+		{name: "state.json cannot be written", blocked: state.Layout.StatePath},
+		{name: "manifest.json cannot be written", blocked: state.Layout.ManifestPath},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			ws := goWorkspace(t)
+			plan, err := resolve(resolveRequest{workspace: ws, logger: quietLogger()})
+			if err != nil {
+				t.Fatalf("resolve: %v", err)
+			}
+			const runID = "20260905T120000Z-abcdef123456"
+			spec := runSpec{Workspace: ws, RunID: runID, Goal: "add tests"}
+			layout, err := state.NewLayout(ws, runID)
+			if err != nil {
+				t.Fatalf("state.NewLayout: %v", err)
+			}
+			obstacle := tc.blocked(layout)
+			if err := os.MkdirAll(obstacle, 0o750); err != nil {
+				t.Fatalf("put a directory at %s: %v", obstacle, err)
+			}
+
+			if _, err := createRun(plan, spec); err == nil {
+				t.Fatalf("createRun succeeded with a directory at %s", obstacle)
+			}
+
+			if _, err := state.LoadManifest(layout.ManifestPath()); err == nil {
+				t.Error("createRun failed but left a readable manifest.json, which makes the half-made directory look like a run")
+			}
+			if chosen, err := chooseRun(ws, ""); err == nil {
+				t.Errorf("belay resume would continue %s, a run that was never finished being made", chosen.id)
+			}
+			listed, err := ScanRuns(ws)
+			if err != nil {
+				t.Fatalf("ScanRuns: %v", err)
+			}
+			for _, s := range listed {
+				if s.RunID == runID && (!s.Unreadable || s.Resumable) {
+					t.Errorf("belay runs lists %s as a %s run (resumable %v); it may only report a damaged directory",
+						runID, s.Status, s.Resumable)
+				}
+			}
+
+			if err := os.Remove(obstacle); err != nil {
+				t.Fatalf("remove %s: %v", obstacle, err)
+			}
+			store, err := createRun(plan, spec)
+			if err != nil {
+				t.Fatalf("createRun again, with nothing in the way: %v", err)
+			}
+			if _, err := store.LoadState(); err != nil {
+				t.Errorf("the retried run has no state: %v", err)
+			}
+			if chosen, err := chooseRun(ws, ""); err != nil || chosen.id != runID {
+				t.Errorf("belay resume after the retry chose (%q, %v), want %q", chosen.id, err, runID)
+			}
+		})
+	}
+}
+
 func TestReportOutcomeMapsExitCodesAndExplainsItself(t *testing.T) {
 	layout, err := state.NewLayout(t.TempDir(), "20260905T120000Z-abcdef123456")
 	if err != nil {
@@ -263,11 +632,12 @@ func TestReportOutcomeMapsExitCodesAndExplainsItself(t *testing.T) {
 	}
 
 	tests := []struct {
-		name     string
-		outcome  graph.Outcome
-		runErr   error
-		wantCode int
-		wantSaid []string
+		name        string
+		outcome     graph.Outcome
+		runErr      error
+		wantCode    int
+		wantSaid    []string
+		wantNotSaid []string
 	}{
 		{
 			name:     "completed",
@@ -300,6 +670,24 @@ func TestReportOutcomeMapsExitCodesAndExplainsItself(t *testing.T) {
 			wantSaid: []string{"This run is waiting for you", "belay resume 20260905T120000Z-abcdef123456"},
 		},
 		{
+			// Ctrl-C with belay run and belay resume: the run is paused at
+			// the step it was in, which is not a request to read the plan.
+			name: "interrupted by Ctrl-C says how to pick it up again",
+			outcome: graph.Outcome{
+				Status: state.RunStatusPaused, ExitCode: graph.ExitAborted,
+				Node: graph.NodeCode, Steps: 3,
+			},
+			runErr:   fmt.Errorf("%w: at %q: %w", graph.ErrInterrupted, graph.NodeCode, context.Canceled),
+			wantCode: graph.ExitAborted,
+			wantSaid: []string{
+				"belay stopped because you asked it to",
+				"code — asking the agent to write the change",
+				"pick up where it stopped with:",
+				"belay resume 20260905T120000Z-abcdef123456",
+			},
+			wantNotSaid: []string{"read the plan", "plan.md"},
+		},
+		{
 			name: "failed",
 			outcome: graph.Outcome{
 				Status: state.RunStatusFailed, ExitCode: graph.ExitFailed,
@@ -310,6 +698,24 @@ func TestReportOutcomeMapsExitCodesAndExplainsItself(t *testing.T) {
 			wantSaid: []string{"could not finish", "review — running the quality gate", "belay timeline"},
 		},
 		{
+			// The write step reads the workspace and never changes it
+			// (internal/nodes/write): the agent has already edited the
+			// files in place. Saying it saves them into the repository
+			// tells a person the change landed at a step it did not.
+			name: "failed at the write step",
+			outcome: graph.Outcome{
+				Status: state.RunStatusFailed, ExitCode: graph.ExitFailed,
+				Node: graph.NodeWrite, Steps: 4,
+			},
+			runErr:      graph.ErrNodeFailed,
+			wantCode:    graph.ExitFailed,
+			wantSaid:    []string{"write — checking the files the agent reported changing, and recording them"},
+			wantNotSaid: []string{"saving", "into your repository"},
+		},
+		{
+			// A run that ended as aborted cannot be resumed: belay resume
+			// refuses it as "already stopped for good". So the report must
+			// not offer the command, but say what to do instead.
 			name: "aborted by the step cap",
 			outcome: graph.Outcome{
 				Status: state.RunStatusAborted, ExitCode: graph.ExitAborted,
@@ -317,7 +723,42 @@ func TestReportOutcomeMapsExitCodesAndExplainsItself(t *testing.T) {
 			},
 			runErr:   graph.ErrMaxSteps,
 			wantCode: graph.ExitAborted,
-			wantSaid: []string{"stopped itself", "kept going round without finishing", "graph.max_steps"},
+			wantSaid: []string{
+				"stopped itself", "kept going round without finishing", "graph.max_steps",
+				"this run has ended", `belay run "what you want built"`,
+			},
+			wantNotSaid: []string{"belay resume"},
+		},
+		{
+			name: "aborted by the node timeout",
+			outcome: graph.Outcome{
+				Status: state.RunStatusAborted, ExitCode: graph.ExitAborted,
+				Node: graph.NodeTest, Steps: 5,
+			},
+			runErr:   graph.ErrNodeTimeout,
+			wantCode: graph.ExitAborted,
+			wantSaid: []string{
+				"graph.node_timeout", "this run has ended", `belay run "what you want built"`,
+			},
+			wantNotSaid: []string{"belay resume"},
+		},
+		{
+			// The same shape as the step cap and the timeout: which setting
+			// stopped the run, and the command that starts the next one.
+			// Either budget ceiling ends a run with the same error, so both
+			// settings are named.
+			name: "aborted by the budget ceiling",
+			outcome: graph.Outcome{
+				Status: state.RunStatusAborted, ExitCode: graph.ExitAborted,
+				Node: graph.NodeFix, Steps: 9,
+			},
+			runErr:   fmt.Errorf("graph: budget ceiling reached before %q: %w", graph.NodeFix, &belay.BudgetError{SpentUSD: 5.02, LimitUSD: 5}),
+			wantCode: graph.ExitAborted,
+			wantSaid: []string{
+				"stopped itself", "budget ceiling", "this run has ended",
+				"budget.max_usd", "budget.max_tokens", `belay run "what you want built"`,
+			},
+			wantNotSaid: []string{"belay resume"},
 		},
 		{
 			name: "aborted with no resume point",
@@ -335,7 +776,7 @@ func TestReportOutcomeMapsExitCodesAndExplainsItself(t *testing.T) {
 			var out bytes.Buffer
 			u := &ui{out: &out, err: &out}
 
-			err := reportOutcome(u, layout, tc.outcome, tc.runErr)
+			err := reportOutcome(u, outcomeView{layout: layout, outcome: tc.outcome, runErr: tc.runErr})
 
 			switch {
 			case tc.wantCode == graph.ExitOK && err != nil:
@@ -355,6 +796,11 @@ func TestReportOutcomeMapsExitCodesAndExplainsItself(t *testing.T) {
 			for _, phrase := range tc.wantSaid {
 				if !strings.Contains(got, phrase) {
 					t.Errorf("report never says %q; got:\n%s", phrase, got)
+				}
+			}
+			for _, phrase := range tc.wantNotSaid {
+				if strings.Contains(got, phrase) {
+					t.Errorf("report says %q, which is not what happened; got:\n%s", phrase, got)
 				}
 			}
 			// Nothing a person cannot act on.
@@ -608,5 +1054,190 @@ func TestDriveRunResumesPastTheApprovalGate(t *testing.T) {
 		if !strings.Contains(got, phrase) {
 			t.Errorf("the resume never says %q; got:\n%s", phrase, got)
 		}
+	}
+}
+
+// routesTo is a node that succeeds and hands the run to next.
+type routesTo struct{ name, next string }
+
+func (n routesTo) Name() string { return n.name }
+
+func (n routesTo) Run(context.Context, *graph.RunContext) (graph.Result, error) {
+	return graph.Result{Status: journal.StatusOK, Next: n.next}, nil
+}
+
+// TestCtrlCLeavesARunBelayResumeContinues is the promise belay run --help
+// makes: "Press Ctrl-C whenever you like: the run stops, its state stays, and
+// belay resume picks it up from the last completed step."
+//
+// The run is interrupted while code runs, after plan has finished. belay
+// exits as a Ctrl-C always has, and says how to pick the run up. belay resume
+// then chooses the run, by id and by default, and continues it: code runs
+// again, and plan does not.
+func TestCtrlCLeavesARunBelayResumeContinues(t *testing.T) {
+	ws := goWorkspace(t)
+	var out bytes.Buffer
+	u := &ui{out: &out, err: &out}
+
+	plan, err := resolve(resolveRequest{workspace: ws, logger: newLogger(u)})
+	if err != nil {
+		t.Fatalf("resolve: %v", err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	interrupted := graph.NewRegistry()
+	interrupted.MustRegister(
+		routesTo{name: graph.NodePlan, next: graph.NodeCode},
+		pressesCtrlC{name: graph.NodeCode, cancel: cancel},
+	)
+	plan.registry = interrupted
+	store := seedRunDir(t, plan, "add tests")
+	runID := store.Layout().RunID()
+
+	cmd := &cobra.Command{}
+	cmd.SetContext(ctx)
+	err = driveRun(cmd, u, plan, store, false)
+	var exit *ExitError
+	if !errors.As(err, &exit) || exit.Code != graph.ExitAborted {
+		t.Fatalf("driveRun = %v, want an ExitError with the exit code a Ctrl-C has always had, %d", err, graph.ExitAborted)
+	}
+	got := out.String()
+	t.Logf("verbatim output after Ctrl-C:\n%s", got)
+	for _, phrase := range []string{
+		"belay stopped because you asked it to",
+		"pick up where it stopped with:",
+		"belay resume " + runID,
+	} {
+		if !strings.Contains(got, phrase) {
+			t.Errorf("after Ctrl-C belay never says %q; got:\n%s", phrase, got)
+		}
+	}
+
+	for _, id := range []string{runID, ""} {
+		chosen, err := chooseRun(ws, id)
+		if err != nil {
+			t.Fatalf("chooseRun(%q) = %v, want the interrupted run: its next step is belay resume", id, err)
+		}
+		if chosen.id != runID {
+			t.Errorf("chooseRun(%q) chose %s, want %s", id, chosen.id, runID)
+		}
+	}
+
+	// belay resume, with a context nobody cancels.
+	reached := false
+	finishing := graph.NewRegistry()
+	finishing.MustRegister(
+		routesTo{name: graph.NodePlan, next: graph.NodeCode},
+		endsTheRun{reached: &reached},
+	)
+	plan.registry = finishing
+	out.Reset()
+	cmd.SetContext(context.Background())
+	if err := driveRun(cmd, u, plan, store, true); err != nil {
+		t.Fatalf("resume: %v", err)
+	}
+	got = out.String()
+	t.Logf("verbatim resume output:\n%s", got)
+	if !reached {
+		t.Error("resuming must run the step Ctrl-C interrupted")
+	}
+	for _, phrase := range []string{"→ code", "attempt 2", "belay finished"} {
+		if !strings.Contains(got, phrase) {
+			t.Errorf("the resume never says %q; got:\n%s", phrase, got)
+		}
+	}
+	if strings.Contains(got, "→ plan") {
+		t.Errorf("the resume ran plan again, which finished before Ctrl-C; got:\n%s", got)
+	}
+}
+
+// finishes is a node that ends the run the moment it runs.
+type finishes struct{ name string }
+
+func (n finishes) Name() string { return n.name }
+
+func (finishes) Run(context.Context, *graph.RunContext) (graph.Result, error) {
+	return graph.Result{Status: journal.StatusOK, Next: graph.End, Note: "done"}, nil
+}
+
+// TestDispatchOnceAppliesEachOptionsChange pins the seam a caller uses to
+// dispatch a run differently from belay run and belay resume: every change
+// it passes reaches the dispatcher, in the order it was passed, on top of the
+// Options every run shares.
+func TestDispatchOnceAppliesEachOptionsChange(t *testing.T) {
+	ws := goWorkspace(t)
+	plan, err := resolve(resolveRequest{workspace: ws, logger: quietLogger()})
+	if err != nil {
+		t.Fatalf("resolve: %v", err)
+	}
+	reached := false
+	shared := graph.NewRegistry()
+	shared.MustRegister(planWriter{body: "# Plan\n\nwrite a test\n"}, approve.New(), endsTheRun{reached: &reached})
+	plan.registry = shared
+	store := seedRunDir(t, plan, "add tests")
+
+	// The first change swaps in a graph that ends at its first node; the
+	// second sees what the first did, which is only so if they run in order.
+	short := graph.NewRegistry()
+	short.MustRegister(finishes{name: graph.NodePlan})
+	var secondSaw *graph.Registry
+	view, err := dispatchOnce(context.Background(), plan, store, false,
+		func(o *graph.Options) { o.Registry = short },
+		func(o *graph.Options) { secondSaw = o.Registry },
+	)
+	if err != nil {
+		t.Fatalf("dispatchOnce: %v", err)
+	}
+
+	if view.outcome.Status != state.RunStatusCompleted || view.outcome.Steps != 1 {
+		t.Errorf("outcome = %+v (error %v), want the changed graph to complete in one step",
+			view.outcome, view.runErr)
+	}
+	if secondSaw != short {
+		t.Error("the second change did not see the first change's registry; changes must apply in order")
+	}
+	if view.layout.RunID() != store.Layout().RunID() {
+		t.Errorf("view names run %q, want %q", view.layout.RunID(), store.Layout().RunID())
+	}
+	if plan.registry != shared {
+		t.Error("a change for one dispatch leaked into the plan every later dispatch is built from")
+	}
+}
+
+// TestAfterCompletionCannotChangeTheExitStatus pins afterCompletion's
+// contract with a step that fails: the recording cannot be saved, because
+// its directory would have to go where a file already is. belay says so on
+// stderr, still reports the run, and exits as the run ended, which here is a
+// pause and therefore success.
+func TestAfterCompletionCannotChangeTheExitStatus(t *testing.T) {
+	ws := goWorkspace(t)
+	writeConfig(t, ws, "version: 1\nagent:\n  mode: record\n")
+	var out, errOut bytes.Buffer
+	u := &ui{out: &out, err: &errOut}
+	unwritable := filepath.Join(ws, "go.mod", "cassette.json")
+
+	plan, err := resolve(resolveRequest{workspace: ws, logger: newLogger(u), cassette: unwritable})
+	if err != nil {
+		t.Fatalf("resolve: %v", err)
+	}
+	if plan.recorder == nil {
+		t.Fatal("agent.mode record did not arm the recorder, so this test would save nothing")
+	}
+	reached := false
+	registry := graph.NewRegistry()
+	registry.MustRegister(planWriter{body: "# Plan\n\nwrite a test\n"}, approve.New(), endsTheRun{reached: &reached})
+	plan.registry = registry
+	store := seedRunDir(t, plan, "add tests")
+
+	cmd := &cobra.Command{}
+	cmd.SetContext(context.Background())
+	if err := driveRun(cmd, u, plan, store, false); err != nil {
+		t.Errorf("driveRun = %v, want nil: the run paused, and a failed save must not change that", err)
+	}
+	if !strings.Contains(errOut.String(), "belay cannot create the directory for "+unwritable) {
+		t.Errorf("stderr = %q, want it to say the recording was not saved", errOut.String())
+	}
+	if !strings.Contains(out.String(), "belay paused after 2 steps, and is waiting for you.") {
+		t.Errorf("the run was not reported after the failed save; stdout:\n%s", out.String())
 	}
 }

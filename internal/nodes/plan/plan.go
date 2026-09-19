@@ -168,7 +168,7 @@ func (*Node) Run(ctx context.Context, rc *graph.RunContext) (graph.Result, error
 		WorkDir:      workDir,
 		AllowedTools: readOnlyTools(),
 		MaxTurns:     rc.Config.Agent.MaxTurns,
-		Model:        rc.Config.Agent.Model,
+		Model:        rc.Config.Agent.ModelFor(graph.NodePlan),
 	}
 	if err := writeRequestEvidence(rc, req); err != nil {
 		return graph.Result{}, err
