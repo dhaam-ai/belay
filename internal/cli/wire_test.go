@@ -434,13 +434,13 @@ func seedRunDir(t *testing.T, plan *runPlan, goal string) *state.Store {
 	if err := os.MkdirAll(layout.ArtifactsDir(), 0o750); err != nil {
 		t.Fatalf("create run directory: %v", err)
 	}
+	if err := state.SaveState(layout.StatePath(), state.NewState(goal)); err != nil {
+		t.Fatalf("save state: %v", err)
+	}
 	now := time.Now().UTC()
 	if err := state.SaveManifest(layout.ManifestPath(),
 		state.NewManifest(now, runID, plan.workspace, goal, plan.config)); err != nil {
 		t.Fatalf("save manifest: %v", err)
-	}
-	if err := state.SaveState(layout.StatePath(), state.NewState(goal)); err != nil {
-		t.Fatalf("save state: %v", err)
 	}
 	return state.NewStore(layout)
 }

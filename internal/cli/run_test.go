@@ -303,6 +303,81 @@ func TestCreateRunLaysDownTheRunItWasAskedFor(t *testing.T) {
 	}
 }
 
+// TestCreateRunWritesTheManifestLast closes the window between run
+// creation's two writes. A manifest is what makes a directory a run: belay
+// resume and belay runs read manifest.json and nothing else. Each row puts a
+// directory where one of the two files must go, so writing it fails, and
+// checks that nothing which looks for runs takes what is left for one. The
+// idea is slice 3's (design:replay-queue), which found the bug.
+//
+// Each row then takes the obstacle away and creates the same run again, which
+// must succeed: a caller that retries after a failure converges on one whole
+// run rather than being stuck with half of one.
+func TestCreateRunWritesTheManifestLast(t *testing.T) {
+	tests := []struct {
+		name    string
+		blocked func(state.Layout) string
+	}{
+		{name: "state.json cannot be written", blocked: state.Layout.StatePath},
+		{name: "manifest.json cannot be written", blocked: state.Layout.ManifestPath},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			ws := goWorkspace(t)
+			plan, err := resolve(resolveRequest{workspace: ws, logger: quietLogger()})
+			if err != nil {
+				t.Fatalf("resolve: %v", err)
+			}
+			const runID = "20260905T120000Z-abcdef123456"
+			spec := runSpec{Workspace: ws, RunID: runID, Goal: "add tests"}
+			layout, err := state.NewLayout(ws, runID)
+			if err != nil {
+				t.Fatalf("state.NewLayout: %v", err)
+			}
+			obstacle := tc.blocked(layout)
+			if err := os.MkdirAll(obstacle, 0o750); err != nil {
+				t.Fatalf("put a directory at %s: %v", obstacle, err)
+			}
+
+			if _, err := createRun(plan, spec); err == nil {
+				t.Fatalf("createRun succeeded with a directory at %s", obstacle)
+			}
+
+			if _, err := state.LoadManifest(layout.ManifestPath()); err == nil {
+				t.Error("createRun failed but left a readable manifest.json, which makes the half-made directory look like a run")
+			}
+			if chosen, err := chooseRun(ws, ""); err == nil {
+				t.Errorf("belay resume would continue %s, a run that was never finished being made", chosen.id)
+			}
+			listed, err := ScanRuns(ws)
+			if err != nil {
+				t.Fatalf("ScanRuns: %v", err)
+			}
+			for _, s := range listed {
+				if s.RunID == runID && (!s.Unreadable || s.Resumable) {
+					t.Errorf("belay runs lists %s as a %s run (resumable %v); it may only report a damaged directory",
+						runID, s.Status, s.Resumable)
+				}
+			}
+
+			if err := os.Remove(obstacle); err != nil {
+				t.Fatalf("remove %s: %v", obstacle, err)
+			}
+			store, err := createRun(plan, spec)
+			if err != nil {
+				t.Fatalf("createRun again, with nothing in the way: %v", err)
+			}
+			if _, err := store.LoadState(); err != nil {
+				t.Errorf("the retried run has no state: %v", err)
+			}
+			if chosen, err := chooseRun(ws, ""); err != nil || chosen.id != runID {
+				t.Errorf("belay resume after the retry chose (%q, %v), want %q", chosen.id, err, runID)
+			}
+		})
+	}
+}
+
 func TestReportOutcomeMapsExitCodesAndExplainsItself(t *testing.T) {
 	layout, err := state.NewLayout(t.TempDir(), "20260905T120000Z-abcdef123456")
 	if err != nil {

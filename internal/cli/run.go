@@ -142,9 +142,28 @@ type runSpec struct {
 	Goal string
 }
 
-// createRun lays down the run directory, its manifest and its initial state.
-// It is the first thing in `belay run` that writes anything at all;
-// everything before it is resolution, which is what lets --dry-run stop here.
+// createRun lays down the run directory, its initial state and its manifest,
+// in that order. It is the first thing in `belay run` that writes anything at
+// all; everything before it is resolution, which is what lets --dry-run stop
+// here.
+//
+// The manifest goes last because writing it is what creates the run.
+// Everything that looks for runs reads manifest.json and nothing else: belay
+// resume chooses from the manifests it finds, and belay runs lists them. The
+// dispatcher, for its part, cannot continue a run without state.json. When
+// the manifest came first, a failure or a crash before state.json was written
+// left a manifest saying "running" over a run with no state: resume chose it,
+// and the dispatcher failed to load it. Now a failure or a crash anywhere
+// before the manifest leaves a directory without one, which resume never
+// chooses and belay runs reports as unreadable.
+//
+// createRun does not delete that directory when it fails. A crash leaves the
+// same directory with no chance to delete anything, so every reader must
+// already treat a directory without a manifest as not a run; deleting it on
+// the error path would add a way to remove files without sparing any reader
+// that work. Calling createRun again for the same run id converges instead:
+// it writes the state again, whole, then the manifest. It must not be called
+// for a run whose manifest exists, which it would start over.
 func createRun(plan *runPlan, spec runSpec) (*state.Store, error) {
 	layout, err := state.NewLayout(spec.Workspace, spec.RunID)
 	if err != nil {
@@ -155,13 +174,13 @@ func createRun(plan *runPlan, spec runSpec) (*state.Store, error) {
 		return nil, fmt.Errorf("cannot create the run directory %s: %w", layout.RunDir(), err)
 	}
 
+	if err := state.SaveState(layout.StatePath(), state.NewState(spec.Goal)); err != nil {
+		return nil, fmt.Errorf("cannot write %s: %w", layout.StatePath(), err)
+	}
 	now := time.Now().UTC()
 	manifest := state.NewManifest(now, spec.RunID, spec.Workspace, spec.Goal, plan.config)
 	if err := state.SaveManifest(layout.ManifestPath(), manifest); err != nil {
 		return nil, fmt.Errorf("cannot write %s: %w", layout.ManifestPath(), err)
-	}
-	if err := state.SaveState(layout.StatePath(), state.NewState(spec.Goal)); err != nil {
-		return nil, fmt.Errorf("cannot write %s: %w", layout.StatePath(), err)
 	}
 	return state.NewStore(layout), nil
 }

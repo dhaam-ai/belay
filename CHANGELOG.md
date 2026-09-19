@@ -25,6 +25,15 @@ that only `pkg/belay` carries a compatibility promise. Everything under
 
 ### Fixed
 
+- **A `belay run` that fails while creating its run no longer leaves a run
+  that `belay resume` picks up.** belay wrote the run's manifest.json before
+  its state.json. If writing state.json failed, or belay was killed between
+  the two, the manifest said the run was running: `belay resume` chose it
+  and then failed to load it, and `belay runs` listed it as resumable. belay
+  now writes state.json first and the manifest last, so a run exists only
+  once both files do. A run whose creation was cut short shows in
+  `belay runs` as unreadable, with no manifest.json, and `belay resume`
+  never offers it.
 - **The configuration reference now states the defaults and values belay
   actually uses.** docs/config.md had drifted on nine defaults, among them
   `agent.max_turns` (30, not 5), `graph.max_steps` (60, not 20),
