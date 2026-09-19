@@ -349,8 +349,8 @@ Every phase's result is persisted to an append-only journal *before* the next ph
 ### 2. Approval Gates
 The `approve` phase pauses the run after the agent writes a plan. You can read it, edit it, and decide whether to proceed. This stops a runaway agent before it writes code. Runs also pause if quality gates fail and manual review is needed.
 
-### 3. Best-of-N Candidates (Fanout)
-Enable `fanout` in belay.yaml to generate N code candidates in parallel, each in its own isolated workspace. The `join` phase ranks them by test pass rate, coverage, and cost, and returns the best one. This exploits agent variance to get higher quality output. (Currently disabled; joining is manual; see *Maturity & Limitations* below.)
+### 3. Best-of-N Candidates (Fanout) — not working yet
+The aim is to give one goal N independent candidates, each in its own workspace, and keep the best, so that the variance between agent runs works for you. Two pieces of that exist: a `fanout` node that prepares one workspace per candidate, and a `join` node that picks a winner among the candidates whose tests passed. No run reaches either one, and nothing runs the candidates. See *Maturity & Limitations* below.
 
 ### 4. CLI-Agnostic Orchestration
 The graph definition and all orchestration logic are independent of which agent backend you use. The `belay.AgentBackend` interface is public: you can implement Claude, Codex, Gemini, or your own LLM. The same belay workflow runs against any backend without code changes.
@@ -363,7 +363,7 @@ Every belay run reads `belay.yaml` from your project root (or via `--config <pat
 - **test**: auto-detect or custom test command
 - **review**: linter mode (local, SonarQube) or AI review
 - **budget**: spend ceiling in USD and tokens
-- **fanout**: enable parallel candidates
+- **fanout**: best-of-N candidates, which no run uses yet (see *Maturity & Limitations*)
 
 See `docs/config.md` for the complete reference, including examples.
 
@@ -396,7 +396,7 @@ belay is **early but real**. Use it for:
 
 3. **Unix only**: belay's process runner, linter launcher, and workspace isolation use unix-specific system calls. Windows and macOS 11 (Monterey) are not supported. (Contributions welcome.)
 
-4. **Fanout is disabled by default**: Parallel candidate generation works, but joining (choosing the best candidate and merging it back) is currently manual. Set `fanout.enabled: true` in belay.yaml to spawn candidates, then inspect `.belay/runs/<run-id>/candidates/` and manually copy the best one back. The automatic join phase is unimplemented. See ADR-0004.
+4. **Fanout does not work yet**: The `fanout` and `join` nodes exist and are unit-tested, but no run reaches them. No step in belay's graph leads to `fanout`, so setting `fanout.enabled: true` changes nothing a run does. `belay run` also sets up no isolator, which `fanout` needs. The `fanout` node only prepares candidates: it creates one workspace per candidate and runs none of them, so no candidate ever has test results. `join` picks a winner among the candidates whose tests passed and copies nothing back, so promoting the winner would be manual (ADR-0004). Running candidates is planned, and ADR-0019 is reserved for it.
 
 5. **No published fix rate**: belay has a test harness (`test/fixrate`) that measures "what percentage of runs result in code that passes tests and linting?" but no published number yet. We are working on benchmarks. Do not rely on any claimed success rate.
 
@@ -428,7 +428,7 @@ See `docs/adr/0009-record-replay-cassettes.md` for the cassette format.
 
 ### Roadmap
 
-- [ ] Implement the join phase (automatic best-candidate selection and merge-back)
+- [ ] Run fanout candidates (ADR-0019) and promote the winner automatically; `join` already selects one
 - [ ] Windows and macOS 11 support (process isolation)
 - [ ] Codex and Gemini backends (implement `AgentBackend` for each)
 - [ ] Published fix-rate benchmarks

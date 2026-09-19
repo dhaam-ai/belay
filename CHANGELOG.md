@@ -78,6 +78,16 @@ that only `pkg/belay` carries a compatibility promise. Everything under
   and flags override settings, when only a `--config` file does. Tests now
   check every documented setting's type, default and valid values against
   the code, and fail when a setting has no entry.
+- **The docs no longer say fanout works.** The README said parallel
+  candidate generation works and only merging the winner back was manual,
+  and docs/architecture.md said the fanout node runs each candidate from the
+  code step onward. Neither was true. The fanout and join nodes exist and
+  are unit-tested, but no step in belay's graph leads to fanout, so no run
+  reaches either one, and `fanout.enabled: true` changes nothing a run does.
+  The fanout node only prepares a workspace per candidate; nothing runs a
+  candidate. The README, docs/architecture.md and docs/troubleshooting.md
+  now say so. Running candidates is planned, and ADR-0019 is reserved for
+  it.
 
 ## v0.1.4 — 2026-09-17
 

@@ -142,19 +142,15 @@ With `budget.on_exceed: abort` the run has ended, and `belay resume` will not co
 
 **Note**: A step cut off part-way may already have spent money that the agent had not yet reported. The run's recorded cost leaves it out, as it does for a crash.
 
-## Fanout Refused
+## Fanout Does Nothing
 
-**Symptom**: Error message: "graph: fanout disabled" or "join is not implemented"
+**Symptom**: belay.yaml sets `fanout.enabled: true`, but the run never creates candidates: `belay timeline` shows no fanout or join step.
 
-**Cause**: Fanout (best-of-N candidates) is disabled in this version.
-
-**Diagnosis**:
-- Check config.Fanout.Enabled in belay.yaml (should be false)
-- Or the plan node returned Next="fanout" but fanout is disabled
+**Cause**: No run reaches fanout in this version. No step in belay's graph leads to the fanout node, whatever `fanout.enabled` says, and `belay run` sets up no isolator, which fanout needs. Even the fanout node only prepares candidate workspaces; nothing runs a candidate. This is a known limitation, not a configuration mistake.
 
 **Remedy**:
-- Fanout is currently disabled (see ADR-0004); do not configure code nodes to return Next="fanout"
-- In a future version when join is implemented, set config.Fanout.Enabled = true in belay.yaml
+- None yet. Running candidates is planned, and ADR-0019 is reserved for it
+- Leave `fanout.enabled` false. Setting it true changes nothing a run does; it only makes belay.yaml require `fanout.candidates` of at least 2
 
 ## SonarQube Connection Failed
 

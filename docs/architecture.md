@@ -4,15 +4,13 @@ Belay is a durable, resumable orchestrator for autonomous coding agents. This do
 
 ## Overview
 
-Belay runs a directed acyclic graph (DAG) of coding phases:
+Belay runs a graph of coding phases, in this order:
 
 ```
 plan -> approve -> code -> write -> test -> fix -> review
-  |
-  +-- (fanout with multiple candidates)
-  |
-  +-- (join: merge winning candidate)
 ```
+
+Failed tests and failed quality gates both route back through fix, so the graph has cycles, and a run whose tests and gate pass never runs fix. Two more nodes, fanout and join, exist for best-of-N candidates, but no node routes to fanout, so no run reaches either one (see Fanout/Join below).
 
 Each node in the graph is a pure function that returns a result; the dispatcher persists the result to an append-only journal. If belay crashes, the next invocation resumes from the last completed node.
 
@@ -20,7 +18,7 @@ The four product pillars are:
 
 1. **Durable + Resumable**: Crash-resume from the last completed node, not from the beginning.
 2. **Quality-Gated**: Code must pass linters (phase 6) or AI review (phase 7) before being marked done.
-3. **Best-of-N Candidates**: Fanout spawns N parallel code candidates; the graph selects the best one.
+3. **Best-of-N Candidates** (not working yet): The aim is for fanout to give one goal N candidates and keep the best. The fanout and join nodes exist, but no run reaches them and nothing runs a candidate (see Fanout/Join).
 4. **CLI-Agnostic**: Agent backend is pluggable (Claude Code in v0.1; Codex and Gemini via AgentBackend interface).
 
 ## Architecture Layers
@@ -62,7 +60,7 @@ The manifest is recomputed by replaying all journal records up to the resume poi
 - `Runner belay.TestRunner`: test execution
 - `Linter belay.Linter`: static analysis (golangci-lint, eslint, etc.)
 - `Reviewer belay.Reviewer`: quality gates (SonarQube, AI review, etc.)
-- `Isolator belay.Isolator`: workspace isolation
+- `Isolator belay.Isolator`: workspace isolation, used only by the fanout node; the CLI injects none
 
 All adapters are injected at dispatcher creation time, making the entire graph backend-agnostic (ADR-0005).
 
@@ -86,14 +84,13 @@ By applying first, a crash can leave an applied patch with no journal record (re
 
 **Graph Definition**: A directed graph defined in config, with nodes like plan, approve, code, write, test, fix, review and terminal node END. Edges enforce ordering (e.g., code must precede test). The dispatcher consults this to validate that a node's Next is reachable (see `internal/graph` node implementations).
 
-**Fanout/Join**: When a node returns Next="fanout":
-1. The dispatcher creates N isolated Workspaces (via Isolator.Create) for N candidates
-2. Each candidate runs its own subgraph in parallel (starting from code), independent
-3. All candidates complete, and their Results are collected
-4. A join node picks the best candidate (by gate status, then coverage, then cost)
-5. The winning candidate's state is merged back into the main tree, and execution continues
+**Fanout/Join**: The fanout and join nodes exist and are unit-tested (`internal/nodes/fanout`, `internal/nodes/join`), but no run reaches them:
+1. No node returns Next="fanout". `nodes.Default` registers fanout and join only when `fanout.enabled` is true, and even then `nodes.Route` leaves them off the route, so turning fanout on changes nothing a run does.
+2. The CLI passes the dispatcher no Isolator, and the fanout node refuses to run without one (`fanout.ErrNoIsolator`).
+3. Called directly, as its tests call it, the fanout node checks that the budget can cover N candidates, creates one workspace per candidate through the Isolator, one after another, records each as a `state.Candidate`, and routes to join. It runs no candidate: no code, test or review step happens in a candidate's workspace, so every candidate's `TestPassed` stays false.
+4. The join node picks a winner among the candidates whose tests passed, by the rule `fanout.select` names, records it in `state.Winner`, and ends the run. It copies nothing back: promotion is manual (ADR-0004). Given the candidates fanout records, it finds none that passed and reports no winner.
 
-Fanout is controlled by config.Fanout (currently disabled; see ADR-0004 for directory-copy implementation).
+Running candidates is planned, and ADR-0019 is reserved for it.
 
 ### Layer 4: Quality Gates & Budget
 
@@ -120,8 +117,7 @@ Usage.Estimated reports whether USD was computed from actual backend costs or es
 - `review`: quality-gate mode ("lint", "sonar-server", "sonar-docker"), severity thresholds (fail_on), budget limits
 - `runner`: test toolchain (auto-detected or explicit)
 - `graph`: node timeout, max retry attempts, max total steps
-- `fanout`: whether to enable best-of-N parallelism (currently disabled)
-- `isolator`: isolation mode ("copy" or "none")
+- `fanout`: best-of-N candidates, including `fanout.isolator`, whose only value is `dircopy`. No run reaches the fanout node, so none of these settings changes what a run does
 
 **CLI** (in cmd/ — not in scope for this task but referenced via internal/cli):
 - `belay run --config belay.yaml <repo>`: start a new run
@@ -138,10 +134,7 @@ Config Loader (belay.yaml)
   ↓
 Dispatcher (orchestrates graph)
   ├→ NodeFunc (plan)  → Result
-  ├→ NodeFunc (code)  → Result + Fanout
-  │  └→ Isolator (spawn N candidates)
-  │     └→ NodeFunc (code) × N  → Results
-  ├→ Merge (join candidates)
+  ├→ NodeFunc (code)  → Result
   ├→ NodeFunc (review)  → QualityReport
   ├→ BudgetLedger (track cost)
   └→ Journal (persist all records)
@@ -159,13 +152,13 @@ The run progresses through a directed graph of nodes (see `internal/graph/node.g
 
 - **plan** (Agent): Uses the agent to propose a plan from the goal. Returns a plan summary and branches to approve.
 - **approve** (Human Gate): Awaits human approval before proceeding. Returns paused if not approved, or continues to code.
-- **code** (Agent): Uses the agent to implement the plan. If fanout is enabled, branches to fanout; else proceeds to write.
+- **code** (Agent): Uses the agent to implement the plan. Branches to write.
 - **write** (Agent): Commits code changes (writes files, formats). Branches to test.
 - **test** (TestRunner): Executes the test suite. If all tests pass, branches to review; if any fail, branches to fix.
 - **fix** (Agent): Uses the agent to fix failing tests, and adds the files the repair reports changing to the run's list of changed files (state.Code.ChangedFiles). Branches back to test (bounded by attempt counter graph.give_up to prevent infinite loops).
 - **review** (Linter or Reviewer): Runs static analysis or AI review. If gate passes, branches to END; if gate fails, branches to fix.
-- **fanout** (Isolator): Creates N isolated workspaces and runs each from code onward in parallel. Branches to join.
-- **join** (Merge): Selects the best candidate (by gate, coverage, cost) and merges back to main. Branches to review. **Note**: join is not implemented; fanout is disabled (ADR-0004).
+- **fanout** (Isolator): Creates one isolated workspace per candidate, one after another, and records them. It runs none of them. Branches to join. No node branches to fanout, so no run reaches it.
+- **join**: Picks a winner among the candidates whose tests passed, by `fanout.select`, and records it in state.Winner. It copies nothing back; promotion is manual (ADR-0004). Branches to END, or fails the run when no candidate passed. Only fanout branches to join, so no run reaches it either.
 
 **Terminal States**:
 - StatusOK with Next="END": run completed successfully
@@ -181,15 +174,9 @@ If a node returns an error or an invalid Result, the dispatcher stops the run an
 - `Create(ctx, src, id string) (Workspace, error)`: Copy or prepare a workspace from src, identified by id. Returns a Workspace{ID, Dir, Ephemeral}.
 - `Destroy(ctx, Workspace) error`: Clean up the workspace. Must idempotently handle a Workspace decoded from the journal after a process restart.
 
-**Current Implementation** (ADR-0004): Plain directory copies via `cp -r` (see `internal/isolate/copy.go`). Each candidate gets its own directory under `.belay/runs/<run-id>/candidates/<candidate-id>/`. Fanout is currently disabled (config.Fanout.Enabled = false); future implementations could use git worktrees or containers.
+**Current Implementation** (ADR-0004): Plain directory copies (see `internal/isolate/dircopy`), which leave out `.git`, `node_modules`, `vendor` and similar directories (`dircopy.DefaultSkip`). It is unit-tested, but nothing in belay constructs it yet, so no run creates a candidate workspace. Future implementations could use git worktrees or containers.
 
-**Merge Back Algorithm**: After all candidates finish, the join node (not yet implemented) would:
-1. Score each candidate (gate status, coverage, cost)
-2. Select the best one
-3. Copy its modified files back to the main repository
-4. Continue execution from the main tree
-
-Because the current implementation is disabled, this logic is a placeholder (see `internal/graph` for merge-back stub).
+**Promotion**: There is no merge-back code in belay. The join node records a winner and copies nothing back, because ADR-0004 accepted a manual merge as the price of directory copies. The `internal/nodes/join` package doc lists the steps a person would take.
 
 ## Adapters & Extension Points
 
@@ -203,7 +190,7 @@ Five pluggable interfaces in `pkg/belay` allow third-party implementations:
 
 - **Reviewer** (see `pkg/belay/quality.go`): Holistic quality assessment against a caller-supplied threshold. One method: Review(ctx, ReviewRequest) → QualityReport. Takes file list and FailOn severity. Implemented by internal/review for SonarQube (server or Docker mode) and AI review.
 
-- **Isolator** (see `pkg/belay/isolate.go`): Workspace isolation. Two methods: Create(ctx, src, id) → Workspace, Destroy(ctx, ws) → error. Implemented by internal/isolate for directory copies.
+- **Isolator** (see `pkg/belay/isolate.go`): Workspace isolation. Two methods: Create(ctx, src, id) → Workspace, Destroy(ctx, ws) → error. Implemented by internal/isolate/dircopy for directory copies, which nothing in belay constructs yet.
 
 ## Error Handling & Recovery
 
@@ -232,7 +219,7 @@ Five pluggable interfaces in `pkg/belay` allow third-party implementations:
 
 ## Performance & Concurrency
 
-Fanout uses goroutines for parallel candidate execution. Each candidate runs independently in its isolated directory; there is no synchronization until join.
+Nothing runs candidates, in parallel or otherwise. The fanout node creates candidate workspaces one after another in one goroutine and runs none of them; its package doc explains why running candidates concurrently belongs to the dispatcher, not to a node.
 
 The dispatcher is single-threaded; it processes phases sequentially. This simplifies state management and makes the replay-resume model easy to reason about.
 
