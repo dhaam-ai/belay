@@ -32,5 +32,7 @@ budget:
 fanout:
     enabled: false
     candidates: 3
-    isolator: dircopy
+    isolator: auto
     select: fewest_issues
+output:
+    mode: auto

@@ -61,9 +61,19 @@ var enumFields = []enumField{
 		get:     func(c *Config) string { return string(c.Budget.OnExceed) },
 	},
 	{
+		name:    "fanout.isolator",
+		allowed: []string{string(IsolatorAuto), string(IsolatorWorktree), string(IsolatorDircopy)},
+		get:     func(c *Config) string { return string(c.Fanout.Isolator) },
+	},
+	{
 		name:    "fanout.select",
 		allowed: []string{string(SelectFewestIssues), string(SelectFirstPass), string(SelectFastest)},
 		get:     func(c *Config) string { return string(c.Fanout.Select) },
+	},
+	{
+		name:    "output.mode",
+		allowed: []string{string(OutputAuto), string(OutputBranch), string(OutputInPlace)},
+		get:     func(c *Config) string { return string(c.Output.Mode) },
 	},
 }
 
@@ -217,10 +227,6 @@ func (c Config) budgetErrors() []error {
 
 func (c Config) fanoutErrors() []error {
 	var errs []error
-	if c.Fanout.Isolator == "" {
-		errs = append(errs, textError("fanout.isolator", c.Fanout.Isolator,
-			"want the name of a workspace isolator"))
-	}
 	if c.Fanout.Enabled && c.Fanout.Candidates < 2 {
 		errs = append(errs, intError("fanout.candidates", c.Fanout.Candidates,
 			"want at least 2, because fanout.enabled is true"))

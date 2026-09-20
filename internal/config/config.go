@@ -153,6 +153,44 @@ const (
 	OnExceedWarn OnExceed = "warn"
 )
 
+// IsolatorName selects how a fanout candidate's workspace is separated from
+// the run's own.
+type IsolatorName string
+
+// Workspace isolators.
+const (
+	// IsolatorAuto lets belay choose: a git worktree when the run works on
+	// a branch, a directory copy otherwise.
+	IsolatorAuto IsolatorName = "auto"
+	// IsolatorWorktree gives each candidate a git worktree on a branch of
+	// its own, so a winner can be merged.
+	IsolatorWorktree IsolatorName = "worktree"
+	// IsolatorDircopy gives each candidate a directory copy, which works on
+	// a target that is not a git repository (ADR-0004).
+	IsolatorDircopy IsolatorName = "dircopy"
+)
+
+// OutputMode selects how a run delivers its result.
+//
+// It is not state.OutputMode, which records what a run actually does. Only
+// this one has "auto", which is a question rather than an answer, and the
+// question is asked once, when a run is created. state's own documentation
+// says why a resumed run must never re-ask it.
+type OutputMode string
+
+// Output modes.
+const (
+	// OutputAuto lets belay choose: a branch when the workspace can take
+	// one, editing in place otherwise.
+	OutputAuto OutputMode = "auto"
+	// OutputBranch works in the run's own git worktree, on its own branch,
+	// and commits once the quality gate has passed.
+	OutputBranch OutputMode = "branch"
+	// OutputInPlace edits the workspace directly, which is what every belay
+	// before branch output did.
+	OutputInPlace OutputMode = "in_place"
+)
+
 // SelectStrategy selects which fanout candidate wins.
 type SelectStrategy string
 
@@ -184,6 +222,18 @@ type Config struct {
 	Budget Budget `yaml:"budget"`
 	// Fanout configures best-of-N candidate generation.
 	Fanout Fanout `yaml:"fanout"`
+	// Output configures how a run delivers its result.
+	Output Output `yaml:"output"`
+}
+
+// Output configures how a run delivers its result.
+//
+// It is last in Config, and so last in a rendered belay.yaml, because every
+// section before it was there first and a reader's eye should not have to
+// re-learn the file's order to find a setting they already knew.
+type Output struct {
+	// Mode selects branch output, in-place editing, or letting belay choose.
+	Mode OutputMode `yaml:"mode"`
 }
 
 // Agent configures the coding agent CLI belay drives.
@@ -298,7 +348,7 @@ type Fanout struct {
 	// Candidates is how many candidates run in parallel.
 	Candidates int `yaml:"candidates"`
 	// Isolator names how candidate workspaces are separated.
-	Isolator string `yaml:"isolator"`
+	Isolator IsolatorName `yaml:"isolator"`
 	// Select names the strategy that picks the winning candidate.
 	Select SelectStrategy `yaml:"select"`
 }
@@ -800,6 +850,7 @@ func (c Config) Snapshot() Snapshot {
 		c.Review.snapshot(),
 		c.Budget.snapshot(),
 		c.Fanout.snapshot(),
+		c.Output.snapshot(),
 	} {
 		maps.Copy(s, section)
 	}
@@ -859,12 +910,19 @@ func (b Budget) snapshot() Snapshot {
 	}
 }
 
+// snapshot returns the output.* settings for [Config.Snapshot].
+func (o Output) snapshot() Snapshot {
+	return Snapshot{
+		"output.mode": string(o.Mode),
+	}
+}
+
 // snapshot returns the fanout.* settings for [Config.Snapshot].
 func (f Fanout) snapshot() Snapshot {
 	return Snapshot{
 		"fanout.enabled":    strconv.FormatBool(f.Enabled),
 		"fanout.candidates": strconv.Itoa(f.Candidates),
-		"fanout.isolator":   f.Isolator,
+		"fanout.isolator":   string(f.Isolator),
 		"fanout.select":     string(f.Select),
 	}
 }

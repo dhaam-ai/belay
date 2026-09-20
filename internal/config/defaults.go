@@ -20,7 +20,8 @@ const (
 	defaultMaxUSD             = 5.00
 	defaultMaxTokens          = 2_000_000
 	defaultCandidates         = 3
-	defaultIsolator           = "dircopy"
+	defaultIsolator           = IsolatorAuto
+	defaultOutputMode         = OutputAuto
 )
 
 // Default returns belay's built-in configuration.
@@ -73,6 +74,9 @@ func Default() Config {
 			Candidates: defaultCandidates,
 			Isolator:   defaultIsolator,
 			Select:     SelectFewestIssues,
+		},
+		Output: Output{
+			Mode: defaultOutputMode,
 		},
 	}
 }

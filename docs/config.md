@@ -28,7 +28,8 @@ graph: {give_up: 3, max_steps: 60, node_timeout: 15m, approval: true}
 test: {runner: auto, custom_cmd: ""}
 review: {mode: lint, fail_on: major}
 budget: {max_usd: 5.00, max_tokens: 2000000, on_exceed: abort}
-fanout: {enabled: false, candidates: 3, isolator: dircopy, select: fewest_issues}
+fanout: {enabled: false, candidates: 3, isolator: auto, select: fewest_issues}
+output: {mode: auto}
 ```
 
 ## `version`
@@ -311,13 +312,15 @@ Number of candidates the fanout node prepares, each in its own workspace. Nothin
 ### `fanout.isolator`
 
 **Type**: String  
-**Default**: `"dircopy"`  
-**Shipped values**: `"dircopy"`
+**Default**: `"auto"`  
+**Valid values**: `"auto"`, `"worktree"`, `"dircopy"`
 
 Isolation strategy for candidates:
-- `"dircopy"`: Plain directory copies. Works on non-git targets and uses O(N × repo_size) disk — the trade [ADR-0004](adr/0004-directory-copies-for-fanout.md) accepted deliberately. Note that `.git` is **not** copied, so a candidate cannot run git commands.
+- `"auto"`: `worktree` when the run delivers its result on a branch, `dircopy` otherwise. This is the default, and it keeps the two settings in step: a candidate can only be merged if it is on a branch.
+- `"worktree"`: Each candidate is a git worktree on its own branch, `belay/<run-id>-<candidate-id>`, and the winner is promoted with a merge commit. It needs the same git a branch run needs (2.38 or newer, at least one commit, no submodules).
+- `"dircopy"`: Plain directory copies. Works on non-git targets and uses O(N × repo_size) disk — the trade [ADR-0004](adr/0004-directory-copies-for-fanout.md) accepted, now superseded by [ADR-0012](adr/0012-git-native-run-output.md) for git targets. Note that `.git` is **not** copied, so a candidate cannot run git commands, and its work cannot be merged.
 
-Git worktrees and containers are anticipated by the `belay.Isolator` interface but are not implemented; `dircopy` is the only isolator belay ships. The loader checks only that this is not empty.
+`"dircopy"` together with `output.mode: "branch"` refuses the run: a copy has no branch to merge from.
 
 ### `fanout.select`
 
@@ -329,6 +332,23 @@ How the join node chooses the winning candidate. Only a candidate whose tests pa
 - `"fewest_issues"`: The candidate with the fewest review issues. A tie goes to the lowest candidate ID.
 - `"first_pass"`: The first candidate whose tests passed, in the order fanout recorded the candidates.
 - `"fastest"`: Meant to be the candidate that finished soonest, but no candidate's duration is recorded, so join picks the first candidate whose tests passed in recorded order, as `"first_pass"` does, and logs a warning that the choice is approximate.
+
+## `output`
+
+### `output.mode`
+
+**Type**: String  
+**Default**: `"auto"`  
+**Valid values**: `"auto"`, `"branch"`, `"in_place"`
+
+How a run delivers its result:
+- `"branch"`: The run works in its own git worktree, under `.belay/runs/<run-id>/worktree`, on a new branch `belay/<run-id>` created from the commit `HEAD` was on when the run started. It never edits your checkout, and it commits once, after the quality gate passes, under your own git identity with a `Belay-Run: <run-id>` trailer.
+- `"in_place"`: The run edits the workspace directly. This is what belay did before this setting existed.
+- `"auto"`: `branch` when the workspace is inside a git work tree that has at least one commit and no submodules, and git is 2.38 or newer; `in_place` otherwise. belay prints which one it chose and why, both at the start of a run and under `--dry-run`.
+
+Uncommitted changes in your checkout are not part of a branch run: the run starts from the commit, and belay warns when it finds any.
+
+The mode is recorded in the run's `manifest.json` when the run starts. `belay resume` finishes a run the way it started, whatever `belay.yaml` says by then, and warns when the two disagree.
 
 <!-- slice:output -->
 
@@ -408,8 +428,11 @@ budget:
 fanout:
   enabled: false
   candidates: 3
-  isolator: "dircopy"
+  isolator: "auto"
   select: "fewest_issues"
+
+output:
+  mode: "auto"
 ```
 
 ## Example Configuration with SonarQube
