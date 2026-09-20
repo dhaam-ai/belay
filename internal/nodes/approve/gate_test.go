@@ -387,3 +387,30 @@ func TestGateDoesNotServeTheRequestItself(t *testing.T) {
 		t.Error("the gate served the request itself; the plan node would be given no guidance")
 	}
 }
+
+// TestARequestBeatsAPlanNobodyCanApprove pins the order of the gate's two
+// new branches, and with it the way out of a plan somebody emptied: asking
+// for a new one. A gate that judged the file first would pause such a run
+// forever, since the person's answer to "your plan is empty" is exactly the
+// request it would be refusing to act on.
+//
+// Guard, not RED: the branches were written in this order. The test is here
+// so that reordering them shows up as a failure rather than as a run that
+// can never be unstuck.
+func TestARequestBeatsAPlanNobodyCanApprove(t *testing.T) {
+	rc := newRC(t, planBody)
+	rc.State.SetRegeneration(state.Regeneration{Request: 1, Guidance: "fewer steps"})
+	editPlan(t, rc, "   \n")
+
+	res := run(t, rc)
+
+	if got, want := res.Next, graph.NodePlan; got != want {
+		t.Errorf("Next = %q, want %q", got, want)
+	}
+	if got, want := res.Status, journal.StatusOK; got != want {
+		t.Errorf("Status = %v, want %v", got, want)
+	}
+	if res.Patch.Plan != nil {
+		t.Errorf("Patch.Plan = %+v, want none: there was no plan to fingerprint", *res.Patch.Plan)
+	}
+}
