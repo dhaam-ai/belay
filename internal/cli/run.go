@@ -101,6 +101,7 @@ func startRun(cmd *cobra.Command, want string) error {
 		configPath: rootFlags.configPath,
 		cassette:   runFlags.cassette,
 		logger:     newLogger(u),
+		context:    cmd.Context(),
 	})
 	if err != nil {
 		return &ExitError{Code: graph.ExitFailed, Message: "belay: " + err.Error(), Err: err}

@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"io/fs"
@@ -15,6 +16,7 @@ import (
 	"github.com/dhaam-ai/belay/internal/config"
 	"github.com/dhaam-ai/belay/internal/detect"
 	"github.com/dhaam-ai/belay/internal/exec"
+	"github.com/dhaam-ai/belay/internal/git"
 	"github.com/dhaam-ai/belay/internal/graph"
 	"github.com/dhaam-ai/belay/internal/linter"
 	"github.com/dhaam-ai/belay/internal/nodes"
@@ -46,6 +48,18 @@ type resolveRequest struct {
 	configPath string
 	cassette   string
 	logger     *slog.Logger
+	// ctx bounds the commands resolving runs, which is git and nothing
+	// else. It is optional so that a caller with no context of its own —
+	// every test that only wants a plan — still gets one.
+	context context.Context
+}
+
+// ctx returns the request's context, or a background one.
+func (r resolveRequest) ctx() context.Context {
+	if r.context != nil {
+		return r.context
+	}
+	return context.Background()
 }
 
 // blocker is one reason belay would refuse to start a run, paired with the
@@ -72,6 +86,13 @@ type runPlan struct {
 	config        config.Config
 	projects      []detect.Project
 	cassettePath  string
+
+	// output is how this run delivers its result, as resolveOutput settled
+	// it, and outputReason is why. repo is the repository a branch run
+	// commits to, and nil otherwise.
+	output       state.Output
+	outputReason string
+	repo         *git.Repo
 
 	agent    belay.AgentBackend
 	runner   belay.TestRunner
@@ -184,6 +205,9 @@ func resolve(req resolveRequest) (*runPlan, error) {
 	p.resolveTestRunner(execer)
 	p.resolveGate(execer)
 	p.resolveAgent()
+	// The output comes before the registry, because the registry follows
+	// from it: a branch run has a promote node and an in-place run does not.
+	p.resolveOutput(req.ctx())
 	p.resolveRegistry()
 	p.warnAboutFanout()
 
@@ -503,19 +527,23 @@ func (p *runPlan) resolveReplayAgent() {
 // belay shows a person, together. Whatever options nodes.Default is given,
 // nodes.Route must be given too, or belay shows one graph and walks another.
 //
-// It is where a resume will rebuild both from the chosen run's manifest, once
-// a manifest pins anything that shapes the graph (internal/nodes says why a
-// run's graph must not follow belay.yaml as it is when the run is resumed).
-// Nothing is pinned yet, so today it builds both from belay.yaml as loaded,
-// before a resume has chosen its run; the first pinned option must make a
-// resume call it again with the chosen run's pins. It never refuses a run:
-// a pin this plan cannot honour is resumePreflight's to report.
+// It reads p.output, never p.config.Output, and that is the whole rule
+// internal/nodes states from the other side: whether a run has the promote
+// node is pinned in its manifest when the run is created, and belay.yaml may
+// have changed by the time the run is resumed. resolveOutput sets p.output
+// for a new run from belay.yaml; bindOutput sets it for a resume from the
+// chosen run's manifest, and calls this again. It never refuses a run: a pin
+// this plan cannot honour is resumePreflight's to report.
 //
 // The route is set even when the registry cannot be built, so that a dry run
 // refusing to start still shows the route it would have taken.
 func (p *runPlan) resolveRegistry() {
-	p.route = nodes.Route(p.config)
-	registry, err := nodes.Default(p.config)
+	var opts []nodes.Option
+	if p.output.Branched() {
+		opts = append(opts, nodes.WithBranchOutput())
+	}
+	p.route = nodes.Route(p.config, opts...)
+	registry, err := nodes.Default(p.config, opts...)
 	if err != nil {
 		p.block(
 			fmt.Sprintf("belay cannot assemble its own graph: %v", err),
