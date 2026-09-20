@@ -96,6 +96,15 @@ type runPlan struct {
 	output       state.Output
 	outputReason string
 	repo         *git.Repo
+	// remote is where a --pr run pushes its branch, resolved before the run
+	// starts so a missing remote is a blocker rather than a surprise at the
+	// end. gh runs the GitHub command line, and is nil outside a test.
+	remote string
+	gh     ghRunner
+	// goal is what the person asked for, which a pull request's title and
+	// body are written from. startRun sets it; a resume reads it from the
+	// run's manifest.
+	goal string
 
 	agent    belay.AgentBackend
 	runner   belay.TestRunner
@@ -262,6 +271,7 @@ func resolve(req resolveRequest) (*runPlan, error) {
 	// The output comes before the registry, because the registry follows
 	// from it: a branch run has a promote node and an in-place run does not.
 	p.resolveOutput(req.ctx())
+	p.resolvePullRequest(req.ctx(), runFlags.pullRequest, lookGh)
 	p.resolveRegistry()
 	p.warnAboutFanout()
 

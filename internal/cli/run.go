@@ -28,7 +28,8 @@ import (
 // recorded conversation lives, and they answer to the same flag names so a
 // person only learns them once.
 var runFlags struct {
-	cassette string
+	cassette    string
+	pullRequest bool
 }
 
 // addRunFlags gives cmd the flags a run needs.
@@ -36,6 +37,17 @@ func addRunFlags(cmd *cobra.Command) {
 	f := cmd.Flags()
 	f.StringVar(&runFlags.cassette, "cassette", "",
 		"the recorded conversation to replay from, or record to (default <workspace>/.belay/cassette.json)")
+}
+
+// addPullRequestFlag gives cmd the --pr flag.
+//
+// Only `belay run` has it. A resume needs none, because the intent is pinned
+// in the run's manifest when the run is created: somebody who started a run
+// with --pr and resumes it three days later still gets the pull request they
+// asked for, and somebody who did not cannot acquire one by resuming.
+func addPullRequestFlag(cmd *cobra.Command) {
+	cmd.Flags().BoolVar(&runFlags.pullRequest, "pr", false,
+		"when the run finishes, push its branch and open a draft pull request through gh")
 }
 
 var runCmd = &cobra.Command{
@@ -48,9 +60,18 @@ Say what you want built, in your own words, as one argument:
     belay run "add table-driven tests for the config parser"
 
 belay writes a plan first and then stops, so you can read the plan — and edit
-it — before anything in your repository changes. Continue with "belay resume".
-From there belay writes the code, records which files it changed, runs your
-tests, fixes what fails, and puts the result through a quality gate.
+it — before anything happens. Continue with "belay resume". From there belay
+writes the code, records which files it changed, runs your tests, fixes what
+fails, and puts the result through a quality gate.
+
+In a git repository belay works on its own branch, belay/<run-id>, in its own
+worktree, and commits once the quality gate has passed. Your checkout is never
+edited, and uncommitted work in it is not part of the run. Outside a git
+repository, or with output.mode "in_place", belay edits the workspace
+directly. It says which it is doing before it starts.
+
+Add --pr and belay pushes that branch and opens a draft pull request through
+gh when the run finishes.
 
 belay stops on its own at the budget ceiling set in belay.yaml, and it prints
 that ceiling before it spends anything.
@@ -63,7 +84,8 @@ Use --dry-run to see exactly what a run would do — the settings it read, the
 project it found, the tools it would use, and the most it could spend —
 without creating anything or spending anything.`,
 	Example: `  belay run "add tests for the config parser"
-  belay run --workspace ../other-repo "make the CLI accept a --json flag"
+  belay run --pr "make the CLI accept a --json flag"
+  belay run --workspace ../other-repo "upgrade to the v2 client"
   belay --dry-run run "upgrade to the v2 client"`,
 	Args: exactlyOneDescription,
 	RunE: func(cmd *cobra.Command, args []string) error {
@@ -73,6 +95,7 @@ without creating anything or spending anything.`,
 
 func init() {
 	addRunFlags(runCmd)
+	addPullRequestFlag(runCmd)
 	rootCmd.AddCommand(runCmd)
 }
 
@@ -107,6 +130,7 @@ func startRun(cmd *cobra.Command, want string) error {
 		return &ExitError{Code: graph.ExitFailed, Message: "belay: " + err.Error(), Err: err}
 	}
 
+	plan.goal = want
 	if rootFlags.dryRun {
 		return describeDryRun(u, plan, want, "")
 	}
@@ -223,6 +247,7 @@ func (p *runPlan) prepareWorkspace(ctx context.Context, layout state.Layout, man
 	out := p.output
 	out.Branch = runBranch(layout.RunID())
 	out.WorkTree = layout.WorkTreeDir()
+	out.PullRequest = runFlags.pullRequest
 
 	if err := p.createRunBranch(ctx, out); err != nil {
 		return err
@@ -356,7 +381,7 @@ func driveRun(cmd *cobra.Command, u *ui, plan *runPlan, store *state.Store, resu
 	// The context here is the run's, which a Ctrl-C has already cancelled by
 	// the time a paused run reaches this. afterCompletion's steps must still
 	// run, so they are given the command's context rather than that one.
-	afterCompletion(cmd.Context(), u, plan, view)
+	afterCompletion(cmd.Context(), u, plan, &view)
 	return reportOutcome(u, view)
 }
 
@@ -418,7 +443,10 @@ func pauseOnCancel(o *graph.Options) { o.PauseOnCancel = true }
 //  1. Save the recording, when agent.mode is "record". This happens whatever
 //     the outcome: a run that failed or was stopped still made the calls it
 //     recorded.
-//  2. Tidy a finished branch run's worktree. It goes after the recording
+//  2. Push the branch and open the draft pull request --pr asked for. It
+//     goes before the worktree is tidied only because the two are
+//     independent and this is the one a person is waiting on.
+//  3. Tidy a finished branch run's worktree. It goes after the recording
 //     because saving the recording must not depend on a directory this step
 //     removes, and it reads how the run ended: a paused or failed run's
 //     worktree is where the person finishes, so only a completed run's goes.
@@ -432,13 +460,14 @@ func pauseOnCancel(o *graph.Options) { o.PauseOnCancel = true }
 // fails says so on stderr, and the steps after it still run. A run that
 // finished has finished whether or not a step after it worked; reporting it
 // as failed would tell a script to redo work that is already done.
-func afterCompletion(ctx context.Context, u *ui, plan *runPlan, view outcomeView) {
+func afterCompletion(ctx context.Context, u *ui, plan *runPlan, view *outcomeView) {
 	if path, err := plan.saveCassette(); err != nil {
 		u.note("belay: %v", err)
 	} else if path != "" {
 		u.say("  recording saved to %s", path)
 	}
-	plan.finishRun(ctx, view)
+	plan.publishRun(ctx, u, view)
+	plan.finishRun(ctx, *view)
 }
 
 // stopOnSignal cancels ctx when the person running belay asks it to stop, and
@@ -516,6 +545,13 @@ type outcomeView struct {
 	// runErr is the dispatcher's error. It is part of how the run went, such
 	// as graph.ErrMaxSteps, not a failure to find out.
 	runErr error
+	// pullRequest is the URL of the draft pull request a --pr run opened,
+	// and publishErr is why it could not be opened. At most one is set.
+	pullRequest string
+	publishErr  error
+	// remote is where the branch was to be pushed, so a report that has to
+	// name the push command by hand names the right remote.
+	remote string
 	// output is how the run delivers its result, as its manifest pinned it.
 	// The zero Output is an in-place run, and the report then says nothing
 	// about branches.
@@ -700,7 +736,7 @@ func nextSteps(view outcomeView) []string {
 		// commit it" would name a change that is not there and a commit
 		// belay already made.
 		if view.output.Branched() {
-			return completedBranchSteps(view.output)
+			return completedBranchSteps(view)
 		}
 		return []string{"review the change in your repository, then commit it"}
 	case outcome.Status == state.RunStatusAborted:
@@ -737,9 +773,28 @@ func promoteSteps(view outcomeView, resume string) []string {
 
 // completedBranchSteps is what to do with a finished branch run: read what
 // belay committed, and take it, in the two commands that do each.
-func completedBranchSteps(out state.Output) []string {
+//
+// A run that opened a pull request is told about that instead of about
+// merging by hand, and a run that asked for one and could not get it is given
+// the two commands that finish the job — because the change is committed
+// either way, and the only thing missing is one push and one gh call.
+func completedBranchSteps(view outcomeView) []string {
+	out := view.output
+	opening := "belay committed its change to " + out.Branch + ", and your checkout was never touched."
+	if view.pullRequest != "" {
+		return []string{opening, "it is proposed as a draft pull request:", "", "    " + view.pullRequest}
+	}
+	if view.publishErr != nil {
+		return []string{
+			opening,
+			"belay could not open the pull request; finish it yourself with:",
+			"",
+			"    git push " + orOrigin(view.remote) + " " + out.Branch,
+			"    gh pr create --draft --head " + out.Branch,
+		}
+	}
 	lines := []string{
-		"belay committed its change to " + out.Branch + ", and your checkout was never touched.",
+		opening,
 		"read it, then take it:",
 		"",
 		"    git log -p " + baseRange(out),
@@ -749,6 +804,15 @@ func completedBranchSteps(out state.Output) []string {
 		lines = append(lines, "    git merge "+out.Branch+"   # from "+out.BaseRef)
 	}
 	return lines
+}
+
+// orOrigin names the remote a run would have pushed to, filling in the name
+// every clone gets when belay never got as far as resolving one.
+func orOrigin(remote string) string {
+	if remote == "" {
+		return "origin"
+	}
+	return remote
 }
 
 // baseRange is the revision range holding exactly what a run added, written

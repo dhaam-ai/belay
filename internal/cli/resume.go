@@ -112,6 +112,7 @@ func continueRun(cmd *cobra.Command, runID string) error {
 		return &ExitError{Code: graph.ExitFailed, Message: "belay: " + err.Error(), Err: err}
 	}
 
+	plan.goal = chosen.goal
 	if rootFlags.dryRun {
 		return describeDryRun(u, plan, chosen.goal, chosen.describe(runID == ""))
 	}
