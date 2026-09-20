@@ -16,14 +16,21 @@ import (
 // bytes: crlf.md ends every line with CR LF and latin1.md is not UTF-8.
 func read(t *testing.T, name string) []byte {
 	t.Helper()
-	// gosec's taint analysis cannot see that every name reaching here is a
-	// literal in this file, so it reads the join as attacker-controlled.
-	//nolint:gosec // G304: name is a fixture literal, under this package's own testdata.
-	data, err := os.ReadFile(filepath.Join("testdata", name))
+	data, err := readFixture(name)
 	if err != nil {
 		t.Fatalf("read fixture: %v", err)
 	}
 	return data
+}
+
+// readFixture is read for callers without a *testing.T, such as a fuzz
+// target's seed corpus.
+func readFixture(name string) ([]byte, error) {
+	// gosec's taint analysis cannot see that every name reaching here is a
+	// literal in this package's tests, so it reads the join as
+	// attacker-controlled.
+	//nolint:gosec // G304: name is a fixture literal, under this package's own testdata.
+	return os.ReadFile(filepath.Join("testdata", name))
 }
 
 // parseable lists every fixture Parse must accept. The refusals live in
