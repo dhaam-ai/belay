@@ -1,6 +1,8 @@
 package nodes_test
 
 import (
+	"io"
+	"log/slog"
 	"slices"
 	"testing"
 
@@ -8,6 +10,9 @@ import (
 	"github.com/dhaam-ai/belay/internal/graph"
 	"github.com/dhaam-ai/belay/internal/journal"
 	"github.com/dhaam-ai/belay/internal/nodes"
+	"github.com/dhaam-ai/belay/internal/state"
+	"github.com/dhaam-ai/belay/pkg/belay"
+	"github.com/dhaam-ai/belay/pkg/belay/belaytest"
 )
 
 // TestRouteMatchesRegistry keeps the route belay shows a person and the graph
@@ -85,6 +90,173 @@ func TestRouteMatchesRegistry(t *testing.T) {
 				t.Errorf("Default registers %v; the route and the off-route nodes account for %v", registered, accounted)
 			}
 		})
+	}
+}
+
+// TestBranchOutputWiresPromote: a run that delivers its result on a branch
+// has one more node than one that edits in place, and two edges that lead
+// to it. The route a person is shown and the registry the dispatcher
+// resolves names through must gain it together.
+func TestBranchOutputWiresPromote(t *testing.T) {
+	t.Parallel()
+
+	branch := []string{
+		graph.NodePlan, graph.NodeApprove, graph.NodeCode, graph.NodeWrite,
+		graph.NodeTest, graph.NodeFix, graph.NodeReview, graph.NodePromote,
+	}
+	fanoutOn := config.Default()
+	fanoutOn.Fanout.Enabled = true
+	fanoutOn.Fanout.Candidates = 3
+
+	for _, tc := range []struct {
+		name     string
+		cfg      config.Config
+		want     []string
+		offRoute []string
+		wantLen  int
+	}{
+		{name: "branch output", cfg: config.Default(), want: branch, wantLen: 8},
+		{
+			name: "branch output with fanout", cfg: fanoutOn, want: branch,
+			offRoute: []string{graph.NodeFanout, graph.NodeJoin}, wantLen: 10,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			got := nodes.Route(tc.cfg, nodes.WithBranchOutput())
+			if !slices.Equal(got, tc.want) {
+				t.Fatalf("Route() = %v, want %v", got, tc.want)
+			}
+
+			registry, err := nodes.Default(tc.cfg, nodes.WithBranchOutput())
+			if err != nil {
+				t.Fatalf("Default: %v", err)
+			}
+			if registry.Len() != tc.wantLen {
+				t.Errorf("Len() = %d, want %d: %v", registry.Len(), tc.wantLen, registry.Names())
+			}
+			registered := registry.Names()
+			slices.Sort(registered)
+			accounted := slices.Concat(got, tc.offRoute)
+			slices.Sort(accounted)
+			if !slices.Equal(registered, accounted) {
+				t.Errorf("Default registers %v; the route and the off-route nodes account for %v", registered, accounted)
+			}
+		})
+	}
+}
+
+// TestBranchOutputRoutesEveryEdgeIntoPromote: registering the node is half
+// of it. Nothing routes to promote unless the nodes that finish a run are
+// told to, and a run that reached promote through neither edge would end
+// without committing anything it did.
+func TestBranchOutputRoutesEveryEdgeIntoPromote(t *testing.T) {
+	t.Parallel()
+
+	cfg := config.Default()
+	cfg.Fanout.Enabled = true
+	cfg.Fanout.Candidates = 2
+	registry, err := nodes.Default(cfg, nodes.WithBranchOutput())
+	if err != nil {
+		t.Fatalf("Default: %v", err)
+	}
+
+	// The quality gate's passing edge.
+	reviewed := runNode(t, registry, graph.NodeReview, passingGate(t))
+	if reviewed.Next != graph.NodePromote {
+		t.Errorf("a passing gate routes to %q, want %q", reviewed.Next, graph.NodePromote)
+	}
+	// The winner's edge.
+	joined := runNode(t, registry, graph.NodeJoin, selectedWinner(t))
+	if joined.Next != graph.NodePromote {
+		t.Errorf("a selected winner routes to %q, want %q", joined.Next, graph.NodePromote)
+	}
+}
+
+// TestInPlaceOutputIsUnchanged: branch output is opt-in, and nothing selects
+// it yet. A run built without the option must be exactly the run belay has
+// always had -- no promote node, a passing gate ending the run, and a winner
+// promoted by hand.
+func TestInPlaceOutputIsUnchanged(t *testing.T) {
+	t.Parallel()
+
+	cfg := config.Default()
+	cfg.Fanout.Enabled = true
+	cfg.Fanout.Candidates = 2
+	registry, err := nodes.Default(cfg)
+	if err != nil {
+		t.Fatalf("Default: %v", err)
+	}
+
+	if _, err := registry.Get(graph.NodePromote); err == nil {
+		t.Error("promote is registered in a run that was not given WithBranchOutput")
+	}
+	if slices.Contains(nodes.Route(cfg), graph.NodePromote) {
+		t.Error("promote is on the route of a run that was not given WithBranchOutput")
+	}
+	if got := runNode(t, registry, graph.NodeReview, passingGate(t)).Next; got != graph.End {
+		t.Errorf("a passing gate routes to %q, want %q", got, graph.End)
+	}
+	if got := runNode(t, registry, graph.NodeJoin, selectedWinner(t)).Next; got != graph.End {
+		t.Errorf("a selected winner routes to %q, want %q", got, graph.End)
+	}
+}
+
+// runNode executes one registered node against rc, which is how these tests
+// see the edge a node really takes rather than the edge the wiring meant.
+func runNode(t *testing.T, registry *graph.Registry, name string, rc *graph.RunContext) graph.Result {
+	t.Helper()
+	node, err := registry.Get(name)
+	if err != nil {
+		t.Fatalf("Get(%q): %v", name, err)
+	}
+	res, err := node.Run(t.Context(), rc)
+	if err != nil {
+		t.Fatalf("%s.Run: %v", name, err)
+	}
+	return res
+}
+
+// passingGate is a run context whose quality gate passes.
+func passingGate(t *testing.T) *graph.RunContext {
+	t.Helper()
+	ws := t.TempDir()
+	layout, err := state.NewLayout(ws, "20260101T000000Z-c0ffee000000")
+	if err != nil {
+		t.Fatalf("NewLayout: %v", err)
+	}
+	cfg := config.Default()
+	cfg.Review.Mode = config.ReviewModeLint
+	return &graph.RunContext{
+		Goal: "ship it", State: state.NewState("ship it"), Config: cfg, Layout: layout,
+		Workspace: layout.WorkspaceDir(), RunID: layout.RunID(),
+		NodeName: graph.NodeReview, Step: 7, Attempt: 1,
+		Logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
+		Linter: &belaytest.FakeLinter{
+			NameValue: "golangci-lint",
+			Responses: []belay.QualityReport{{
+				Source: "golangci-lint", Gate: belay.GatePass, Issues: []belay.Issue{},
+			}},
+		},
+	}
+}
+
+// selectedWinner is a run context whose candidates give join a winner.
+func selectedWinner(t *testing.T) *graph.RunContext {
+	t.Helper()
+	cfg := config.Default()
+	cfg.Fanout.Enabled = true
+	cfg.Fanout.Candidates = 2
+	st := state.NewState("ship it")
+	st.Candidates = []state.Candidate{
+		{ID: "c1", Dir: "/work/c1", TestPassed: true, IssueCount: 3, Ephemeral: true},
+		{ID: "c2", Dir: "/work/c2", TestPassed: true, IssueCount: 1, Ephemeral: true},
+	}
+	return &graph.RunContext{
+		Goal: "ship it", State: st, Config: cfg, RunID: "20260101T000000Z-c0ffee000000",
+		NodeName: graph.NodeJoin, Step: 8, Attempt: 1,
+		Logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
 	}
 }
 
