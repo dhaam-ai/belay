@@ -49,8 +49,26 @@ func (e *CapabilityError) Unwrap() error { return ErrUnknownCapability }
 // does — adds its name here, and sets it in requires on every document
 // whose run depends on the field.
 var knownCapabilities = map[string]bool{
-	CapabilityOutputBranch: true,
+	CapabilityOutputBranch:   true,
+	CapabilityPlanRegenerate: true,
 }
+
+// CapabilityPlanRegenerate is the capability a run declares, in its
+// state.json, while it holds an unserved request for a new plan
+// (ADR-0011).
+//
+// State.Plan.Regenerate is a control field: it is what makes the approve
+// gate route back to the plan node instead of pausing again. A belay that
+// did not know it would decode such a state.json, drop the request, pause
+// at the gate as usual — and then, on the resume that approves the plan,
+// write code against the very plan the person had asked to replace, having
+// spent their budget on it. Naming the capability turns that into a
+// refusal that says to upgrade.
+//
+// Unlike CapabilityOutputBranch it comes and goes: only a document with an
+// unserved request declares it, because only such a run depends on the
+// field. See State.requireRegeneration.
+const CapabilityPlanRegenerate = "plan.regenerate"
 
 // addCapability returns requires with name in it, sorted and without
 // duplicates.
@@ -64,6 +82,23 @@ func addCapability(requires []string, name string) []string {
 	out = append(out, name)
 	slices.Sort(out)
 	return slices.Compact(out)
+}
+
+// dropCapability returns requires without name, keeping the list's order
+// and its non-nil-ness — a run whose last requirement has just gone away
+// still writes "requires": [], like every run that never had one, rather
+// than a null that reads as a document from before the list existed.
+func dropCapability(requires []string, name string) []string {
+	if len(requires) == 0 {
+		return requires
+	}
+	out := make([]string, 0, len(requires))
+	for _, have := range requires {
+		if have != name {
+			out = append(out, have)
+		}
+	}
+	return out
 }
 
 // checkRequires reads the requires list of raw, a document named file that

@@ -222,6 +222,77 @@ type Plan struct {
 	// Digest is a content fingerprint of the plan, used to detect that a
 	// resumed run's plan has not silently changed underneath it.
 	Digest string `json:"digest"`
+	// Regenerate is the standing request for a new plan, if a person has
+	// asked for one. Record it with State.SetRegeneration, never by
+	// assignment, so the run's Requires list stays in step with it.
+	Regenerate Regeneration `json:"regenerate"`
+}
+
+// Regeneration is a person's request, made while the run is paused at the
+// approve gate, for the plan node to write the plan again — with guidance
+// about what the last one got wrong.
+//
+// It is two counters and a sentence rather than a boolean, because the
+// same run may ask more than once and the request has to survive a crash
+// at any point. The person's side writes Request and Guidance; the plan
+// node's side writes Served, and neither ever decrements. Pending is the
+// whole protocol: a request that has been made and not yet answered.
+//
+// Guidance is kept after the request is served. It is what the plan the
+// run is now working from was asked for, which is worth as much to whoever
+// reads the run afterwards as it was to the node that used it.
+type Regeneration struct {
+	// Request is the number of the most recent request for a new plan.
+	// Zero means nobody has ever asked.
+	Request int `json:"request"`
+	// Guidance is what the person said the next plan should do
+	// differently, in their own words. It may be empty: asking again with
+	// nothing to add is a legitimate request.
+	Guidance string `json:"guidance"`
+	// Served is the number of the last request the plan node answered.
+	Served int `json:"served"`
+}
+
+// Pending reports whether a request for a new plan is outstanding, which
+// is what the approve gate routes on.
+//
+// It asks whether Request is ahead of Served, not whether the two differ.
+// A Served that somehow ran ahead — a hand-edited state.json, or a
+// document written by a belay that counts differently — would otherwise
+// read as a request nobody made, and the gate would send the run back to
+// the plan node on every pass until graph.max_steps ended it.
+func (r Regeneration) Pending() bool { return r.Request > r.Served }
+
+// SetRegeneration records r as this run's request for a new plan, and
+// keeps Requires in step with it.
+//
+// It is one call rather than an assignment for the reason Manifest.SetOutput
+// is: the field and the capability that protects it are one decision (see
+// CapabilityPlanRegenerate). A caller that assigned Plan.Regenerate
+// directly would leave a run whose next step depends on a field older
+// belays silently drop, and nothing would notice until one of them resumed
+// it and wrote code against the plan the person had just asked to replace.
+func (s *State) SetRegeneration(r Regeneration) {
+	s.Plan.Regenerate = r
+	s.requireRegeneration()
+}
+
+// requireRegeneration adds CapabilityPlanRegenerate to Requires while a
+// request is unserved, and removes it once one is not.
+//
+// Removing is the unusual half, and it is deliberate. A pin like
+// Manifest.Output describes a run for its whole life, so its capability is
+// added once and stays. A regeneration request is outstanding only between
+// the person making it and the plan node answering it — normally one node
+// execution. A requirement that outlived it would make every run that had
+// ever asked for a new plan permanently unreadable by an older belay, for
+// a field that no longer changes anything the run does.
+func (s *State) requireRegeneration() {
+	if s.Plan.Regenerate.Pending() {
+		s.Requires = addCapability(s.Requires, CapabilityPlanRegenerate)
+		return
+	}
+	s.Requires = dropCapability(s.Requires, CapabilityPlanRegenerate)
 }
 
 // Code is the blackboard's record of the code node's output.

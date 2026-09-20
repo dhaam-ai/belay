@@ -240,8 +240,8 @@ func TestRunsScanListsDamagedRunsAsUnreadable(t *testing.T) {
 			// like every other string the listing prints.
 			name:       "requires several capabilities, one with an escape in its name",
 			id:         "run-several",
-			manifest:   requiring("run-several", "plan.regenerate", "from.the.future", "evil\x1b[2Jname"),
-			wantReason: "needs a newer belay (evil[2Jname, from.the.future, plan.regenerate)",
+			manifest:   requiring("run-several", "plan.telepathy", "from.the.future", "evil\x1b[2Jname"),
+			wantReason: "needs a newer belay (evil[2Jname, from.the.future, plan.telepathy)",
 		},
 		{
 			name:       "directory name is not a usable run id",
