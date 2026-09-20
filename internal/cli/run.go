@@ -432,7 +432,6 @@ func pauseOnCancel(o *graph.Options) { o.PauseOnCancel = true }
 // fails says so on stderr, and the steps after it still run. A run that
 // finished has finished whether or not a step after it worked; reporting it
 // as failed would tell a script to redo work that is already done.
-//
 func afterCompletion(ctx context.Context, u *ui, plan *runPlan, view outcomeView) {
 	if path, err := plan.saveCassette(); err != nil {
 		u.note("belay: %v", err)

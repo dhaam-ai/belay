@@ -152,4 +152,3 @@ func TestPushSendsExactlyTheBranchAndNeverForces(t *testing.T) {
 		t.Errorf("Push() a second time = %v, want nil: the branch is already where it was asked to go", err)
 	}
 }
-
