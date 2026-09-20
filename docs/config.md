@@ -129,7 +129,11 @@ With `true`, the run pauses at the approve node and exits cleanly; the plan is
 at `<run-dir>/artifacts/plan.md`, you may edit it, and `belay resume` continues
 from there — reading the file again, so your edits are what the agent receives.
 Because the pause is a clean exit rather than a blocked terminal, a run can
-wait indefinitely and survive the session that started it.
+wait indefinitely and survive the session that started it. If you want a
+different plan rather than an edited one, `belay plan --regenerate "<what to
+change>"` sends the run back to the plan node with what you said; a plan you
+emptied or saved as something that is not text pauses the gate again, with a
+note saying so, rather than ending the run.
 
 With `false`, planning routes straight to coding. That is the right setting for
 an unattended or CI run, and the wrong one for the first time you point belay

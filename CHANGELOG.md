@@ -10,6 +10,19 @@ that only `pkg/belay` carries a compatibility promise. Everything under
 
 ### Added
 
+- **`belay plan` reads the plan a run is waiting on, and can ask for a new
+  one.** `belay plan` prints the plan of the run belay picked, where the file
+  is, and what to do with it. `belay plan --regenerate "fewer steps, and leave
+  the parser alone"` is the other half: belay keeps a copy of the plan it is
+  about to replace, records what you asked for, and continues the run so the
+  plan step writes a new plan with your words in its prompt — then stops at the
+  plan again so you can read it. Asking is a step of the run like any other: it
+  is journaled, it counts against the budget, `belay timeline` shows it, and
+  `belay resume` picks it up if it is interrupted. Neither form needs a
+  terminal. `belay resume` still means "the plan as it stands is approved", so
+  resuming after asking for a new plan withdraws the request instead of
+  spending on one, and says so.
+
 - **A dry run says that `fanout.enabled` does nothing yet.** Nothing in the
   graph leads to the fanout node, so a run with fanout on takes the ordinary
   route once, whatever `fanout.candidates` says — and belay said nothing about

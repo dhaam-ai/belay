@@ -128,12 +128,17 @@ func continueRun(cmd *cobra.Command, runID string) error {
 		return &ExitError{Code: graph.ExitFailed, Message: "belay: " + err.Error(), Err: err}
 	}
 	if awaiting {
-		approved, err := approvePlan(store)
+		done, err := approvePlan(store)
 		if err != nil {
 			return &ExitError{Code: graph.ExitFailed, Message: "belay: " + err.Error(), Err: err}
 		}
-		if approved {
+		if done.recorded {
 			u.say("  the plan is approved; belay reads it again now, so any edit you made counts")
+		}
+		if done.withdrew {
+			u.say("  the new plan you asked for is no longer wanted, so belay will not write one")
+		}
+		if done.changed() {
 			u.say("")
 		}
 	}
@@ -200,8 +205,25 @@ func awaitsApproval(chosen resumableRun, layout state.Layout) (bool, error) {
 	return false, nil
 }
 
-// approvePlan records that the human approved the plan, and reports whether
-// it had to change anything.
+// approval is what recording a person's approval changed about a run.
+//
+// It is two facts rather than one boolean because the second is news: a
+// person who asked for a new plan and then approved this one needs to be
+// told that the request is gone, or they will wait for a plan that is
+// never coming.
+type approval struct {
+	// recorded is true when the plan was not already approved.
+	recorded bool
+	// withdrew is true when the approval cancelled a request for a new
+	// plan that nothing had answered yet.
+	withdrew bool
+}
+
+// changed reports whether anything at all was written.
+func (a approval) changed() bool { return a.recorded || a.withdrew }
+
+// approvePlan records that the human approved the plan, and reports what it
+// had to change.
 //
 // Resuming past the approval gate is the approval: there is no other gesture
 // a person makes, and asking them to also edit state.json would be absurd.
@@ -209,19 +231,31 @@ func awaitsApproval(chosen resumableRun, layout state.Layout) (bool, error) {
 // re-fingerprints it as it runs, so an edit made during the pause is recorded
 // as what was actually approved — which is exactly why this must not try to
 // record the plan's contents itself.
-func approvePlan(store *state.Store) (bool, error) {
+//
+// It also withdraws an unanswered request for a new plan. Approving means
+// "the plan as it stands will do", and the gate routes a pending request
+// back to the plan node before it looks at anything else, so a request left
+// over from a `belay plan --regenerate` that was interrupted before the plan
+// node ran would turn `belay resume` into another agent call — spending
+// money on a plan the person has just said they no longer need. The request
+// stays on the record, with Served caught up to it, because it was asked.
+func approvePlan(store *state.Store) (approval, error) {
 	st, err := store.LoadState()
 	if err != nil {
-		return false, fmt.Errorf("cannot read this run's state: %w", err)
+		return approval{}, fmt.Errorf("cannot read this run's state: %w", err)
 	}
-	if st.Plan.Approved {
-		return false, nil
+	done := approval{recorded: !st.Plan.Approved, withdrew: st.Plan.Regenerate.Pending()}
+	if !done.changed() {
+		return done, nil
 	}
 	st.Plan.Approved = true
+	request := st.Plan.Regenerate
+	request.Served = request.Request
+	st.SetRegeneration(request)
 	if err := store.SaveState(st); err != nil {
-		return false, fmt.Errorf("cannot record your approval: %w", err)
+		return approval{}, fmt.Errorf("cannot record your approval: %w", err)
 	}
-	return true, nil
+	return done, nil
 }
 
 // resumableRun is one run belay found on disk, reduced to what choosing

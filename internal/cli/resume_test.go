@@ -665,7 +665,7 @@ func TestResumingApprovesThePlanAndPicksUpTheEditedFile(t *testing.T) {
 	if err != nil {
 		t.Fatalf("approvePlan: %v", err)
 	}
-	if !approved {
+	if !approved.recorded {
 		t.Fatal("approvePlan should have had something to record")
 	}
 
@@ -707,14 +707,14 @@ func TestApprovePlanIsIdempotent(t *testing.T) {
 	store := seedRunDir(t, plan, "add tests")
 
 	first, err := approvePlan(store)
-	if err != nil || !first {
-		t.Fatalf("approvePlan() = (%v, %v), want (true, nil)", first, err)
+	if err != nil || !first.recorded {
+		t.Fatalf("approvePlan() = (%+v, %v), want a recorded approval and no error", first, err)
 	}
 	second, err := approvePlan(store)
 	if err != nil {
 		t.Fatalf("approvePlan (second): %v", err)
 	}
-	if second {
+	if second.changed() {
 		t.Error("approving an already-approved plan should report that nothing changed")
 	}
 }
