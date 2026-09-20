@@ -352,7 +352,7 @@ func TestCarriesReadsTheTrailersAtom(t *testing.T) {
 func TestCarriesRefusesAGitThatDoesNotExpandTheTrailersAtom(t *testing.T) {
 	f := newFixture(t)
 	top := f.repo("carries-old")
-	real := f.open(top)
+	working := f.open(top)
 
 	// Only `git log` is answered staleley; everything else runs for real, so
 	// the worktree checks and the HEAD lookup behave exactly as they do in
@@ -361,7 +361,7 @@ func TestCarriesRefusesAGitThatDoesNotExpandTheTrailersAtom(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Open() error = %v", err)
 	}
-	if _, err := real.Carries(t.Context(), top, vcs.Trailer{Key: "Belay-Run", Value: "RUN-A"}); err != nil {
+	if _, err := working.Carries(t.Context(), top, vcs.Trailer{Key: "Belay-Run", Value: "RUN-A"}); err != nil {
 		t.Fatalf("the real Carries must work for the stale one to mean anything: %v", err)
 	}
 
