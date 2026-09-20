@@ -269,6 +269,18 @@ func TestRefusesAForeignGitDir(t *testing.T) {
 			if !errors.Is(err, ErrForeignGitDir) {
 				t.Errorf("Integrate() error = %v, want %v", err, ErrForeignGitDir)
 			}
+			// Reading is refused for the same reason as writing. A promotion
+			// that believed a tip or a trailer out of another repository
+			// would skip a merge it still owes and destroy the winner that
+			// held the only copy of the work.
+			_, err = r.Tip(t.Context(), candidate)
+			if !errors.Is(err, ErrForeignGitDir) {
+				t.Errorf("Tip() error = %v, want %v", err, ErrForeignGitDir)
+			}
+			_, err = r.Carries(t.Context(), candidate, vcs.Trailer{Key: "Belay-Run", Value: "run1"})
+			if !errors.Is(err, ErrForeignGitDir) {
+				t.Errorf("Carries() error = %v, want %v", err, ErrForeignGitDir)
+			}
 			if n := f.count(top); n != topCount {
 				t.Errorf("the repository gained %d commits", n-topCount)
 			}

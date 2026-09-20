@@ -61,9 +61,13 @@
 //
 // A coding agent has write access to the workspace it works in, and a
 // worktree's .git is an ordinary text file naming the git directory to use.
-// So every call here that writes — Commit and Integrate — first proves the
-// directory it was given is a working tree of this repository, and belongs
-// to itself (see verifyWorktree). Comparing only the common git directory,
+// So every call here that is given a working tree — Commit and Integrate,
+// which write in it, and Tip and Carries, whose answers decide whether a
+// promotion still has work to do — first proves that directory is a working
+// tree of this repository, and belongs to itself (see verifyWorktree).
+// Reading is checked for the same reason as writing: a tip or a trailer taken
+// out of another repository would tell a promotion its work was already done.
+// Comparing only the common git directory,
 // which is the obvious check, is not enough: a .git rewritten to name this
 // repository's MAIN worktree keeps the same common directory, and git then
 // stages the agent's files into the user's own index and commits them onto
