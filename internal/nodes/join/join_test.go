@@ -321,6 +321,90 @@ func TestRunIsIdempotentAcrossReruns(t *testing.T) {
 	}
 }
 
+// TestJoinRoutesTheWinnerToPromoteInBranchOutput: with directory copies
+// there is nothing belay can merge, so join names the directory and tells
+// the person to copy it. With the candidates on branches there is, and the
+// winner goes to the node that merges it. Join stays a decision either way:
+// it is the edge that changes, not what join does.
+func TestJoinRoutesTheWinnerToPromoteInBranchOutput(t *testing.T) {
+	winner := cand("c2", true, 1)
+	candidates := []state.Candidate{cand("c1", true, 8), winner}
+
+	for _, tc := range []struct {
+		name     string
+		opts     []join.Option
+		wantNext string
+		wantNote []string
+		notNote  []string
+	}{
+		{
+			name:     "with no successor the run ends and promotion is by hand",
+			wantNext: graph.End,
+			wantNote: []string{winner.ID, winner.Dir, "by hand"},
+		},
+		{
+			name:     "with a successor the winner goes there to be merged",
+			opts:     []join.Option{join.WithOnSelected(graph.NodePromote)},
+			wantNext: graph.NodePromote,
+			wantNote: []string{winner.ID},
+			notNote:  []string{"by hand", "does not merge"},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			rc := newRunContext(t, config.SelectFewestIssues, candidates)
+
+			got, err := join.New(tc.opts...).Run(context.Background(), rc)
+			if err != nil {
+				t.Fatalf("Run() error = %v", err)
+			}
+
+			if got.Next != tc.wantNext {
+				t.Errorf("Next = %q, want %q", got.Next, tc.wantNext)
+			}
+			if got.Status != journal.StatusOK {
+				t.Errorf("Status = %v, want %v", got.Status, journal.StatusOK)
+			}
+			if err := got.Validate(); err != nil {
+				t.Errorf("Validate() = %v, want nil", err)
+			}
+			if got.Patch.Winner == nil || *got.Patch.Winner != winner.ID {
+				t.Errorf("Patch.Winner = %v, want %q", got.Patch.Winner, winner.ID)
+			}
+			for _, want := range tc.wantNote {
+				if !strings.Contains(got.Note, want) {
+					t.Errorf("Note = %q, want it to contain %q", got.Note, want)
+				}
+			}
+			for _, unwanted := range tc.notNote {
+				if strings.Contains(got.Note, unwanted) {
+					t.Errorf("Note = %q, want it not to contain %q: belay merges this winner itself", got.Note, unwanted)
+				}
+			}
+		})
+	}
+}
+
+// A run whose candidates all failed has nothing to route anywhere, whatever
+// the successor is wired to.
+func TestJoinWithoutAWinnerFailsWhateverTheSuccessor(t *testing.T) {
+	candidates := []state.Candidate{cand("c1", false, 0), cand("c2", false, 3)}
+	rc := newRunContext(t, config.SelectFewestIssues, candidates)
+
+	got, err := join.New(join.WithOnSelected(graph.NodePromote)).Run(context.Background(), rc)
+	if err != nil {
+		t.Fatalf("Run() error = %v", err)
+	}
+	if got.Status != journal.StatusFailed {
+		t.Errorf("Status = %v, want %v", got.Status, journal.StatusFailed)
+	}
+	if got.Next != "" {
+		t.Errorf("Next = %q, want no successor for a run with no winner", got.Next)
+	}
+	if got.Patch.Winner == nil || *got.Patch.Winner != "" {
+		t.Errorf("Patch.Winner = %v, want it cleared", got.Patch.Winner)
+	}
+}
+
 // Promotion is manual (ADR-0004), so the note a human reads in the timeline
 // has to name the directory to copy from and say belay will not do it.
 func TestRunNoteExplainsManualPromotion(t *testing.T) {
