@@ -141,7 +141,7 @@ func TestPublishOpensOneDraftPullRequest(t *testing.T) {
 	out := state.Output{
 		Mode: state.OutputBranch, Repo: "/repos/app", Branch: branch,
 		Base: "a0aa486bdfbfbd2e69f2a08dc947c786f4b56650", BaseRef: "main",
-		WorkTree: "/repos/app/.belay/runs/20260101T000000Z-c0ffee000000/worktree",
+		WorkTree:    "/repos/app/.belay/runs/20260101T000000Z-c0ffee000000/worktree",
 		PullRequest: true,
 	}
 
