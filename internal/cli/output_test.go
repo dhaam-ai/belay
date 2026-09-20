@@ -288,3 +288,133 @@ func TestRegistryAndRouteFollowThePinnedOutput(t *testing.T) {
 		})
 	}
 }
+
+// Creating a branch run creates the branch and the worktree it works in, and
+// pins both in the manifest, before the manifest exists to be found.
+//
+// The worktree is what makes "belay never edits your checkout" true: the
+// run's Layout is redirected at it, so every node writes there. The pin is
+// what makes a resume days later find the same branch. Both go through
+// Manifest.SetOutput, never a field assignment, so the capability a branch
+// run depends on is recorded with the field (ADR-0011).
+func TestPrepareWorkspaceCreatesTheRunBranchAndItsWorktree(t *testing.T) {
+	dir := gitWorkspace(t)
+	p := planFor(t, dir, nil)
+	p.resolveOutput(t.Context())
+	if !p.output.Branched() {
+		t.Fatalf("resolveOutput did not choose a branch in a git repository: %s", p.outputReason)
+	}
+
+	const runID = "20260101T000000Z-c0ffee000000"
+	store, err := createRun(t.Context(), p, runSpec{Workspace: dir, RunID: runID, Goal: "add a --json flag"})
+	if err != nil {
+		t.Fatalf("createRun: %v", err)
+	}
+
+	manifest, err := state.LoadManifest(store.Layout().ManifestPath())
+	if err != nil {
+		t.Fatalf("LoadManifest: %v", err)
+	}
+	branch := "belay/" + runID
+	if manifest.Output.Branch != branch {
+		t.Errorf("manifest branch = %q, want %q", manifest.Output.Branch, branch)
+	}
+	if manifest.Output.Base == "" || manifest.Output.WorkTree == "" {
+		t.Errorf("manifest output is incomplete: %+v", manifest.Output)
+	}
+	if !slices.Contains(manifest.Requires, state.CapabilityOutputBranch) {
+		t.Errorf("manifest requires %v, want it to include %q; build output through SetOutput",
+			manifest.Requires, state.CapabilityOutputBranch)
+	}
+
+	// The branch exists, at the commit the manifest recorded as the base.
+	if got := gitIn(t, dir, "rev-parse", branch); got != manifest.Output.Base {
+		t.Errorf("%s is at %s, want the recorded base %s", branch, got, manifest.Output.Base)
+	}
+	// The worktree exists, is registered, and is where the run's nodes work.
+	if got := gitIn(t, manifest.Output.WorkTree, "rev-parse", "--abbrev-ref", "HEAD"); got != branch {
+		t.Errorf("the run worktree is on %q, want %q", got, branch)
+	}
+	if got := store.Layout().WorkspaceDir(); got != manifest.Output.WorkTree {
+		t.Errorf("the run's workspace is %q, want the run worktree %q", got, manifest.Output.WorkTree)
+	}
+	if got := store.Layout().RunDir(); got != filepath.Join(dir, ".belay", "runs", runID) {
+		t.Errorf("the run directory moved to %q", got)
+	}
+
+	// The user's checkout is untouched: still on its own branch, still clean.
+	if got := gitIn(t, dir, "rev-parse", "--abbrev-ref", "HEAD"); got != "main" {
+		t.Errorf("the user's checkout is on %q, want main", got)
+	}
+	if got := gitIn(t, dir, "status", "--porcelain", "--", ":(exclude).belay"); got != "" {
+		t.Errorf("the user's checkout is dirty:\n%s", got)
+	}
+}
+
+// createRun writes the manifest last, so a failure at that last write leaves
+// a branch and a worktree that no manifest names.
+//
+// A run directory without a manifest is already understood: nothing takes it
+// for a run, and `belay runs` reports it. A branch is not — it is outside the
+// run directory, in the repository the user works in, and nothing would ever
+// connect it back to the run that made it. So the one failure createRun can
+// see, it undoes.
+func TestCreateRunLeavesNoBranchBehindWhenTheManifestCannotBeWritten(t *testing.T) {
+	dir := gitWorkspace(t)
+	p := planFor(t, dir, nil)
+	p.resolveOutput(t.Context())
+
+	const runID = "20260101T000000Z-c0ffee000000"
+	// A directory where the manifest goes: the write fails, everything
+	// before it succeeded.
+	layout, err := state.NewLayout(dir, runID)
+	if err != nil {
+		t.Fatalf("NewLayout: %v", err)
+	}
+	if err := os.MkdirAll(layout.ManifestPath(), 0o750); err != nil {
+		t.Fatalf("mkdir over the manifest path: %v", err)
+	}
+
+	if _, err := createRun(t.Context(), p, runSpec{Workspace: dir, RunID: runID, Goal: "add a --json flag"}); err == nil {
+		t.Fatal("createRun succeeded, want the manifest write to fail")
+	}
+
+	branch := "belay/" + runID
+	refs := gitIn(t, dir, "for-each-ref", "--format=%(refname:short)", "refs/heads/belay/")
+	if strings.Contains(refs, branch) {
+		t.Errorf("%s was left behind; nothing would ever clean it up (refs: %q)", branch, refs)
+	}
+	if list := gitIn(t, dir, "worktree", "list", "--porcelain"); strings.Contains(list, runID) {
+		t.Errorf("the run worktree is still registered:\n%s", list)
+	}
+}
+
+// The dispatcher can only hand promote a repository and an isolator if the
+// plan gives it both. Nothing else in belay constructs them, so a branch run
+// whose options carry neither reaches promote and fails there — after the
+// agent has been paid for every step before it.
+func TestOptionsCarryTheRepositoryAndIsolatorOfABranchRun(t *testing.T) {
+	dir := gitWorkspace(t)
+	p := planFor(t, dir, nil)
+	p.resolveOutput(t.Context())
+
+	const runID = "20260101T000000Z-c0ffee000000"
+	store, err := createRun(t.Context(), p, runSpec{Workspace: dir, RunID: runID, Goal: "add a --json flag"})
+	if err != nil {
+		t.Fatalf("createRun: %v", err)
+	}
+
+	opts := p.options(store)
+	if opts.VCS == nil {
+		t.Error("options carry no VCS; promote would refuse the run it was wired into")
+	}
+	if opts.Isolator == nil {
+		t.Error("options carry no Isolator; a fanout winner could never be merged")
+	}
+
+	inPlace := planFor(t, goWorkspace(t), func(c *config.Config) { c.Output.Mode = config.OutputInPlace })
+	inPlace.resolveOutput(t.Context())
+	if got := inPlace.options(nil).VCS; got != nil {
+		t.Errorf("an in-place run's options carry a VCS (%T); nothing in such a run commits", got)
+	}
+}

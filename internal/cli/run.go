@@ -118,7 +118,7 @@ func startRun(cmd *cobra.Command, want string) error {
 	if err != nil {
 		return &ExitError{Code: graph.ExitFailed, Message: "belay: " + err.Error(), Err: err}
 	}
-	store, err := createRun(plan, runSpec{Workspace: plan.workspace, RunID: runID, Goal: want})
+	store, err := createRun(cmd.Context(), plan, runSpec{Workspace: plan.workspace, RunID: runID, Goal: want})
 	if err != nil {
 		return &ExitError{Code: graph.ExitFailed, Message: "belay: " + err.Error(), Err: err}
 	}
@@ -166,7 +166,7 @@ type runSpec struct {
 // that work. Calling createRun again for the same run id converges instead:
 // it writes the state again, whole, then the manifest. It must not be called
 // for a run whose manifest exists, which it would start over.
-func createRun(plan *runPlan, spec runSpec) (*state.Store, error) {
+func createRun(ctx context.Context, plan *runPlan, spec runSpec) (*state.Store, error) {
 	layout, err := state.NewLayout(spec.Workspace, spec.RunID)
 	if err != nil {
 		return nil, err
@@ -181,11 +181,21 @@ func createRun(plan *runPlan, spec runSpec) (*state.Store, error) {
 	}
 	now := time.Now().UTC()
 	manifest := state.NewManifest(now, spec.RunID, spec.Workspace, spec.Goal, plan.config)
-	if err := plan.prepareWorkspace(layout, &manifest); err != nil {
+	if err := plan.prepareWorkspace(ctx, layout, &manifest); err != nil {
 		return nil, err
 	}
 	if err := state.SaveManifest(layout.ManifestPath(), manifest); err != nil {
+		plan.unwindWorkspace(ctx, manifest.Output)
 		return nil, fmt.Errorf("cannot write %s: %w", layout.ManifestPath(), err)
+	}
+	// Only now, with the run findable, is the Layout pointed at the tree its
+	// nodes work in. RunDir does not move, so the manifest, the journal and
+	// the artifacts stay where every reader already looks for them.
+	if manifest.Output.Branched() {
+		layout, err = layout.WithWorkTree(workTreeFor(layout, manifest.Output))
+		if err != nil {
+			return nil, fmt.Errorf("cannot point run %s at its worktree: %w", spec.RunID, err)
+		}
 	}
 	return state.NewStore(layout), nil
 }
@@ -194,22 +204,141 @@ func createRun(plan *runPlan, spec runSpec) (*state.Store, error) {
 // the run's manifest whatever a later resume must know about it. createRun
 // calls it once, after the run's state is written and before its manifest is.
 //
-// Today it does nothing. Every run changes the workspace it was started in, so
-// there is nothing to create and nothing to record. The step exists so that a
-// run which works somewhere else — an isolator's workspace, such as a git
-// worktree — has one place to create it before the manifest pins it, instead
-// of a new write wedged in among createRun's.
+// An in-place run changes the workspace it was started in, so there is
+// nothing to create and nothing to record. A branch run works somewhere else:
+// this creates the branch belay/<run-id> at the commit HEAD is on, and a git
+// worktree for it under the run directory, and pins both through
+// Manifest.SetOutput — never by assigning Output, because the field and the
+// capability an older belay would have to refuse are one decision (ADR-0011,
+// and state.CapabilityOutputBranch).
 //
-// What it grows to do must keep to the order around it. It runs after
-// state.json, so a failure here leaves a directory with no manifest, which
-// nothing takes for a run. It runs before the manifest, so what it records
-// lands in the manifest's one write. And a failure after it, writing the
-// manifest, cannot undo what it made outside the run directory, so it must be
-// safe to repeat when createRun is called again for the same run id.
+// It keeps to the order around it. It runs after state.json, so a failure
+// here leaves a directory with no manifest, which nothing takes for a run. It
+// runs before the manifest, so what it records lands in the manifest's one
+// write. And it converges: called again for the same run id it adopts a
+// branch already at the same base and a worktree already registered, rather
+// than failing on what a previous attempt left.
 //
-//nolint:revive // layout and manifest are unused until a run can work outside its workspace; they are the step's contract.
-func (p *runPlan) prepareWorkspace(layout state.Layout, manifest *state.Manifest) error {
+// A failure part way leaves nothing behind. The branch is created first
+// because AddWorktree refuses to create one (internal/git says why: `worktree
+// add -b` leaks its branch when the add fails), so the only window is between
+// the two, and unwindWorkspace closes it.
+func (p *runPlan) prepareWorkspace(ctx context.Context, layout state.Layout, manifest *state.Manifest) error {
+	if !p.output.Branched() || p.repo == nil {
+		return nil
+	}
+	out := p.output
+	out.Branch = runBranch(layout.RunID())
+	out.WorkTree = layout.WorkTreeDir()
+
+	if err := p.createRunBranch(ctx, out); err != nil {
+		return err
+	}
+	manifest.SetOutput(out)
+	p.output = out
 	return nil
+}
+
+// createRunBranch creates the run's branch and the worktree it works in, and
+// leaves neither behind if the other cannot be made.
+func (p *runPlan) createRunBranch(ctx context.Context, out state.Output) error {
+	created, err := p.claimBranch(ctx, out)
+	if err != nil {
+		return err
+	}
+	if err := p.claimWorkTree(ctx, out); err != nil {
+		if created {
+			// Only a branch this call made is removed, and only at the
+			// commit this call put it at: DeleteBranch compares and swaps,
+			// so a branch something else moved in between is left alone.
+			if undo := p.repo.DeleteBranch(ctx, out.Branch, out.Base); undo != nil {
+				return errors.Join(err, fmt.Errorf("belay also could not remove the branch %s it had just created: %w",
+					out.Branch, undo))
+			}
+		}
+		return err
+	}
+	return nil
+}
+
+// claimBranch makes the run's branch, and reports whether this call made it.
+// A branch already at the run's base is adopted: createRun converges when it
+// is called again for the same run id, and its own crash is the reason it has
+// to.
+func (p *runPlan) claimBranch(ctx context.Context, out state.Output) (bool, error) {
+	switch tip, ok, err := p.repo.BranchTip(ctx, out.Branch); {
+	case err != nil:
+		return false, fmt.Errorf("cannot look for the branch %s: %w", out.Branch, err)
+	case ok && tip == out.Base:
+		return false, nil
+	case ok:
+		return false, fmt.Errorf("the branch %s already exists, at %s rather than this run's base %s; "+
+			"belay will not move a branch that may hold somebody's work",
+			out.Branch, shortCommit(tip), shortCommit(out.Base))
+	}
+	if err := p.repo.CreateBranch(ctx, out.Branch, out.Base); err != nil {
+		return false, fmt.Errorf("cannot create the branch %s at %s: %w", out.Branch, shortCommit(out.Base), err)
+	}
+	return true, nil
+}
+
+// claimWorkTree makes the worktree the run's nodes work in, adopting one
+// already checked out on the run's branch.
+func (p *runPlan) claimWorkTree(ctx context.Context, out state.Output) error {
+	list, err := p.repo.Worktrees(ctx)
+	if err != nil {
+		return fmt.Errorf("cannot list this repository's worktrees: %w", err)
+	}
+	for _, w := range list {
+		if w.Path != out.WorkTree {
+			continue
+		}
+		if w.Branch != out.Branch {
+			return fmt.Errorf("%s is already a worktree on %s, not on this run's branch %s",
+				out.WorkTree, orDetached(w.Branch), out.Branch)
+		}
+		return nil
+	}
+	if err := p.repo.AddWorktree(ctx, out.WorkTree, out.Branch); err != nil {
+		return fmt.Errorf("cannot create the run's worktree at %s: %w", out.WorkTree, err)
+	}
+	return nil
+}
+
+// unwindWorkspace removes what prepareWorkspace made, for the one failure
+// createRun can see: the manifest write, which is the last thing it does.
+//
+// A run directory with no manifest is already understood — nothing takes it
+// for a run, and `belay runs` reports it — but a branch is not. It lives in
+// the repository the person works in, outside any run directory, and with no
+// manifest naming it nothing would ever connect it back to the run that made
+// it. A crash here cannot be undone by anybody; docs/troubleshooting.md says
+// how to find such branches by hand.
+//
+// It reports what it could not remove rather than failing: createRun is
+// already returning an error, and replacing it with a cleanup error would
+// hide the reason the run did not start.
+func (p *runPlan) unwindWorkspace(ctx context.Context, out state.Output) {
+	if !out.Branched() || p.repo == nil {
+		return
+	}
+	if err := p.repo.RemoveWorktree(ctx, out.WorkTree); err != nil {
+		p.logger.Error("belay could not remove the worktree it had just created",
+			slog.String("worktree", out.WorkTree), slog.Any("error", err))
+		return
+	}
+	if err := p.repo.DeleteBranch(ctx, out.Branch, out.Base); err != nil {
+		p.logger.Error("belay could not remove the branch it had just created",
+			slog.String("branch", out.Branch), slog.Any("error", err))
+	}
+}
+
+// orDetached names a worktree's branch, or says it has none.
+func orDetached(branch string) string {
+	if branch == "" {
+		return "a detached HEAD"
+	}
+	return branch
 }
 
 // driveRun dispatches an existing run once, does what follows a dispatch,

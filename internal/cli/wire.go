@@ -18,11 +18,14 @@ import (
 	"github.com/dhaam-ai/belay/internal/exec"
 	"github.com/dhaam-ai/belay/internal/git"
 	"github.com/dhaam-ai/belay/internal/graph"
+	"github.com/dhaam-ai/belay/internal/isolate/dircopy"
+	"github.com/dhaam-ai/belay/internal/isolate/worktree"
 	"github.com/dhaam-ai/belay/internal/linter"
 	"github.com/dhaam-ai/belay/internal/nodes"
 	"github.com/dhaam-ai/belay/internal/runner"
 	"github.com/dhaam-ai/belay/internal/sonar/scanner"
 	"github.com/dhaam-ai/belay/internal/state"
+	"github.com/dhaam-ai/belay/internal/vcs"
 	"github.com/dhaam-ai/belay/pkg/belay"
 )
 
@@ -140,7 +143,58 @@ func (p *runPlan) options(store *state.Store) graph.Options {
 		Runner:   p.runner,
 		Linter:   p.linter,
 		Reviewer: p.reviewer,
+		Isolator: p.isolator(store),
+		VCS:      p.vcs(),
 	}
+}
+
+// vcs is the repository the promote node commits to, and nil for an in-place
+// run, which commits nothing. Nothing else in belay makes one, so a branch
+// run whose options carried none would reach promote and refuse there, after
+// paying for every step before it.
+func (p *runPlan) vcs() vcs.Repository {
+	if !p.output.Branched() || p.repo == nil {
+		// A typed nil in an interface is not nil, and promote checks for
+		// nil, so an in-place run must get an untyped one.
+		return nil
+	}
+	return p.repo
+}
+
+// isolator is what a fanout candidate's workspace is made with: a git
+// worktree on a branch of its own for a branch run, a directory copy
+// otherwise (see resolveOutput's isolatorName for how "auto" is read).
+//
+// It is built per store, because both isolators are rooted at one run's
+// candidates directory. A store it cannot be built for — no run yet, or a
+// root it cannot create — is not an error here: fanout is on no route belay
+// walks today, and refusing to start a run over an isolator nothing reaches
+// would stop runs that are fine. The failure is logged and the run proceeds
+// without one, which fanout itself refuses.
+func (p *runPlan) isolator(store *state.Store) belay.Isolator {
+	if store == nil {
+		return nil
+	}
+	root := store.Layout().CandidatesDir()
+	var (
+		iso belay.Isolator
+		err error
+	)
+	switch p.isolatorName() {
+	case config.IsolatorWorktree:
+		if p.repo == nil {
+			return nil
+		}
+		iso, err = worktree.New(p.repo, root, runBranch(store.Layout().RunID()), worktree.WithLogger(p.logger))
+	default:
+		iso, err = dircopy.New(root, dircopy.WithLogger(p.logger))
+	}
+	if err != nil {
+		p.logger.Error("belay could not build the isolator candidates would be made with",
+			slog.String("isolator", string(p.isolatorName())), slog.Any("error", err))
+		return nil
+	}
+	return iso
 }
 
 // gateName describes the quality gate this plan would run, in words.
