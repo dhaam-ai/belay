@@ -1,6 +1,11 @@
 package plan
 
-import "fmt"
+import (
+	"fmt"
+	"strings"
+
+	"github.com/dhaam-ai/belay/internal/state"
+)
 
 // SystemPrompt establishes the planning role for the agent invocation.
 //
@@ -71,7 +76,52 @@ What this change deliberately does not do, so the reviewer can tell an omission 
 - Do not write the implementation. Describe it precisely enough that someone else can.
 - If the goal is ambiguous, choose the most reasonable interpretation, state it in one sentence at the top of Summary, and plan on that basis. Do not stop to ask a question: nobody is at the other end of this session.`
 
-// userPrompt renders the plan request for goal against workDir.
-func userPrompt(goal, workDir string) string {
-	return fmt.Sprintf(planTemplate, goal, workDir)
+// revisionTemplate is appended to the user prompt when the run is being
+// asked for a new plan rather than a first one.
+//
+// It is appended rather than woven in, and only when there is a request,
+// so that a first plan's prompt is byte for byte what it has always been:
+// every cassette recorded against it still replays, and the evidence of an
+// old run still compares with the prompt this binary would send.
+//
+// The person's words are quoted as given and never interpreted. What they
+// wrote is the whole reason this request exists, and a prompt that
+// summarized it would be belay overruling the one instruction it was
+// handed.
+const revisionTemplate = `
+
+# Revision
+
+A plan for this goal already exists, and the person who read it asked for a different one. Write the plan again from the start: what you return replaces the previous plan in full, in exactly the sections listed above.
+
+%s`
+
+// revisionGuidance is the paragraph carrying what the person said, or the
+// stand-in for a request they made without saying anything. Asking again
+// with nothing to add is a legitimate request — they want another try, not
+// a repeat of the same answer — and the agent still has to be told that
+// much, or it will write the plan it just wrote.
+func revisionGuidance(guidance string) string {
+	if strings.TrimSpace(guidance) == "" {
+		return "They did not say what was wrong with it. Take a different approach to the same goal rather than restating the previous plan."
+	}
+	return "This is what they said should be different, in their own words. Follow it:\n\n" + guidance
+}
+
+// userPrompt renders the plan request for goal against workDir, plus the
+// revision section when r is a request for a new plan.
+//
+// It reads r.Request rather than r.Pending(). The node's Patch marks the
+// request served, and the dispatcher may apply that Patch and then die
+// before journalling the finish, which makes the node run again over a
+// blackboard where the request already reads as served. Keying on Pending
+// would send that re-run an ordinary plan prompt, silently dropping the
+// one thing the person said was wrong. Keying on Request asks the same
+// question both times.
+func userPrompt(goal, workDir string, r state.Regeneration) string {
+	prompt := fmt.Sprintf(planTemplate, goal, workDir)
+	if r.Request == 0 {
+		return prompt
+	}
+	return prompt + fmt.Sprintf(revisionTemplate, revisionGuidance(r.Guidance))
 }
