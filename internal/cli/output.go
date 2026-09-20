@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"path/filepath"
 	"strings"
 
@@ -237,6 +238,39 @@ func (p *runPlan) workStore(layout state.Layout) (*state.Store, error) {
 		return nil, fmt.Errorf("cannot point run %s at its worktree: %w", layout.RunID(), err)
 	}
 	return state.NewStore(redirected), nil
+}
+
+// finishRun does what belay does to a branch run's worktree once a dispatch
+// has returned. It is a step of afterCompletion, and like every step there it
+// cannot change how the run is reported.
+//
+// A completed run's result is on its branch, and the worktree is a second
+// checkout of the whole repository taking up disk for nothing. One left
+// behind per run fills a disk and clutters `git worktree list`, so it goes.
+//
+// A run that paused, failed or was stopped is not over. Its worktree is where
+// a person reads what belay did, finishes a conflicting merge by hand, or
+// resumes from. Removing it would throw away exactly the uncommitted work a
+// resume needs, which is why this asks the run's status rather than tidying
+// unconditionally.
+//
+// The branch is never deleted, whatever happened. It is the deliverable, and
+// deleting it would be deleting the run's result.
+func (p *runPlan) finishRun(ctx context.Context, view outcomeView) {
+	out := view.output
+	if out.Branch == "" {
+		out = p.output
+	}
+	if !out.Branched() || p.repo == nil || view.outcome.Status != state.RunStatusCompleted {
+		return
+	}
+	if err := p.repo.RemoveWorktree(ctx, out.WorkTree); err != nil {
+		// Said, never returned: the run's result is on its branch, and
+		// reporting a completed run as failed would tell a script to redo
+		// work that is already done.
+		p.logger.Error("belay could not remove this run's worktree; the run's result is on its branch and unaffected",
+			slog.String("worktree", out.WorkTree), slog.String("branch", out.Branch), slog.Any("error", err))
+	}
 }
 
 // workTreeFor returns the directory a branch run's nodes work in: the run's

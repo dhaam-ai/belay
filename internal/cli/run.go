@@ -353,7 +353,10 @@ func driveRun(cmd *cobra.Command, u *ui, plan *runPlan, store *state.Store, resu
 	if err != nil {
 		return &ExitError{Code: graph.ExitFailed, Message: "belay: " + err.Error(), Err: err}
 	}
-	afterCompletion(u, plan, view)
+	// The context here is the run's, which a Ctrl-C has already cancelled by
+	// the time a paused run reaches this. afterCompletion's steps must still
+	// run, so they are given the command's context rather than that one.
+	afterCompletion(cmd.Context(), u, plan, view)
 	return reportOutcome(u, view)
 }
 
@@ -393,7 +396,7 @@ func dispatchOnce(ctx context.Context, plan *runPlan, store *state.Store, resumi
 		dispatch = dispatcher.Resume
 	}
 	outcome, runErr := dispatch(ctx)
-	return outcomeView{layout: store.Layout(), outcome: outcome, runErr: runErr}, nil
+	return outcomeView{layout: store.Layout(), outcome: outcome, runErr: runErr, output: plan.output}, nil
 }
 
 // pauseOnCancel is the change driveRun makes to the dispatcher's Options:
@@ -415,6 +418,10 @@ func pauseOnCancel(o *graph.Options) { o.PauseOnCancel = true }
 //  1. Save the recording, when agent.mode is "record". This happens whatever
 //     the outcome: a run that failed or was stopped still made the calls it
 //     recorded.
+//  2. Tidy a finished branch run's worktree. It goes after the recording
+//     because saving the recording must not depend on a directory this step
+//     removes, and it reads how the run ended: a paused or failed run's
+//     worktree is where the person finishes, so only a completed run's goes.
 //
 // A new step goes into this list at the position its inputs require, with
 // the reason for that position beside it.
@@ -426,13 +433,13 @@ func pauseOnCancel(o *graph.Options) { o.PauseOnCancel = true }
 // finished has finished whether or not a step after it worked; reporting it
 // as failed would tell a script to redo work that is already done.
 //
-//nolint:revive // view is unused until a step depends on how the run ended; it is the steps' contract.
-func afterCompletion(u *ui, plan *runPlan, view outcomeView) {
+func afterCompletion(ctx context.Context, u *ui, plan *runPlan, view outcomeView) {
 	if path, err := plan.saveCassette(); err != nil {
 		u.note("belay: %v", err)
 	} else if path != "" {
 		u.say("  recording saved to %s", path)
 	}
+	plan.finishRun(ctx, view)
 }
 
 // stopOnSignal cancels ctx when the person running belay asks it to stop, and
@@ -478,12 +485,17 @@ func stopOnSignal(parent context.Context, u *ui) (context.Context, func()) {
 func announceStart(u *ui, plan *runPlan, layout state.Layout, want string) {
 	u.say("belay is starting a run in %s", plan.workspace)
 	u.say("  what you asked for:  %s", want)
+	u.say("  where it goes:       %s", plan.outputReason)
 	u.say("  most it can spend:   %s", u.emph(budgetCeiling(plan.config.Budget)))
 	u.say("  when it gets there:  %s", budgetOnExceed(plan.config.Budget))
 	u.say("  to stop it:          press Ctrl-C once; belay saves its state and exits")
 	u.say("")
 	u.say("run %s", layout.RunID())
 	u.say("  state:  %s", layout.RunDir())
+	if plan.output.Branched() {
+		u.say("  branch: %s, from %s", plan.output.Branch, shortCommit(plan.output.Base))
+		u.say("  tree:   %s", plan.output.WorkTree)
+	}
 	u.say("  route:  %s", routeLine(plan.route))
 	u.say("")
 }
@@ -505,6 +517,10 @@ type outcomeView struct {
 	// runErr is the dispatcher's error. It is part of how the run went, such
 	// as graph.ErrMaxSteps, not a failure to find out.
 	runErr error
+	// output is how the run delivers its result, as its manifest pinned it.
+	// The zero Output is an in-place run, and the report then says nothing
+	// about branches.
+	output state.Output
 }
 
 // reportOutcome turns an Outcome into the last thing a person reads, and into the
@@ -658,6 +674,13 @@ func nextSteps(view outcomeView) []string {
 			"", "    " + resume,
 		}
 	case errors.Is(runErr, graph.ErrRunPaused), outcome.Status == state.RunStatusPaused:
+		// A run paused at promote is not waiting for a plan to be read: two
+		// lines of work disagree, and only a person can say what to keep.
+		// Telling them to read a plan nobody is waiting on sends them to the
+		// wrong file and leaves the actual work unnamed.
+		if outcome.Node == graph.NodePromote {
+			return promoteSteps(view, resume)
+		}
 		lines := []string{"read the plan, edit it if you want to, then run:", "", "    " + resume}
 		if outcome.Node == graph.NodeApprove {
 			plan := filepath.Join(layout.ArtifactsDir(), "plan.md")
@@ -673,6 +696,13 @@ func nextSteps(view outcomeView) []string {
 	// it. Only a run that is paused or was interrupted is offered the
 	// command, so the report never names one that would refuse.
 	case outcome.Status == state.RunStatusCompleted:
+		// A branch run has already committed, on a branch the person's
+		// checkout is not on. "Review the change in your repository, then
+		// commit it" would name a change that is not there and a commit
+		// belay already made.
+		if view.output.Branched() {
+			return completedBranchSteps(view.output)
+		}
 		return []string{"review the change in your repository, then commit it"}
 	case outcome.Status == state.RunStatusAborted:
 		return []string{
@@ -685,6 +715,50 @@ func nextSteps(view outcomeView) []string {
 	default:
 		return []string{"continue with:", "", "    " + resume}
 	}
+}
+
+// promoteSteps is what to do about a run paused at promote: the worktree the
+// disagreement is in, and the command that picks the run back up once it is
+// settled. The node's own Note names the conflicting files and the branch to
+// merge, and reportOutcome prints it, so this does not repeat them.
+func promoteSteps(view outcomeView, resume string) []string {
+	out := view.output
+	if !out.Branched() || out.WorkTree == "" {
+		return []string{"belay could not finish putting this run's change on its branch.", "pick it up again with:", "", "    " + resume}
+	}
+	return []string{
+		"belay could not finish putting this run's change on " + out.Branch + " on its own.",
+		"settle it in the run's own worktree, then resume:",
+		"",
+		"    cd " + out.WorkTree,
+		"    git status",
+		"    " + resume,
+	}
+}
+
+// completedBranchSteps is what to do with a finished branch run: read what
+// belay committed, and take it, in the two commands that do each.
+func completedBranchSteps(out state.Output) []string {
+	lines := []string{
+		"belay committed its change to " + out.Branch + ", and your checkout was never touched.",
+		"read it, then take it:",
+		"",
+		"    git log -p " + baseRange(out),
+		"    git switch " + out.Branch,
+	}
+	if out.BaseRef != "" {
+		lines = append(lines, "    git merge "+out.Branch+"   # from "+out.BaseRef)
+	}
+	return lines
+}
+
+// baseRange is the revision range holding exactly what a run added, written
+// the way a person types it.
+func baseRange(out state.Output) string {
+	if out.Base == "" {
+		return out.Branch
+	}
+	return shortCommit(out.Base) + ".." + out.Branch
 }
 
 // refuseToStart reports every reason belay will not start, together, and stops.
@@ -757,6 +831,7 @@ func dryRunSections(u *ui, plan *runPlan, want, resuming string) []dryRunSection
 	}
 	sections = append(sections,
 		dryRunSection{title: "where belay would work", lines: []string{plan.workspace, projectLine(plan.projects)}},
+		dryRunOutput(plan),
 		dryRunSpend(u, plan),
 		dryRunSettings(plan),
 		dryRunRoute(plan),
@@ -766,6 +841,25 @@ func dryRunSections(u *ui, plan *runPlan, want, resuming string) []dryRunSection
 		sections = append(sections, dryRunSection{title: "worth knowing", lines: []string{w}})
 	}
 	return sections
+}
+
+// dryRunOutput is where a run's result would go, and why.
+//
+// It is the most consequential thing in the whole description — whether belay
+// edits the person's own files or works somewhere else entirely — so it is
+// said right after where belay would work, not buried among the settings. The
+// reason is printed with the answer because "auto" chose it, and a choice
+// nobody was told the reason for reads as belay ignoring the setting.
+func dryRunOutput(plan *runPlan) dryRunSection {
+	lines := []string{plan.outputReason}
+	if plan.output.Branched() {
+		lines = append(lines,
+			"branch       "+branchPrefix+"<run-id>, from "+shortCommit(plan.output.Base)+" on "+orDetached(plan.output.BaseRef),
+			"worktree     "+filepath.Join(plan.workspace, ".belay", "runs", "<run-id>", "worktree"),
+			"it commits once, after the quality gate passes, and never edits your checkout",
+		)
+	}
+	return dryRunSection{title: "where its result would go", lines: lines}
 }
 
 // dryRunSpend is the ceiling a run is held to, and what reaching it does.

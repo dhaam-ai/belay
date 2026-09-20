@@ -10,6 +10,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/google/go-cmp/cmp"
+
 	"github.com/dhaam-ai/belay/internal/config"
 	"github.com/dhaam-ai/belay/internal/graph"
 	"github.com/dhaam-ai/belay/internal/journal"
@@ -717,4 +719,178 @@ func TestWorkStoreRedirectsAResumedBranchRun(t *testing.T) {
 	if got := plain.Layout().WorkspaceDir(); got != dir {
 		t.Errorf("an in-place run works in %q, want the workspace %q", got, dir)
 	}
+}
+
+// What happens to the run's worktree when a dispatch returns depends on
+// whether the run is over.
+//
+// A completed run's result is on its branch, and the worktree is a second
+// checkout of the repository taking up disk for nothing; leaving one behind
+// per run fills a disk and clutters `git worktree list`. A run that paused or
+// failed is not over: its worktree is where the person reads what belay did,
+// finishes a merge by hand, or resumes. Removing it would throw away the
+// uncommitted work a resume needs.
+//
+// The branch is never deleted, whatever happened. It is the deliverable.
+func TestFinishRunKeepsTheBranchAndOnlyTidiesAFinishedRun(t *testing.T) {
+	tests := []struct {
+		name       string
+		status     state.RunStatus
+		wantRemove bool
+	}{
+		{"completed", state.RunStatusCompleted, true},
+		{"paused", state.RunStatusPaused, false},
+		{"failed", state.RunStatusFailed, false},
+		{"aborted", state.RunStatusAborted, false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			dir := gitWorkspace(t)
+			plan, err := resolve(resolveRequest{workspace: dir, logger: quietLogger(), context: t.Context()})
+			if err != nil {
+				t.Fatalf("resolve: %v", err)
+			}
+			const runID = "20260101T000000Z-c0ffee000000"
+			store, err := createRun(t.Context(), plan, runSpec{Workspace: dir, RunID: runID, Goal: "add a --json flag"})
+			if err != nil {
+				t.Fatalf("createRun: %v", err)
+			}
+			worktree := plan.output.WorkTree
+
+			plan.finishRun(t.Context(), outcomeView{
+				layout:  store.Layout(),
+				outcome: graph.Outcome{Status: tt.status},
+			})
+
+			_, statErr := os.Stat(worktree)
+			if removed := os.IsNotExist(statErr); removed != tt.wantRemove {
+				t.Errorf("worktree removed = %v, want %v (stat error %v)", removed, tt.wantRemove, statErr)
+			}
+			registered := strings.Contains(gitIn(t, dir, "worktree", "list", "--porcelain"), worktree)
+			if registered == tt.wantRemove {
+				t.Errorf("worktree still registered = %v, want %v", registered, !tt.wantRemove)
+			}
+			// The branch survives every outcome: it is the deliverable.
+			if got := gitIn(t, dir, "for-each-ref", "--format=%(refname:short)", "refs/heads/belay/"); got != "belay/"+runID {
+				t.Errorf("belay/%s did not survive a %v run (refs: %q)", runID, tt.status, got)
+			}
+		})
+	}
+}
+
+// A run paused at promote is paused for a reason nobody can guess from
+// "read the plan": two branches disagree, and the person has to decide. The
+// closing report has to name the worktree to do it in and the command that
+// picks the run back up.
+func TestNextStepsAfterAPromoteConflict(t *testing.T) {
+	layout, err := state.NewLayout("/repos/app", "20260101T000000Z-c0ffee000000")
+	if err != nil {
+		t.Fatalf("NewLayout: %v", err)
+	}
+	out := state.Output{
+		Mode: state.OutputBranch, Repo: "/repos/app",
+		Branch: "belay/20260101T000000Z-c0ffee000000", Base: "a0aa486bdfbf",
+		WorkTree: "/repos/app/.belay/runs/20260101T000000Z-c0ffee000000/worktree",
+	}
+	lines := strings.Join(nextSteps(outcomeView{
+		layout: layout,
+		output: out,
+		outcome: graph.Outcome{
+			Status: state.RunStatusPaused, Node: graph.NodePromote,
+			Note: "candidate c1 conflicts with belay/20260101T000000Z-c0ffee000000 in a.go",
+		},
+	}), "\n")
+
+	for _, want := range []string{out.WorkTree, "git status", "belay resume 20260101T000000Z-c0ffee000000"} {
+		if !strings.Contains(lines, want) {
+			t.Errorf("next steps do not mention %q:\n%s", want, lines)
+		}
+	}
+	if strings.Contains(lines, "read the plan") {
+		t.Errorf("next steps still tell the person to read a plan nobody is waiting on:\n%s", lines)
+	}
+}
+
+// A completed branch run must be reported by its branch, not by "review the
+// change in your repository, then commit it" — which names a change that is
+// not in the repository and a commit belay already made.
+func TestNextStepsAfterACompletedBranchRun(t *testing.T) {
+	layout, err := state.NewLayout("/repos/app", "20260101T000000Z-c0ffee000000")
+	if err != nil {
+		t.Fatalf("NewLayout: %v", err)
+	}
+	branch := "belay/20260101T000000Z-c0ffee000000"
+	lines := strings.Join(nextSteps(outcomeView{
+		layout:  layout,
+		output:  state.Output{Mode: state.OutputBranch, Repo: "/repos/app", Branch: branch, BaseRef: "main"},
+		outcome: graph.Outcome{Status: state.RunStatusCompleted, Node: graph.End},
+	}), "\n")
+
+	for _, want := range []string{branch, "git log", "git switch"} {
+		if !strings.Contains(lines, want) {
+			t.Errorf("next steps do not mention %q:\n%s", want, lines)
+		}
+	}
+	if strings.Contains(lines, "then commit it") {
+		t.Errorf("next steps tell the person to make a commit belay already made:\n%s", lines)
+	}
+}
+
+// Whether belay is about to edit your files or work somewhere else entirely
+// is the single most consequential thing a run does, so it is said before
+// anything is spent — in the dry run, and again as a real run starts.
+//
+// The dry run must also still create nothing. Describing a branch run reads
+// the repository, and `git status` without --no-optional-locks rewrites
+// .git/index, which would make "nothing was created" untrue in the one way a
+// person would never think to check.
+func TestDryRunDescribesBranchOutputAndCreatesNothing(t *testing.T) {
+	ws := gitWorkspace(t)
+	index := filepath.Join(ws, ".git", "index")
+	stampIndex(t, index)
+	before := listTree(t, ws)
+	beforeIndex := modTime(t, index)
+
+	out, _, err := runCLI(t, "--dry-run", "run", "--workspace", ws, "add tests")
+	if err != nil {
+		t.Fatalf("belay --dry-run run: %v\n%s", err, out)
+	}
+
+	for _, want := range []string{"belay/<run-id>", "never edits your checkout"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("the dry run does not say %q:\n%s", want, out)
+		}
+	}
+	if diff := cmp.Diff(before, listTree(t, ws)); diff != "" {
+		t.Errorf("a dry run created or removed files (-before +after):\n%s", diff)
+	}
+	if got := modTime(t, index); !got.Equal(beforeIndex) {
+		t.Errorf(".git/index was rewritten (%v -> %v); belay's git reads must pass --no-optional-locks", beforeIndex, got)
+	}
+	if refs := gitIn(t, ws, "for-each-ref", "--format=%(refname:short)", "refs/heads/belay/"); refs != "" {
+		t.Errorf("a dry run created branches: %q", refs)
+	}
+	if list := gitIn(t, ws, "worktree", "list", "--porcelain"); strings.Count(list, "worktree ") != 1 {
+		t.Errorf("a dry run created worktrees:\n%s", list)
+	}
+}
+
+// stampIndex gives .git/index a mod time in the past, so a rewrite of it
+// during the test is visible however coarse the filesystem's timestamps are.
+func stampIndex(t *testing.T, path string) {
+	t.Helper()
+	old := time.Now().Add(-2 * time.Hour)
+	if err := os.Chtimes(path, old, old); err != nil {
+		t.Fatalf("Chtimes(%q): %v", path, err)
+	}
+}
+
+// modTime reads a file's modification time.
+func modTime(t *testing.T, path string) time.Time {
+	t.Helper()
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatalf("Stat(%q): %v", path, err)
+	}
+	return info.ModTime()
 }

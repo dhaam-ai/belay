@@ -210,6 +210,9 @@ where belay would work
   /path/to/your/project
   belay found: go
 
+where its result would go
+  belay is editing this workspace directly: /path/to/your/project is not inside a git repository
+
 the most it could spend
   $5.00 or 2,000,000 tokens, whichever comes first
   belay stops the run before the next step
