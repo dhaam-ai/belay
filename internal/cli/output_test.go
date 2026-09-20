@@ -12,6 +12,8 @@ import (
 
 	"github.com/dhaam-ai/belay/internal/config"
 	"github.com/dhaam-ai/belay/internal/graph"
+	"github.com/dhaam-ai/belay/internal/journal"
+	"github.com/dhaam-ai/belay/internal/nodes/promote"
 	"github.com/dhaam-ai/belay/internal/state"
 )
 
@@ -416,5 +418,149 @@ func TestOptionsCarryTheRepositoryAndIsolatorOfABranchRun(t *testing.T) {
 	inPlace.resolveOutput(t.Context())
 	if got := inPlace.options(nil).VCS; got != nil {
 		t.Errorf("an in-place run's options carry a VCS (%T); nothing in such a run commits", got)
+	}
+}
+
+// writesAFile is a node that writes one file into the workspace it is given
+// and then routes to the quality gate's successor, standing in for the agent,
+// the tests and the gate. What it proves is where it wrote.
+type writesAFile struct {
+	name string
+	rel  string
+	body string
+	next string
+	// where records the workspace the node was actually handed.
+	where *string
+}
+
+func (n writesAFile) Name() string { return n.name }
+
+func (n writesAFile) Run(_ context.Context, rc *graph.RunContext) (graph.Result, error) {
+	*n.where = rc.Workspace
+	path := filepath.Join(rc.Workspace, filepath.FromSlash(n.rel))
+	if err := os.MkdirAll(filepath.Dir(path), 0o750); err != nil {
+		return graph.Result{Status: journal.StatusFailed}, err
+	}
+	if err := os.WriteFile(path, []byte(n.body), 0o600); err != nil {
+		return graph.Result{Status: journal.StatusFailed}, err
+	}
+	return graph.Result{Status: journal.StatusOK, Next: n.next, Note: "gate passed"}, nil
+}
+
+// This is the assertion the whole slice exists for: a real run in branch
+// mode, against a real git repository, leaves the user's checkout exactly as
+// it found it.
+//
+// Every other test here checks one seam. This one drives the seams belay
+// itself drives — resolve, createRun, dispatchOnce — with the real promote
+// node, the real internal/git repository and a real repository on disk, and
+// then asks git, not belay, what happened. The run's change is on
+// belay/<run-id> as one commit carrying the run's trailer; the user's HEAD,
+// its commit and its working tree are untouched, down to the file the run
+// wrote, which must not exist in the checkout at all.
+func TestRunOnABranchNeverTouchesTheUsersCheckout(t *testing.T) {
+	dir := gitWorkspace(t)
+	before := gitIn(t, dir, "rev-parse", "HEAD")
+	beforeRef := gitIn(t, dir, "rev-parse", "--abbrev-ref", "HEAD")
+
+	plan, err := resolve(resolveRequest{workspace: dir, logger: quietLogger(), context: t.Context()})
+	if err != nil {
+		t.Fatalf("resolve: %v", err)
+	}
+	if !plan.output.Branched() {
+		t.Fatalf("resolve did not choose branch output: %s", plan.outputReason)
+	}
+	if !slices.Contains(plan.route, graph.NodePromote) {
+		t.Fatalf("route %v has no promote node, so nothing would commit", plan.route)
+	}
+
+	const (
+		runID = "20260101T000000Z-c0ffee000000"
+		goal  = "add an Add helper to src/app.go"
+	)
+	store, err := createRun(t.Context(), plan, runSpec{Workspace: dir, RunID: runID, Goal: goal})
+	if err != nil {
+		t.Fatalf("createRun: %v", err)
+	}
+
+	// The graph is belay's own, with the steps that call an agent, a test
+	// runner and a linter replaced by one node that writes a file. promote,
+	// which is what this test is about, is the real one.
+	var wroteIn string
+	registry := graph.NewRegistry()
+	registry.MustRegister(
+		writesAFile{name: journal.FirstNode, rel: "src/app.go",
+			body: "package src\n\nfunc Add(a, b int) int { return a + b }\n",
+			next: graph.NodePromote, where: &wroteIn},
+		promote.New(),
+	)
+	plan.registry = registry
+
+	view, err := dispatchOnce(t.Context(), plan, store, false, func(o *graph.Options) {
+		o.Config.Graph.Approval = false
+	})
+	if err != nil {
+		t.Fatalf("dispatchOnce: %v", err)
+	}
+	if view.outcome.Status != state.RunStatusCompleted {
+		t.Fatalf("run status = %v (error %v), want %v", view.outcome.Status, view.runErr, state.RunStatusCompleted)
+	}
+
+	branch := "belay/" + runID
+	manifest, err := store.LoadManifest()
+	if err != nil {
+		t.Fatalf("LoadManifest: %v", err)
+	}
+
+	// The node worked in the run's worktree, not in the checkout.
+	if wroteIn != manifest.Output.WorkTree {
+		t.Errorf("the run's node worked in %q, want the run worktree %q", wroteIn, manifest.Output.WorkTree)
+	}
+
+	// The change is on the run's branch, as exactly one commit off the base.
+	if got := gitIn(t, dir, "rev-list", "--count", before+".."+branch); got != "1" {
+		t.Errorf("%s has %s commits since the base, want exactly 1", branch, got)
+	}
+	if got := gitIn(t, dir, "show", "--name-only", "--format=", branch); got != "src/app.go" {
+		t.Errorf("%s's commit changed %q, want src/app.go", branch, got)
+	}
+	msg := gitIn(t, dir, "log", "-1", "--format=%B", branch)
+	if !strings.Contains(msg, "Belay-Run: "+runID) {
+		t.Errorf("the commit message has no Belay-Run trailer:\n%s", msg)
+	}
+	if !strings.Contains(msg, goal) {
+		t.Errorf("the commit message does not say what the run was for:\n%s", msg)
+	}
+
+	// The commit is the user's own identity, not a bot's: nothing here set
+	// an author, so git used whatever the person's git is configured with.
+	if author := gitIn(t, dir, "log", "-1", "--format=%an <%ae>", branch); !strings.Contains(author, "@") {
+		t.Errorf("the commit has no author: %q", author)
+	}
+
+	// And the checkout: same branch, same commit, no new file, nothing dirty.
+	if got := gitIn(t, dir, "rev-parse", "HEAD"); got != before {
+		t.Errorf("the user's HEAD moved from %s to %s", before, got)
+	}
+	if got := gitIn(t, dir, "rev-parse", "--abbrev-ref", "HEAD"); got != beforeRef {
+		t.Errorf("the user's checkout was switched from %s to %s", beforeRef, got)
+	}
+	if got := gitIn(t, dir, "status", "--porcelain", "--", ":(exclude).belay"); got != "" {
+		t.Errorf("the user's checkout is no longer clean:\n%s", got)
+	}
+	if _, err := os.Stat(filepath.Join(dir, "src", "app.go")); !os.IsNotExist(err) {
+		t.Errorf("the run's file exists in the user's checkout (stat error %v); the whole point is that it does not", err)
+	}
+
+	// The promotion is recorded where `belay runs` and the timeline read it.
+	st, err := store.LoadState()
+	if err != nil {
+		t.Fatalf("LoadState: %v", err)
+	}
+	if st.Promotion.Branch != branch || st.Promotion.Files != 1 {
+		t.Errorf("state.Promotion = %+v, want %s with 1 changed file", st.Promotion, branch)
+	}
+	if got := gitIn(t, dir, "rev-parse", branch); st.Promotion.Commit != got {
+		t.Errorf("state.Promotion.Commit = %q, want the branch tip %q", st.Promotion.Commit, got)
 	}
 }
