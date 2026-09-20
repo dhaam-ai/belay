@@ -200,6 +200,66 @@ func TestGateOutcomesRouteThreeWays(t *testing.T) {
 	}
 }
 
+// TestReviewRoutesAPassToItsConfiguredSuccessor: in a run that delivers its
+// result on a branch, a passing gate is not the end of the run -- the change
+// still has to be committed, which is the promote node's job. Where a pass
+// goes is therefore wiring, decided once when the run is created and given to
+// the node as an option, and not something the node reads from configuration
+// that may have changed by the time the run is resumed.
+//
+// A failing gate still routes to the fix loop whatever the option says: the
+// successor is where a passing gate goes, not a general redirection.
+func TestReviewRoutesAPassToItsConfiguredSuccessor(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		opts     []review.Option
+		gate     belay.GateStatus
+		wantNext string
+	}{
+		{name: "a pass ends the run by default", gate: belay.GatePass, wantNext: graph.End},
+		{
+			name:     "a pass goes where the option says",
+			opts:     []review.Option{review.WithOnPass(graph.NodePromote)},
+			gate:     belay.GatePass,
+			wantNext: graph.NodePromote,
+		},
+		{name: "a failure routes to the fix loop", gate: belay.GateFail, wantNext: graph.NodeFix},
+		{
+			name:     "a failure still routes to the fix loop",
+			opts:     []review.Option{review.WithOnPass(graph.NodePromote)},
+			gate:     belay.GateFail,
+			wantNext: graph.NodeFix,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newFixture(t, config.ReviewModeLint, config.SeverityMajor)
+			severities := []belay.Severity{}
+			if tc.gate == belay.GateFail {
+				severities = append(severities, belay.SeverityBlocker)
+			}
+			f.rc.Linter = &belaytest.FakeLinter{
+				NameValue: "golangci-lint",
+				Responses: []belay.QualityReport{report("golangci-lint", tc.gate, severities...)},
+			}
+
+			res, err := review.New(tc.opts...).Run(t.Context(), f.rc)
+			if err != nil {
+				t.Fatalf("Run() error = %v", err)
+			}
+
+			if res.Next != tc.wantNext {
+				t.Errorf("Next = %q, want %q", res.Next, tc.wantNext)
+			}
+			if res.Status != journal.StatusOK {
+				t.Errorf("Status = %v, want %v", res.Status, journal.StatusOK)
+			}
+			if err := res.Validate(); err != nil {
+				t.Errorf("Result.Validate() = %v, want nil", err)
+			}
+		})
+	}
+}
+
 // TestFailingGateIsNotAGoError states the invariant in isolation, because it
 // is the one a future refactor is most likely to break: a failed gate is
 // exactly as much an error as a failing test, which is to say none at all.
