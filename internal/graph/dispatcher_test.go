@@ -7,12 +7,16 @@ import (
 	"fmt"
 	"io/fs"
 	"os"
+	"os/exec"
+	"path/filepath"
+	"syscall"
 	"testing"
 	"time"
 
 	"github.com/dhaam-ai/belay/internal/config"
 	"github.com/dhaam-ai/belay/internal/graph"
 	"github.com/dhaam-ai/belay/internal/journal"
+	"github.com/dhaam-ai/belay/internal/procgroup"
 	"github.com/dhaam-ai/belay/internal/state"
 	"github.com/dhaam-ai/belay/pkg/belay"
 )
@@ -503,6 +507,120 @@ func TestDispatcher_HealChargesAnAttemptItNeverSawFinish(t *testing.T) {
 				t.Errorf("Outcome.Usage = %+v, want %+v", out.Usage, tt.wantTotal)
 			}
 		})
+	}
+}
+
+// TestDispatcher_GivesANodeItsEvidenceDirectoryToRecordProcessesIn: every
+// process a node starts goes through internal/exec, which records it in the
+// directory on its context so that a belay killed with SIGKILL can find the
+// process again. The dispatcher is what puts it there, and it must be this
+// execution's own evidence directory.
+func TestDispatcher_GivesANodeItsEvidenceDirectoryToRecordProcessesIn(t *testing.T) {
+	h := newRun(t, config.Default(), "record what it starts")
+	var seen string
+	node := &contextReadingNode{name: graph.NodePlan, read: func(ctx context.Context) {
+		seen = procgroup.DirFrom(ctx)
+	}}
+
+	if _, err := h.dispatcher(t, node).Run(context.Background()); err != nil {
+		t.Fatalf("Run() error = %v, want nil", err)
+	}
+
+	want, err := h.layout.NodeDir(1, graph.NodePlan)
+	if err != nil {
+		t.Fatalf("NodeDir: %v", err)
+	}
+	if seen != want {
+		t.Errorf("the node's context carried %q, want its evidence directory %q", seen, want)
+	}
+}
+
+// contextReadingNode hands its context to read before finishing, so a test
+// can assert what the dispatcher put on it.
+type contextReadingNode struct {
+	name string
+	read func(context.Context)
+}
+
+func (n *contextReadingNode) Name() string { return n.name }
+
+func (n *contextReadingNode) Run(ctx context.Context, _ *graph.RunContext) (graph.Result, error) {
+	n.read(ctx)
+	return Result{Next: graph.End, Status: journal.StatusOK}, nil
+}
+
+// TestDispatcher_HealKillsProcessGroupsAKilledRunLeftRunning is the whole
+// point of recording a process group: a belay killed with SIGKILL leaves the
+// agent and the test suite running, in groups the terminal's Ctrl-C never
+// reaches, and nothing stopped them. Resuming the run kills them.
+//
+// The run below is in the state a kill -9 leaves: a node_started nothing
+// closed, and a live process group recorded in that execution's evidence
+// directory.
+func TestDispatcher_HealKillsProcessGroupsAKilledRunLeftRunning(t *testing.T) {
+	h := newRun(t, config.Default(), "clean up after a kill -9")
+	h.seedJournal(t,
+		journal.Record{Event: journal.EventRunStarted},
+		journal.Record{Event: journal.EventNodeStarted, Node: graph.NodeTest, Attempt: 1},
+	)
+
+	// The process the dead belay had started, recorded exactly as
+	// internal/exec records one.
+	sleeper := exec.Command("sleep", "60")
+	sleeper.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	if err := sleeper.Start(); err != nil {
+		t.Fatalf("start sleep: %v", err)
+	}
+	exited := make(chan struct{})
+	go func() {
+		if err := sleeper.Wait(); err != nil {
+			t.Logf("sleeper exited: %v", err) // expected: killed
+		}
+		close(exited)
+	}()
+	t.Cleanup(func() {
+		if err := syscall.Kill(-sleeper.Process.Pid, syscall.SIGKILL); err != nil &&
+			!errors.Is(err, syscall.ESRCH) {
+			t.Errorf("clean up process group: %v", err)
+		}
+		<-exited
+	})
+
+	nodeDir, err := h.layout.NodeDir(1, graph.NodeTest)
+	if err != nil {
+		t.Fatalf("NodeDir: %v", err)
+	}
+	tracked, err := procgroup.Track(nodeDir, []string{"go", "test", "./..."})
+	if err != nil {
+		t.Fatalf("Track: %v", err)
+	}
+	if err := tracked.Started(sleeper.Process.Pid); err != nil {
+		t.Fatalf("Started: %v", err)
+	}
+
+	out, err := h.dispatcher(t, ok(graph.NodeTest, graph.End)).Run(context.Background())
+	if err != nil {
+		t.Fatalf("Run() error = %v, want nil", err)
+	}
+	if out.Status != state.RunStatusCompleted {
+		t.Fatalf("Outcome.Status = %v, want completed", out.Status)
+	}
+
+	select {
+	case <-exited:
+	case <-time.After(10 * time.Second):
+		t.Fatalf("process %d is still running: resuming the run did not kill the group the kill -9 left behind",
+			sleeper.Process.Pid)
+	}
+
+	// The record is spent, so a later resume does not act on a pid that by
+	// then may belong to somebody else.
+	left, err := filepath.Glob(filepath.Join(nodeDir, "pgroup-*.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(left) != 0 {
+		t.Errorf("records left behind: %v", left)
 	}
 }
 

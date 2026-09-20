@@ -245,6 +245,17 @@ that only `pkg/belay` carries a compatibility promise. Everything under
   as estimated from then on. A run killed in its first paid step, before
   anything was spent, is still charged nothing, because there is nothing to
   go on. ADR-0007 explains the choice.
+- **Resuming a run kills the agent and test processes a kill -9 left
+  running.** belay starts each of them in a process group of its own and
+  kills that group when a step is cancelled or times out — but only while
+  belay is alive to do it. After a kill -9, or a second Ctrl-C, they were
+  left running: your terminal's Ctrl-C never reaches them, so an agent could
+  keep working, and keep spending, with nothing watching it. belay now
+  writes down every process it starts, in that step's directory under
+  `nodes/`, before the process starts, and `belay resume` kills whatever is
+  still running from the step that was interrupted. It checks each process's
+  start time first, so a process id that has since been given to something
+  else is never signalled.
 
 ## v0.1.4 — 2026-09-17
 

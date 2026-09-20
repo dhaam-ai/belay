@@ -11,6 +11,7 @@ import (
 	"github.com/dhaam-ai/belay/internal/budget"
 	"github.com/dhaam-ai/belay/internal/config"
 	"github.com/dhaam-ai/belay/internal/journal"
+	"github.com/dhaam-ai/belay/internal/procgroup"
 	"github.com/dhaam-ai/belay/internal/state"
 	"github.com/dhaam-ai/belay/pkg/belay"
 )
@@ -419,7 +420,9 @@ func (d *Dispatcher) dispatch(ctx context.Context, resuming bool) (Outcome, erro
 //     on its first crash. heal closes it as aborted, naming the same node in
 //     Next so that a crash during recovery itself still resolves back here,
 //     at the attempt after the one it closed (journal.Record.Interrupted),
-//     and charges ledger for it: see interruptedCharge.
+//     and charges ledger for it: see interruptedCharge. It also kills whatever
+//     the dead process left running, because the agent and the test suite
+//     outlive a belay killed with SIGKILL: see reap.
 //
 //   - A terminal node_finished with no run-level marker after it: the process
 //     died between ending a node and recording that the run ended. Left alone,
@@ -440,9 +443,24 @@ func (d *Dispatcher) heal(
 
 	switch last.Event {
 	case journal.EventNodeStarted:
+		// Reaped before the record is written, not after. A crash in
+		// between leaves the journal ending in this same node_started, so
+		// the next resume heals again and kills whatever is still running.
+		// Journalling first would leave behind records that no later heal
+		// would ever look for, because the journal would no longer end in an
+		// attempt nothing closed.
+		killed := d.reap()
 		charge := interruptedCharge(ledger)
 		note := fmt.Sprintf("interrupted: no completion record for attempt %d (the process died inside this node); "+
-			"charged $%.2f, estimated, since what it spent is unknown; re-running", last.Attempt, charge.USD)
+			"charged $%.2f, estimated, since what it spent is unknown", last.Attempt, charge.USD)
+		if killed > 0 {
+			groups := "process group"
+			if killed != 1 {
+				groups = "process groups"
+			}
+			note += fmt.Sprintf("; killed %d %s it had left running", killed, groups)
+		}
+		note += "; re-running"
 		// Journal first, then Record: the record is what a later resume
 		// rebuilds the ledger from, so a crash between the two costs this
 		// dispatch the charge but never the next one.
@@ -492,6 +510,41 @@ func interruptedAttempt(node string, attempt int, elapsed time.Duration, usage b
 		DurationMS: elapsed.Milliseconds(), Status: journal.StatusAborted, Next: node,
 		Usage: journalUsage(usage), Note: note,
 	}
+}
+
+// reap kills every process group this run started and never reaped, and
+// reports how many it killed.
+//
+// A process belay starts for a node outlives a belay that is killed with
+// SIGKILL, or quit by a second Ctrl-C: it is in a process group of its own,
+// which the terminal's Ctrl-C never reaches, and the kernel gives it to init.
+// An agent CLI left that way keeps spending. internal/exec records every such
+// process in its node's evidence directory, and this is where the records are
+// acted on, on the one path that means the previous process died inside a
+// node.
+//
+// It only ever reports. A record belay cannot act on is no reason to refuse to
+// continue a run, and procgroup.Reap never signals a process it cannot prove
+// belay started (see its doc on recycled pids).
+func (d *Dispatcher) reap() int {
+	killed := 0
+	for _, r := range procgroup.Reap(d.store.Layout().NodesDir()) {
+		switch {
+		case r.Outcome == procgroup.OutcomeKilled:
+			killed++
+			d.logger.Warn("belay/graph: killed a process this run had left running",
+				slog.Int("pid", r.Record.PID), slog.Any("command", r.Record.Argv))
+		case r.Err != nil:
+			d.logger.Warn("belay/graph: could not act on the record of a process this run started",
+				slog.String("outcome", r.Outcome.String()), slog.Int("pid", r.Record.PID),
+				slog.Any("command", r.Record.Argv), slog.String("error", r.Err.Error()))
+		default:
+			d.logger.Info("belay/graph: a process this run started is no longer its own",
+				slog.String("outcome", r.Outcome.String()), slog.Int("pid", r.Record.PID),
+				slog.Any("command", r.Record.Argv))
+		}
+	}
+	return killed
 }
 
 // interruptedCharge is what heal charges an attempt a crash left open: the
@@ -764,9 +817,20 @@ type nodeOutcome struct {
 // over the clock would make the cap advisory.
 func (d *Dispatcher) execute(ctx context.Context, n Node, rc *RunContext) nodeOutcome {
 	nodeCtx := ctx
+	// Every process a node starts goes through internal/exec, which records
+	// it in this directory, so that a belay killed with SIGKILL can find the
+	// process again and heal can kill it (internal/procgroup). It is this
+	// execution's own evidence directory, the one the node writes its prompt
+	// and captured output into.
+	if dir, err := rc.Layout.NodeDir(rc.Step, rc.NodeName); err != nil {
+		rc.Logger.Warn("belay/graph: no evidence directory for this node, so the processes it starts are not recorded",
+			slog.String("error", err.Error()))
+	} else {
+		nodeCtx = procgroup.WithDir(nodeCtx, dir)
+	}
 	cancel := context.CancelFunc(func() {})
 	if timeout := d.cfg.Graph.NodeTimeout.Duration(); timeout > 0 {
-		nodeCtx, cancel = context.WithTimeout(ctx, timeout)
+		nodeCtx, cancel = context.WithTimeout(nodeCtx, timeout)
 	}
 	defer cancel()
 
