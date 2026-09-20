@@ -122,8 +122,9 @@
 // the user's own tree. And it never runs in an in-place run: nothing puts it
 // there, and it refuses if something does.
 //
-// ADR-0012, which the slice that makes branch output selectable lands,
-// records the decision to deliver a run's result on a branch.
+// ADR-0012 will record the decision to deliver a run's result on a branch.
+// It is not written yet: the slice that makes branch output selectable, and
+// so makes this node reachable, writes it.
 package promote
 
 import (

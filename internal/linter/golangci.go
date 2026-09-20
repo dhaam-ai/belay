@@ -246,9 +246,10 @@ const gitCheckIgnoreName = "belay-scope-check.go"
 //     under a name nobody ignores, would be ignored.
 //   - A change inside a nested repository or submodule that the module's
 //     packages include. The enclosing repository's git never lists its files.
-//   - A commit made during the run. HEAD is read when the gate runs, and
-//     belay never commits, so it is normally the commit the run started from;
-//     a commit made since hides what it contains. Uncommitted edits made
+//   - A commit made during the run. HEAD is read when the gate runs, and the
+//     only commit belay makes is the promote node's, after the gate has
+//     passed, so HEAD is normally the commit the run started from; a commit
+//     made since hides what it contains. Uncommitted edits made
 //     before the run count as part of it.
 //   - Findings from another directory that holds byte-identical changed
 //     code and was linted with the same cache. golangci-lint keys its cache
