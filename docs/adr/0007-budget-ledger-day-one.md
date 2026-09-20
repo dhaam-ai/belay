@@ -49,7 +49,7 @@ A budget ledger tracks cumulative spend (USD and token counts) per run and per d
 
 ---
 
-## Amendment (2026-09-19): every step is charged, and a resume counts from the journal
+## Amendment (2026-09-19): every step is charged, a resume counts from the journal, and the ceiling pauses
 
 The ceiling this decision promises did not hold across a crash or a failed
 step. Three holes let a run spend past `budget.max_usd`:
@@ -89,8 +89,10 @@ The third point is a choice about which way to be wrong, because the real
 cost is unknowable: the process that would have reported it is dead, and an
 agent may have spent any amount before the kill. Charging nothing is wrong in
 the direction that breaks this ADR's promise. Charging too much only stops a
-run early. So the charge leans high, and it comes from the run's own evidence
-of what one of its steps costs, not from a second source of truth.
+run early, and a run stopped at its ceiling is paused, so raising the ceiling
+and resuming continues it. So the charge leans high, and it comes from the
+run's own evidence of what one of its steps costs, not from a second source of
+truth.
 
 ### Consequences
 
@@ -116,9 +118,35 @@ of what one of its steps costs, not from a second source of truth.
 - **Charge the most this same node has cost before.** Nothing at all for the
   commonest case, a crash during the first `code` or `fix` attempt.
 
+### Reaching the ceiling pauses the run; it does not end it
+
+This ADR said the run "aborts" at the cap, and it did: the run was over, and
+the only way on was a new run from nothing, which would spend everything again
+from zero. That made the cap punish the person for setting it low, and it
+worked against the ledger this ADR exists for, because the second run's spend
+was not counted against the first run's.
+
+A ceiling is not a verdict on the work. It is the figure someone chose
+beforehand for how much they were willing to pay, and they are allowed to
+change their mind when belay stops and tells them what it would cost to go on.
+So the run pauses at the ceiling, with the settings to raise in its note, and
+`belay resume` re-checks the ceiling against belay.yaml as it is then. The
+spend already made is kept, so resuming is not a fresh ceiling: a person who
+does not raise it simply meets it again, having run nothing and spent nothing.
+
+The same reasoning applies to the dispatcher's two other limits,
+`graph.max_steps` and `graph.node_timeout`, which pause a run for the same
+reason; internal/graph's Dispatcher doc argues it for the graph. The limits are
+read live on every dispatch, deliberately unlike the shape of the graph, which
+is pinned in the manifest when the run is created. The exit code does not
+change: an invocation stopped by a limit still exits 3.
+
 ### Revisit if
 
 - A backend reports usage as it goes, so that the dispatcher could journal
   partial spend before a crash instead of estimating it afterwards.
 - Estimated charges stop runs early often enough that people raise their
   ceilings by reflex.
+- People routinely raise a ceiling and resume without reading what the run had
+  spent, which would mean the ceiling has stopped being a decision and become
+  a prompt to click through.

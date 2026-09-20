@@ -314,7 +314,7 @@ Everything belay records about a run lives in `.belay/runs/<run-id>`:
 - `artifacts/` — the plan the agent generated (`artifacts/plan.md`), the agent's summary of the code it wrote, the diff each write step recorded, and the test and quality-gate reports
 - `nodes/` — for each step that called the agent, the prompt it sent and the reply it got
 
-If you stopped the run with Ctrl-C, or it crashed mid-execution, your work is safe on disk. `belay resume` picks it up where it left off: the step that was interrupted runs again, and the steps that finished do not. A run that belay stopped on its own, at the budget ceiling, `graph.max_steps` or `graph.node_timeout`, has ended instead; raise the limit and start a new run.
+If you stopped the run with Ctrl-C, or it crashed mid-execution, your work is safe on disk. `belay resume` picks it up where it left off: the step that was interrupted runs again, and the steps that finished do not. A run that belay stopped on its own, at the budget ceiling, `graph.max_steps` or `graph.node_timeout`, is waiting too: raise that setting in belay.yaml and `belay resume` carries on with what the run has already spent still counted, rather than spending it again from the beginning.
 
 If you want to delete a run, `rm -rf .belay/runs/<run-id>` is safe.
 

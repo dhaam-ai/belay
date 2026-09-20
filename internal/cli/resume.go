@@ -38,10 +38,15 @@ If you stopped the run with Ctrl-C, or belay was killed part-way through a
 step, resuming runs that step again from its start. The steps that finished
 are not run again.
 
+If belay stopped the run at one of its own limits — the budget ceiling,
+graph.max_steps or graph.node_timeout — it is paused, not over. Raise that
+setting in belay.yaml and resume: belay reads the limits again as it starts,
+so the run carries on with everything it has already spent still counted.
+Leave the setting as it is and the run simply stops at it again, having done
+nothing and spent nothing.
+
 Runs live under <workspace>/.belay/runs/, and "belay runs" lists them. A run
-that already finished or failed cannot be continued, and neither can one belay
-stopped on its own, such as at the budget ceiling, graph.max_steps or
-graph.node_timeout. Start a new one instead.
+that already finished or failed cannot be continued; start a new one instead.
 
 A run a newer belay wrote cannot be continued by this one: upgrade belay. While
 such a run is in the workspace, belay will not choose a run for you, since it

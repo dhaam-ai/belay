@@ -412,10 +412,15 @@ func TestLoop_ApprovalGatePausesAndResumes(t *testing.T) {
 }
 
 // TestLoop_BudgetCeilingStopsRun proves scenario 7: usage that pushes
-// cumulative spend over budget.max_usd aborts the run with
+// cumulative spend over budget.max_usd stops the run with
 // belay.ErrBudgetExceeded before the next node runs, not after it — the
 // ceiling is checked before every node dispatch, precisely so a run that
 // has already crossed it never pays for one more.
+//
+// The run is paused rather than ended, so that raising budget.max_usd and
+// resuming continues it with the spend it has already made: the money is
+// spent either way, and a run that could only be started again from nothing
+// would spend it a second time.
 func TestLoop_BudgetCeilingStopsRun(t *testing.T) {
 	cfg := config.Default()
 	cfg.Graph.Approval = false
@@ -440,9 +445,10 @@ func TestLoop_BudgetCeilingStopsRun(t *testing.T) {
 	if !errors.Is(err, belay.ErrBudgetExceeded) {
 		t.Fatalf("Run() error = %v, want one wrapping belay.ErrBudgetExceeded", err)
 	}
-	if out.Status != state.RunStatusAborted {
-		t.Errorf("Outcome.Status = %v, want %v", out.Status, state.RunStatusAborted)
+	if out.Status != state.RunStatusPaused {
+		t.Errorf("Outcome.Status = %v, want %v", out.Status, state.RunStatusPaused)
 	}
+	// The exit code a script reads does not change.
 	if out.ExitCode != graph.ExitAborted {
 		t.Errorf("Outcome.ExitCode = %d, want %d", out.ExitCode, graph.ExitAborted)
 	}
@@ -460,12 +466,12 @@ func TestLoop_BudgetCeilingStopsRun(t *testing.T) {
 		t.Errorf("runner invoked %d times, want 0: the run never reached the test node", got)
 	}
 
-	// No "code#1 started" line: the abort happens before the next node is
-	// even dispatched, not after it runs and is then judged too expensive.
+	// No "code#1 started" line: the run stops before the next node is even
+	// dispatched, not after it runs and is then judged too expensive.
 	want := []string{
 		"run_started",
 		"plan#1 started", "plan#1 finished ok -> code",
-		"run_aborted",
+		"run_paused",
 	}
 	if diff := cmp.Diff(want, h.timeline()); diff != "" {
 		t.Errorf("journal timeline mismatch (-want +got):\n%s", diff)

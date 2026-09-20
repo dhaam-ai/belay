@@ -38,6 +38,20 @@ that only `pkg/belay` carries a compatibility promise. Everything under
   `belay resume` does not offer it. Runs started by v0.1.x still resume, and
   are saved at version 2 from then on. With two belay installs, resume runs
   with the newer one. ADR-0011 records the decision.
+- **A run belay stops at one of its own limits is paused, not ended.**
+  Reaching `budget.max_usd` or `budget.max_tokens`, running out of
+  `graph.max_steps`, or overrunning `graph.node_timeout` used to end the run
+  for good: the only way on was a new run from nothing, which would spend the
+  whole budget again from zero. belay now pauses the run and says which
+  setting to raise. Raise it in belay.yaml and `belay resume <run-id>`
+  carries on with everything the run has already spent still counted; leave
+  it and the run stops at the same limit again, having done nothing and spent
+  nothing. These limits are read from belay.yaml every time a run is
+  resumed, unlike the shape of the graph, which is fixed when a run starts.
+  A step that overran `graph.node_timeout` runs again from its start. The
+  exit code is unchanged: an invocation belay stopped this way still exits 3,
+  so scripts can tell it from a run that paused for you to read the plan.
+  `belay runs` lists such a run as waiting, and `belay resume` accepts it.
 
 ### Fixed
 

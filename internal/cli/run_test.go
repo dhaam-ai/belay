@@ -713,52 +713,66 @@ func TestReportOutcomeMapsExitCodesAndExplainsItself(t *testing.T) {
 			wantNotSaid: []string{"saving", "into your repository"},
 		},
 		{
-			// A run that ended as aborted cannot be resumed: belay resume
-			// refuses it as "already stopped for good". So the report must
-			// not offer the command, but say what to do instead.
-			name: "aborted by the step cap",
+			// A limit belay stopped the run at is a setting the person can
+			// change: the run is paused, so the report names the setting to
+			// raise and the command that continues this run, rather than
+			// telling them to start again from nothing.
+			name: "stopped by the step cap",
 			outcome: graph.Outcome{
-				Status: state.RunStatusAborted, ExitCode: graph.ExitAborted,
+				Status: state.RunStatusPaused, ExitCode: graph.ExitAborted,
 				Node: graph.NodeFix, Steps: 60,
 			},
 			runErr:   graph.ErrMaxSteps,
 			wantCode: graph.ExitAborted,
 			wantSaid: []string{
 				"stopped itself", "kept going round without finishing", "graph.max_steps",
-				"this run has ended", `belay run "what you want built"`,
+				"belay resume " + layout.RunID(),
 			},
-			wantNotSaid: []string{"belay resume"},
+			wantNotSaid: []string{"this run has ended", `belay run "what you want built"`},
 		},
 		{
-			name: "aborted by the node timeout",
+			name: "stopped by the node timeout",
 			outcome: graph.Outcome{
-				Status: state.RunStatusAborted, ExitCode: graph.ExitAborted,
+				Status: state.RunStatusPaused, ExitCode: graph.ExitAborted,
 				Node: graph.NodeTest, Steps: 5,
 			},
 			runErr:   graph.ErrNodeTimeout,
 			wantCode: graph.ExitAborted,
 			wantSaid: []string{
-				"graph.node_timeout", "this run has ended", `belay run "what you want built"`,
+				"graph.node_timeout", "belay resume " + layout.RunID(),
 			},
-			wantNotSaid: []string{"belay resume"},
+			wantNotSaid: []string{"this run has ended", `belay run "what you want built"`},
 		},
 		{
 			// The same shape as the step cap and the timeout: which setting
-			// stopped the run, and the command that starts the next one.
-			// Either budget ceiling ends a run with the same error, so both
+			// stopped the run, and the command that continues it. Either
+			// budget ceiling stops a run with the same error, so both
 			// settings are named.
-			name: "aborted by the budget ceiling",
+			name: "stopped by the budget ceiling",
 			outcome: graph.Outcome{
-				Status: state.RunStatusAborted, ExitCode: graph.ExitAborted,
+				Status: state.RunStatusPaused, ExitCode: graph.ExitAborted,
 				Node: graph.NodeFix, Steps: 9,
 			},
 			runErr:   fmt.Errorf("graph: budget ceiling reached before %q: %w", graph.NodeFix, &belay.BudgetError{SpentUSD: 5.02, LimitUSD: 5}),
 			wantCode: graph.ExitAborted,
 			wantSaid: []string{
-				"stopped itself", "budget ceiling", "this run has ended",
-				"budget.max_usd", "budget.max_tokens", `belay run "what you want built"`,
+				"stopped itself", "budget ceiling", "budget.max_usd", "budget.max_tokens",
+				"belay resume " + layout.RunID(),
 			},
-			wantNotSaid: []string{"belay resume"},
+			wantNotSaid: []string{"this run has ended", `belay run "what you want built"`},
+		},
+		{
+			// The spend already made is kept, which is the reason for
+			// pausing rather than ending: it is not a fresh ceiling.
+			name: "a budget pause still reports what the run has spent",
+			outcome: graph.Outcome{
+				Status: state.RunStatusPaused, ExitCode: graph.ExitAborted,
+				Node: graph.NodeFix, Steps: 9,
+				Usage: belay.Usage{USD: 5.02, InputTokens: 1000, OutputTokens: 500},
+			},
+			runErr:   fmt.Errorf("graph: budget ceiling reached before %q: %w", graph.NodeFix, &belay.BudgetError{SpentUSD: 5.02, LimitUSD: 5}),
+			wantCode: graph.ExitAborted,
+			wantSaid: []string{"$5.02", "1,500 tokens"},
 		},
 		{
 			name: "aborted with no resume point",

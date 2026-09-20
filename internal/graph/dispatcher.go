@@ -28,13 +28,15 @@ const (
 	// StatusFailed, returned a non-nil error, or returned a Result the
 	// dispatcher could not act on.
 	ExitFailed = 1
-	// ExitAborted reports a run stopped by one of the dispatcher's guards
-	// rather than by the work itself: the budget ceiling, the MaxSteps cap,
-	// a node timeout, or cancellation of the caller's context. A
-	// cancellation that Options.PauseOnCancel turns into a pause exits
-	// with it too: the invocation still stopped short of where the graph
-	// would have taken it, and a script must be able to tell that from a
-	// pause the graph chose. Outcome.Status says the run can be resumed.
+	// ExitAborted reports a run stopped by one of the dispatcher's own
+	// limits rather than by the work itself: the budget ceiling, the
+	// MaxSteps cap, a node timeout, or cancellation of the caller's
+	// context. Every one of them pauses the run rather than ending it, and
+	// they exit with this code all the same: the invocation still stopped
+	// short of where the graph would have taken it, and a script must be
+	// able to tell that from a pause the graph chose, such as the approval
+	// gate. Outcome.Status says the run can be resumed, and the note says
+	// which setting to raise first.
 	ExitAborted = 3
 	// ExitPaused reports that a plain Run refused to advance a run whose
 	// journal ends in run_paused. It is distinct from ExitOK because the
@@ -242,9 +244,21 @@ type Options struct {
 // A cancellation that arrives between nodes pauses the run before the next
 // one starts, with no attempt opened. Resume then starts that node afresh.
 //
-// Only cancellation pauses. A node timeout is the dispatcher's own guard and
-// still ends the run, as the budget ceiling and the step cap do: they are
-// verdicts on the run, and a resume would only meet them again.
+// The dispatcher's own limits pause a run too, and for a different reason.
+// The budget ceiling, graph.max_steps and graph.node_timeout are not verdicts
+// on the work: they are the figures a person chose beforehand for how much of
+// it they were willing to pay for, and a person may raise one. Ending the run
+// put the money and the work already done out of reach, so the only way on
+// was a new run from nothing, which would spend it all again. So the run
+// pauses, with the setting to raise in its note, and Resume re-checks each
+// limit against the configuration as it is then: unlike the graph's shape,
+// which is pinned in the manifest when the run is created, the limits are
+// deliberately read live (see runContext). A limit left as it was is simply
+// met again, having run nothing and spent nothing.
+//
+// A node that outlived graph.node_timeout has its attempt closed as one to
+// run again, exactly as a cancelled one does, so that raising the limit and
+// resuming re-runs the step that overran.
 //
 // # Before the first write: establish the run
 //
@@ -699,15 +713,15 @@ func (d *Dispatcher) loop(
 		// one more node to discover it, and an aborting run must leave the
 		// journal with nothing open.
 		if err := ledger.Check(d.cfg.Budget); err != nil {
-			return d.endRun(jrnl, man, ledger, journal.EventRunAborted, state.RunStatusAborted,
-				ExitAborted, current, steps, d.note(err.Error()),
-				fmt.Errorf("graph: budget ceiling reached before %q: %w", current, err))
+			cause := fmt.Errorf("graph: budget ceiling reached before %q: %w", current, err)
+			return d.pauseAtLimit(jrnl, man, ledger, current, steps,
+				d.limitNote(cause, "budget.max_usd or budget.max_tokens"), cause)
 		}
 		if d.cfg.Graph.MaxSteps > 0 && man.Step >= d.cfg.Graph.MaxSteps {
 			err := fmt.Errorf("%w: %d node executions performed, limit is graph.max_steps=%d (raise it, or the graph is not converging)",
 				ErrMaxSteps, man.Step, d.cfg.Graph.MaxSteps)
-			return d.endRun(jrnl, man, ledger, journal.EventRunAborted, state.RunStatusAborted,
-				ExitAborted, current, steps, d.note(err.Error()), err)
+			return d.pauseAtLimit(jrnl, man, ledger, current, steps,
+				d.limitNote(err, "graph.max_steps"), err)
 		}
 		// A run its caller has cancelled starts nothing more. Started on a
 		// context that is already done, the node would be cut off at once,
@@ -884,11 +898,12 @@ func (d *Dispatcher) settle(
 	switch {
 	case exec.timedOut:
 		err := fmt.Errorf("%w: %q exceeded graph.node_timeout=%s", ErrNodeTimeout, node, d.cfg.Graph.NodeTimeout)
-		return d.terminal(jrnl, man, ledger, node, attempt, steps, exec.elapsed, exec.res.Usage,
-			journal.StatusAborted, journal.EventRunAborted, state.RunStatusAborted, ExitAborted,
-			d.note(err.Error()), err, logger)
+		return d.pauseInsideNode(jrnl, man, ledger, node, attempt, steps, exec.elapsed, exec.res.Usage,
+			d.limitNote(err, "graph.node_timeout"), err, logger)
 	case exec.canceled && d.pauseOnCancel:
-		return d.pauseInsideNode(jrnl, man, ledger, node, attempt, steps, exec.elapsed, exec.res.Usage, logger)
+		return d.pauseInsideNode(jrnl, man, ledger, node, attempt, steps, exec.elapsed, exec.res.Usage,
+			fmt.Sprintf("interrupted: belay was asked to stop while attempt %d was running; resuming re-runs it", attempt),
+			fmt.Errorf("%w: at %q: %w", ErrInterrupted, node, context.Canceled), logger)
 	case exec.canceled:
 		err := fmt.Errorf("%w: %q canceled: %w", ErrNodeAborted, node, context.Canceled)
 		return d.terminal(jrnl, man, ledger, node, attempt, steps, exec.elapsed, exec.res.Usage,
@@ -1002,21 +1017,56 @@ func (d *Dispatcher) settle(
 // blackboard it started from is what the Node contract already makes safe;
 // but the money the backend reported is gone whether or not the Result is
 // used, so usage is recorded and journalled (see settle).
+//
+// A node that outlived graph.node_timeout is paused the same way, and for the
+// same reason: closing the attempt as one to run again is what makes raising
+// the limit and resuming run that node, instead of starting the whole run
+// afresh. note and cause are the reason, which is all that differs between
+// the two callers.
+//
+//nolint:revive // the parameter list is this record's shape, as terminal's is.
 func (d *Dispatcher) pauseInsideNode(
 	jrnl *journal.Journal, man *state.Manifest, ledger *budget.Ledger,
-	node string, attempt, steps int, elapsed time.Duration, usage belay.Usage, logger *slog.Logger,
+	node string, attempt, steps int, elapsed time.Duration, usage belay.Usage,
+	note string, cause error, logger *slog.Logger,
 ) (*Outcome, error) {
-	logger.Warn("belay/graph: run interrupted; pausing it so the node re-runs on resume")
+	logger.Warn("belay/graph: pausing the run so this node runs again on resume",
+		slog.String("note", note))
 
-	note := fmt.Sprintf("interrupted: belay was asked to stop while attempt %d was running; resuming re-runs it", attempt)
 	ledger.Record(node, usage)
 	if _, err := jrnl.Append(interruptedAttempt(node, attempt, elapsed, usage, note)); err != nil {
 		return &Outcome{ExitCode: ExitFailed, Node: node, Steps: steps, Usage: ledger.Total()},
 			fmt.Errorf("graph: journal node_finished for %q: %w", node, err)
 	}
 
-	out, err := d.pauseInterrupted(jrnl, man, ledger, node, steps)
+	out, err := d.pauseAtLimit(jrnl, man, ledger, node, steps, note, cause)
 	return &out, err
+}
+
+// pauseAtLimit ends this dispatch by pausing the run at node rather than
+// ending it: the state each of the dispatcher's own limits leaves a run in,
+// and the one a cancellation leaves it in under Options.PauseOnCancel. It
+// must not be called while a node_started is open; pauseInsideNode closes one
+// first.
+//
+// The exit code stays ExitAborted. This invocation did stop short of where the
+// graph would have taken it, and a script has to be able to tell that from a
+// pause the graph chose, such as the approval gate (see ExitAborted).
+// Outcome.Status is what says the run can be continued.
+func (d *Dispatcher) pauseAtLimit(
+	jrnl *journal.Journal, man *state.Manifest, ledger *budget.Ledger,
+	node string, steps int, note string, cause error,
+) (Outcome, error) {
+	return d.endRun(jrnl, man, ledger, journal.EventRunPaused, state.RunStatusPaused,
+		ExitAborted, node, steps, note, cause)
+}
+
+// limitNote is what a run paused by one of the dispatcher's own limits carries
+// into the journal and the timeline: what stopped it, and which setting to
+// raise to get past it. `belay run` writes the command out; this is what
+// anyone reading the run's own record later sees.
+func (d *Dispatcher) limitNote(cause error, setting string) string {
+	return d.note(cause.Error()) + "; paused, so raising " + setting + " and resuming continues this run"
 }
 
 // pauseInterrupted ends this dispatch of a run its caller cancelled, pausing
@@ -1025,8 +1075,7 @@ func (d *Dispatcher) pauseInsideNode(
 func (d *Dispatcher) pauseInterrupted(
 	jrnl *journal.Journal, man *state.Manifest, ledger *budget.Ledger, node string, steps int,
 ) (Outcome, error) {
-	return d.endRun(jrnl, man, ledger, journal.EventRunPaused, state.RunStatusPaused,
-		ExitAborted, node, steps,
+	return d.pauseAtLimit(jrnl, man, ledger, node, steps,
 		fmt.Sprintf("interrupted at %q; use `belay resume` to continue", node),
 		fmt.Errorf("%w: at %q: %w", ErrInterrupted, node, context.Canceled))
 }
