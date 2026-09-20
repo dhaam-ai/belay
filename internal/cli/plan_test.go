@@ -8,6 +8,7 @@ import (
 	"slices"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/dhaam-ai/belay/internal/graph"
 	"github.com/dhaam-ai/belay/internal/journal"
@@ -499,4 +500,48 @@ func readFile(t *testing.T, path string) string {
 		t.Fatalf("read %s: %v", path, err)
 	}
 	return string(data)
+}
+
+// TestPlanShowsThePlanAndWhatCanBeDoneWithIt covers the command a person
+// reaches for first: no flags, no terminal needed, the plan on stdout with
+// the two things they can do next under it.
+func TestPlanShowsThePlanAndWhatCanBeDoneWithIt(t *testing.T) {
+	store := pausedAtTheGate(t, regenPlanBody)
+	ws := store.Layout().WorkspaceDir()
+	seedManifest(t, ws, store.Layout().RunID(), state.RunStatusPaused, graph.NodeApprove, "add tests", time.Now().UTC())
+
+	stdout, _, err := runCLI(t, "--workspace", ws, "plan", store.Layout().RunID())
+	if err != nil {
+		t.Fatalf("belay plan: %v", err)
+	}
+	for _, want := range []string{
+		"1. Write the test.",
+		filepath.Join(store.Layout().ArtifactsDir(), plan.ArtifactName),
+		"belay resume " + store.Layout().RunID(),
+		"--regenerate",
+	} {
+		if !strings.Contains(stdout, want) {
+			t.Errorf("belay plan does not show %q:\n%s", want, stdout)
+		}
+	}
+}
+
+// A run that has not planned yet has nothing to show, and says so in those
+// words rather than in the gate's internal vocabulary.
+func TestPlanSaysWhenThereIsNoPlanYet(t *testing.T) {
+	ws := goWorkspace(t)
+	p, err := resolve(resolveRequest{workspace: ws, logger: quietLogger()})
+	if err != nil {
+		t.Fatalf("resolve: %v", err)
+	}
+	store := seedRunDir(t, p, "add tests")
+	seedManifest(t, ws, store.Layout().RunID(), state.RunStatusRunning, graph.NodePlan, "add tests", time.Now().UTC())
+
+	_, _, err = runCLI(t, "--workspace", ws, "plan", store.Layout().RunID())
+	if err == nil {
+		t.Fatal("belay plan on a run with no plan returned no error")
+	}
+	if !strings.Contains(err.Error(), "has not written a plan yet") {
+		t.Errorf("the refusal does not say there is no plan yet: %v", err)
+	}
 }

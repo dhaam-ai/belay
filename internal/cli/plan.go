@@ -44,7 +44,8 @@ it, and continues the run: the plan step runs again, with your words in its
 prompt, and the run stops at the plan again so you can read the new one. It
 spends what a planning step spends, which belay says before it starts.
 
-A run only takes either while it is waiting at the plan for you.`,
+You can ask for a new plan only while a run is waiting at its plan for you;
+belay says where the run is instead if it is somewhere else.`,
 	Example: `  belay plan
   belay plan 20260905T153301Z-1f2e3d4c5b6a
   belay plan --regenerate "fewer steps; do not touch the parser"`,
@@ -93,6 +94,14 @@ func showPlan(cmd *cobra.Command, runID string) error {
 	st, err := state.NewStore(layout).LoadState()
 	if err != nil {
 		return &ExitError{Code: graph.ExitFailed, Message: "belay: cannot read this run's state: " + err.Error(), Err: err}
+	}
+	// A run belay has not planned yet has nothing to show. It is said in
+	// those words, rather than in the gate's ("path is not recorded in
+	// state"), because the person reading this did not ask about state.json.
+	if st.Plan.Path == "" {
+		err := fmt.Errorf("run %s has not written a plan yet; it is %s.\nWatch it, or pick it up, with: belay resume %s",
+			chosen.id, statusSentence(chosen.status, chosen.node), chosen.id)
+		return &ExitError{Code: graph.ExitFailed, Message: "belay: " + err.Error(), Err: err}
 	}
 	_, abs, err := approve.PlanArtifact(layout, st.Plan.Path)
 	if err != nil {
