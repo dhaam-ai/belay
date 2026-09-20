@@ -38,7 +38,7 @@ func readFixture(name string) ([]byte, error) {
 var parseable = []string{
 	"canonical.md", "nested.md", "paren.md", "lazy.md", "ten.md",
 	"crlf.md", "loose.md", "one.md", "unicode.md", "fenced.md", "nofinal.md",
-	"tailless.md", "tabs.md",
+	"tailless.md", "tabs.md", "harness.md",
 }
 
 // TestParseFindsTheSteps pins what a step is: an item of the first ordered

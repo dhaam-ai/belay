@@ -17,6 +17,7 @@ UTF-8 at all.
 
 | File | What it covers |
 | --- | --- |
+| `harness.md` | Not hand-authored: byte for byte the plan `loopPlanResponse` in `test/e2e/loop_agent.go` returns, archived the way `plan.Node.Run` archives one. Its `## Steps` heading is followed by the list with no blank line between. Keep it identical to that function. |
 | `canonical.md` | The ordinary plan: all six sections, a tight three-item list. |
 | `nested.md` | A sub-list and a fenced Go block inside steps, with a paragraph after the fence — the step must not end at its first indented line. |
 | `paren.md` | `1)` markers instead of `1.`. |
