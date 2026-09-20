@@ -564,3 +564,157 @@ func TestRunOnABranchNeverTouchesTheUsersCheckout(t *testing.T) {
 		t.Errorf("state.Promotion.Commit = %q, want the branch tip %q", st.Promotion.Commit, got)
 	}
 }
+
+// A resume finishes a run the way the run started, whatever belay.yaml says
+// by the time it is resumed.
+//
+// resolve builds a plan from the configuration on disk now, which may be days
+// newer than the run. A run started on a branch and resumed in place would
+// lose its promote node, end without committing, and edit the checkout its
+// owner was promised belay would not touch. So the pin in the manifest wins,
+// and the drift is said out loud rather than silently resolved.
+func TestResumeKeepsTheOutputTheRunStartedWith(t *testing.T) {
+	dir := gitWorkspace(t)
+	plan, err := resolve(resolveRequest{workspace: dir, logger: quietLogger(), context: t.Context()})
+	if err != nil {
+		t.Fatalf("resolve: %v", err)
+	}
+	const runID = "20260101T000000Z-c0ffee000000"
+	store, err := createRun(t.Context(), plan, runSpec{Workspace: dir, RunID: runID, Goal: "add a --json flag"})
+	if err != nil {
+		t.Fatalf("createRun: %v", err)
+	}
+
+	// belay.yaml now says in_place, which is what a fresh resolve would give
+	// a resume.
+	writeConfig(t, dir, "version: 1\noutput:\n  mode: \"in_place\"\n")
+	resumed, err := resolve(resolveRequest{workspace: dir, logger: quietLogger(), context: t.Context()})
+	if err != nil {
+		t.Fatalf("resolve after the config changed: %v", err)
+	}
+	if resumed.output.Branched() {
+		t.Fatal("the rewritten belay.yaml did not take effect, so this test proves nothing")
+	}
+
+	if err := resumed.resumePreflight(t.Context(), store); err != nil {
+		t.Fatalf("resumePreflight: %v", err)
+	}
+	if len(resumed.blockers) > 0 {
+		t.Fatalf("resumePreflight blocked a resumable run: %v", resumed.blockers)
+	}
+
+	if !resumed.output.Branched() {
+		t.Fatalf("the resumed plan is %q, want the branch output the run started with", resumed.output.Mode)
+	}
+	if !slices.Contains(resumed.route, graph.NodePromote) {
+		t.Errorf("route %v has no promote node; the run would end without committing", resumed.route)
+	}
+	if !slices.Contains(resumed.registry.Names(), graph.NodePromote) {
+		t.Errorf("registry %v has no promote node; the run would end on an unknown node", resumed.registry.Names())
+	}
+	if resumed.options(store).VCS == nil {
+		t.Error("the resumed plan has no repository, so promote would refuse the run")
+	}
+	joined := strings.Join(resumed.warnings, "\n")
+	for _, want := range []string{"output.mode", "in_place", "branch"} {
+		if !strings.Contains(joined, want) {
+			t.Errorf("warnings %q do not mention the drift (%q)", joined, want)
+		}
+	}
+}
+
+// A run whose worktree is gone cannot be continued, and belay must say so
+// before it spends anything rather than after.
+//
+// Without the check the dispatcher runs the run's nodes against a directory
+// that is not there, and it presents as a node failing — after the agent has
+// been called and paid for. The refusal names the commands that get the
+// person somewhere, and writes nothing at all to the run.
+func TestResumeRefusesAMissingRunWorktree(t *testing.T) {
+	dir := gitWorkspace(t)
+	plan, err := resolve(resolveRequest{workspace: dir, logger: quietLogger(), context: t.Context()})
+	if err != nil {
+		t.Fatalf("resolve: %v", err)
+	}
+	const runID = "20260101T000000Z-c0ffee000000"
+	store, err := createRun(t.Context(), plan, runSpec{Workspace: dir, RunID: runID, Goal: "add a --json flag"})
+	if err != nil {
+		t.Fatalf("createRun: %v", err)
+	}
+	worktree := store.Layout().WorkTreeDir()
+	if err := os.RemoveAll(worktree); err != nil {
+		t.Fatalf("remove the run worktree: %v", err)
+	}
+
+	resumed, err := resolve(resolveRequest{workspace: dir, logger: quietLogger(), context: t.Context()})
+	if err != nil {
+		t.Fatalf("resolve: %v", err)
+	}
+	if err := resumed.resumePreflight(t.Context(), store); err != nil {
+		t.Fatalf("resumePreflight returned an error, want a blocker: %v", err)
+	}
+	if len(resumed.blockers) == 0 {
+		t.Fatal("resumePreflight allowed a run whose worktree is gone")
+	}
+	said := resumed.blockers[0].problem + " " + resumed.blockers[0].fix
+	for _, want := range []string{worktree, "belay/" + runID, "git worktree"} {
+		if !strings.Contains(said, want) {
+			t.Errorf("blocker %q does not mention %q", said, want)
+		}
+	}
+
+	// Nothing is written: the run is exactly as it was found.
+	if _, err := os.Stat(store.Layout().JournalPath()); !os.IsNotExist(err) {
+		t.Errorf("resumePreflight opened the run's journal (stat error %v); it must write nothing", err)
+	}
+}
+
+// A resumed branch run must work in the run's worktree, exactly as the run
+// that created it did. The redirection lives in one place for both commands,
+// because `belay run` and `belay resume` disagreeing about where a run's
+// nodes write is the shape of bug nobody finds until a checkout is dirty.
+func TestWorkStoreRedirectsAResumedBranchRun(t *testing.T) {
+	dir := gitWorkspace(t)
+	plan, err := resolve(resolveRequest{workspace: dir, logger: quietLogger(), context: t.Context()})
+	if err != nil {
+		t.Fatalf("resolve: %v", err)
+	}
+	const runID = "20260101T000000Z-c0ffee000000"
+	if _, err := createRun(t.Context(), plan, runSpec{Workspace: dir, RunID: runID, Goal: "add a --json flag"}); err != nil {
+		t.Fatalf("createRun: %v", err)
+	}
+
+	layout, err := state.NewLayout(dir, runID)
+	if err != nil {
+		t.Fatalf("NewLayout: %v", err)
+	}
+	resumed, err := resolve(resolveRequest{workspace: dir, logger: quietLogger(), context: t.Context()})
+	if err != nil {
+		t.Fatalf("resolve: %v", err)
+	}
+	if err := resumed.resumePreflight(t.Context(), state.NewStore(layout)); err != nil {
+		t.Fatalf("resumePreflight: %v", err)
+	}
+
+	store, err := resumed.workStore(layout)
+	if err != nil {
+		t.Fatalf("workStore: %v", err)
+	}
+	if got, want := store.Layout().WorkspaceDir(), layout.WorkTreeDir(); got != want {
+		t.Errorf("a resumed branch run works in %q, want the run worktree %q", got, want)
+	}
+	if got := store.Layout().RunDir(); got != layout.RunDir() {
+		t.Errorf("the run directory moved to %q, want %q", got, layout.RunDir())
+	}
+
+	// An in-place run is unchanged: it works where it was started.
+	inPlace := planFor(t, dir, nil)
+	inPlace.output = state.Output{Mode: state.OutputInPlace}
+	plain, err := inPlace.workStore(layout)
+	if err != nil {
+		t.Fatalf("workStore(in place): %v", err)
+	}
+	if got := plain.Layout().WorkspaceDir(); got != dir {
+		t.Errorf("an in-place run works in %q, want the workspace %q", got, dir)
+	}
+}

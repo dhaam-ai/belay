@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"io/fs"
@@ -11,6 +12,8 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"github.com/dhaam-ai/belay/internal/exec"
+	"github.com/dhaam-ai/belay/internal/git"
 	"github.com/dhaam-ai/belay/internal/graph"
 	"github.com/dhaam-ai/belay/internal/journal"
 	"github.com/dhaam-ai/belay/internal/state"
@@ -100,7 +103,12 @@ func continueRun(cmd *cobra.Command, runID string) error {
 		return &ExitError{Code: graph.ExitFailed, Message: "belay: " + err.Error(), Err: err}
 	}
 	store := state.NewStore(layout)
-	if err := plan.resumePreflight(store); err != nil {
+	if err := plan.resumePreflight(cmd.Context(), store); err != nil {
+		return &ExitError{Code: graph.ExitFailed, Message: "belay: " + err.Error(), Err: err}
+	}
+	// The preflight is what settles the output, so the store the dispatcher
+	// gets is built after it, from the pin rather than from belay.yaml.
+	if store, err = plan.workStore(layout); err != nil {
 		return &ExitError{Code: graph.ExitFailed, Message: "belay: " + err.Error(), Err: err}
 	}
 
@@ -165,14 +173,141 @@ func continueRun(cmd *cobra.Command, runID string) error {
 // for a dry run too, and reports what it finds as blockers, beside the
 // plan's others.
 //
-// Today it checks nothing: no manifest pins anything yet. An error means the
-// check itself could not be made, such as a manifest that cannot be read. A
-// run that cannot be continued is a blocker instead, so that it is reported
-// with the others.
-//
-//nolint:revive // store is unused until a run's manifest pins something a resume must check; it is the hook's contract.
-func (p *runPlan) resumePreflight(store *state.Store) error {
+// An error means the check itself could not be made, such as a manifest that
+// cannot be read. A run that cannot be continued is a blocker instead, so
+// that it is reported with the others.
+func (p *runPlan) resumePreflight(ctx context.Context, store *state.Store) error {
+	manifest, err := store.LoadManifest()
+	if err != nil {
+		return fmt.Errorf("cannot read this run's manifest: %w", err)
+	}
+	p.bindOutput(ctx, manifest)
 	return nil
+}
+
+// bindOutput makes this plan continue the run the way that run started: from
+// the output its manifest pinned, never from belay.yaml as it is now.
+//
+// This is the resume half of the rule internal/nodes states. resolve built
+// the plan minutes ago from a configuration file that may be days newer than
+// the run. A run started on a branch and resumed in place would lose its
+// promote node, end without committing, and edit the checkout its owner was
+// promised belay would not touch; a run started in place and resumed on a
+// branch would look for a worktree nothing ever created. So the pin wins, and
+// the registry and the route are rebuilt from it.
+//
+// Drift is a warning, not a refusal. The run is fine — it is finishing the
+// way it started — but somebody who changed output.mode and then resumed is
+// entitled to know their change is not what this run is doing.
+func (p *runPlan) bindOutput(ctx context.Context, manifest state.Manifest) {
+	pinned, live := manifest.Output, p.output
+	if !pinned.Branched() && !live.Branched() {
+		return
+	}
+	p.output = pinned
+	if pinned.Mode != live.Mode {
+		p.warn("this run was started with output.mode %q, and belay.yaml now says %q. belay finishes a run the way "+
+			"it started, so this run stays on %q; the new setting applies to the next run you start.",
+			orInPlace(pinned.Mode), orInPlace(live.Mode), orInPlace(pinned.Mode))
+	}
+	// The registry and the route follow the output, so rebuilding one
+	// without the other shows a person a graph the dispatcher is not walking.
+	p.resolveRegistry()
+	if !pinned.Branched() {
+		// The run edits its workspace in place. Nothing above needs a
+		// repository, and opening one would only be a way to fail.
+		p.repo = nil
+		return
+	}
+	p.bindRunWorkTree(ctx, pinned)
+}
+
+// bindRunWorkTree reopens the repository a branch run commits to and checks
+// that the run's worktree is still there, on the run's own branch.
+//
+// Without the check the dispatcher runs this run's nodes against a directory
+// that is not there, and it presents as a node failing — after the agent has
+// been called and paid for. Every refusal names the commands that get a
+// person somewhere: the directory, the branch that still holds the work, and
+// how to make the worktree again.
+func (p *runPlan) bindRunWorkTree(ctx context.Context, out state.Output) {
+	repo, err := git.Open(ctx, exec.New(p.logger), out.Repo)
+	if err != nil {
+		p.block(
+			fmt.Sprintf("this run works on the branch %s in %s, and belay cannot open that repository: %v",
+				out.Branch, out.Repo, err),
+			"make sure the repository is where the run left it, or start a fresh run in a repository belay can read",
+		)
+		return
+	}
+	p.repo = repo
+
+	list, err := repo.Worktrees(ctx)
+	if err != nil {
+		p.block(
+			fmt.Sprintf("belay cannot list the worktrees of %s, so it cannot tell whether this run's own is still there: %v",
+				out.Repo, err),
+			"check that git works in that repository, then resume again",
+		)
+		return
+	}
+	for _, w := range list {
+		if w.Path != resolveWorkTreePath(out.WorkTree) {
+			continue
+		}
+		switch {
+		case w.Prunable, !isDir(out.WorkTree):
+			// Registered but not there: someone deleted the directory. git
+			// still lists the entry, so the registration alone proves
+			// nothing about whether a run can work in it.
+		case w.Branch != out.Branch:
+			p.block(
+				fmt.Sprintf("this run's worktree %s is on %s, not on the run's own branch %s.",
+					out.WorkTree, orDetached(w.Branch), out.Branch),
+				fmt.Sprintf("put it back with `git -C %s switch %s`, then resume", out.WorkTree, out.Branch),
+			)
+			return
+		default:
+			return
+		}
+		break
+	}
+	p.block(
+		fmt.Sprintf("this run works in its own git worktree at %s, and that worktree is gone. "+
+			"Everything it committed is still on the branch %s.", out.WorkTree, out.Branch),
+		fmt.Sprintf("make it again with `git -C %s worktree add %s %s`, then resume; "+
+			"or start a fresh run and take what you need from %s",
+			out.Repo, out.WorkTree, out.Branch, out.Branch),
+	)
+}
+
+// isDir reports whether path is a directory that is there to work in.
+func isDir(path string) bool {
+	info, err := os.Stat(path)
+	return err == nil && info.IsDir()
+}
+
+// resolveWorkTreePath returns path as git records worktree paths: resolved
+// through its symlinks, which on macOS turns /var/folders into
+// /private/var/folders. A path that is gone resolves through its parent.
+func resolveWorkTreePath(path string) string {
+	if resolved, err := filepath.EvalSymlinks(path); err == nil {
+		return resolved
+	}
+	parent, err := filepath.EvalSymlinks(filepath.Dir(path))
+	if err != nil {
+		return filepath.Clean(path)
+	}
+	return filepath.Join(parent, filepath.Base(path))
+}
+
+// orInPlace names an output mode, filling in for the empty one a manifest
+// written before the field existed decodes as.
+func orInPlace(mode state.OutputMode) string {
+	if mode == "" {
+		return string(state.OutputInPlace)
+	}
+	return string(mode)
 }
 
 // awaitsApproval reports whether resuming chosen is how a person approves its

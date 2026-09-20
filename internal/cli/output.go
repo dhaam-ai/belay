@@ -217,6 +217,28 @@ func (p *runPlan) warnAboutUncommittedWork(ctx context.Context, repo *git.Repo) 
 		p.workspace, len(dirty), dirty[0], shortCommit(p.output.Base))
 }
 
+// workStore returns the Store this run's dispatcher uses, with its Layout
+// pointed at the tree the run's nodes work in.
+//
+// A branch run works in its own git worktree; an in-place run works in the
+// workspace it was started in, which is what a Layout already says. It is one
+// function because `belay run` and `belay resume` must agree about where a
+// run's nodes write, and the shape of bug they would otherwise produce is
+// only found later, in a checkout that should have been clean.
+//
+// RunDir does not move either way: the manifest, the journal and the
+// artifacts stay where every reader already looks for them.
+func (p *runPlan) workStore(layout state.Layout) (*state.Store, error) {
+	if !p.output.Branched() {
+		return state.NewStore(layout), nil
+	}
+	redirected, err := layout.WithWorkTree(workTreeFor(layout, p.output))
+	if err != nil {
+		return nil, fmt.Errorf("cannot point run %s at its worktree: %w", layout.RunID(), err)
+	}
+	return state.NewStore(redirected), nil
+}
+
 // workTreeFor returns the directory a branch run's nodes work in: the run's
 // own git worktree, plus the prefix the run was started at, so a run started
 // in a subdirectory works on that subdirectory and not on the repository top.

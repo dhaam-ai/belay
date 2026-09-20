@@ -189,15 +189,8 @@ func createRun(ctx context.Context, plan *runPlan, spec runSpec) (*state.Store, 
 		return nil, fmt.Errorf("cannot write %s: %w", layout.ManifestPath(), err)
 	}
 	// Only now, with the run findable, is the Layout pointed at the tree its
-	// nodes work in. RunDir does not move, so the manifest, the journal and
-	// the artifacts stay where every reader already looks for them.
-	if manifest.Output.Branched() {
-		layout, err = layout.WithWorkTree(workTreeFor(layout, manifest.Output))
-		if err != nil {
-			return nil, fmt.Errorf("cannot point run %s at its worktree: %w", spec.RunID, err)
-		}
-	}
-	return state.NewStore(layout), nil
+	// nodes work in; workStore is the same step a resume takes.
+	return plan.workStore(layout)
 }
 
 // prepareWorkspace readies the workspace a new run will change, and records in
