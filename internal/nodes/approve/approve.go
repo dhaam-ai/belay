@@ -33,7 +33,6 @@
 package approve
 
 import (
-	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
@@ -109,49 +108,16 @@ var _ graph.Node = (*Node)(nil)
 // Name returns graph.NodeApprove.
 func (n *Node) Name() string { return graph.NodeApprove }
 
-// planFile resolves the plan artifact recorded in State.Plan to the bare
-// artifact name RunContext.ReadArtifact wants and the absolute path a human
-// needs to open.
-//
-// It refuses to guess. State.Plan.Path is documented as living under
-// artifacts/, and both "plan.md" and "artifacts/plan.md" occur in practice
-// depending on whether the writer stored WriteArtifact's return value; both
-// are accepted. Anything else — a nested path, a path outside the run
-// directory — is rejected rather than silently reduced to its basename,
-// because reducing it could make the gate fingerprint and approve a
-// different file than the one State points at.
-func planFile(rc *graph.RunContext) (name, abs string, err error) {
-	recorded := rc.State.Plan.Path
-	if recorded == "" {
-		return "", "", &PlanError{Path: "", Reason: "path is not recorded in state; the plan node must run first"}
-	}
-
-	name = filepath.Base(filepath.FromSlash(recorded))
-	abs, err = rc.Layout.ArtifactPath(name)
-	if err != nil {
-		return "", "", &PlanError{Path: recorded, Reason: "is not a usable artifact name", Err: err}
-	}
-	rel, err := filepath.Rel(rc.Layout.RunDir(), abs)
-	if err != nil {
-		return "", "", &PlanError{Path: recorded, Reason: "does not resolve inside the run directory", Err: err}
-	}
-
-	if slashed := filepath.ToSlash(recorded); slashed != name && slashed != filepath.ToSlash(rel) {
-		return "", "", &PlanError{
-			Path:   recorded,
-			Reason: fmt.Sprintf("is not a run artifact (want %q or %q)", filepath.ToSlash(rel), name),
-		}
-	}
-	return name, abs, nil
-}
-
 // readPlan returns the plan's absolute path and current contents.
 //
-// An empty plan is treated as unavailable rather than approvable: a
-// zero-byte plan.md means the human would be signing off on nothing, and
-// the code node would be handed no instructions at all.
+// Locating the file is PlanArtifact's rule and judging its contents is
+// CheckPlan's; this is only the read between them, so that a person's
+// editor, the CLI and the gate all meet the same file and the same
+// verdict. A plan that is not there is an error (see ErrPlanUnavailable);
+// a plan that is there and empty comes back as ErrPlanEmpty, which Run
+// answers differently.
 func readPlan(rc *graph.RunContext) (abs string, data []byte, err error) {
-	name, abs, err := planFile(rc)
+	name, abs, err := PlanArtifact(rc.Layout, rc.State.Plan.Path)
 	if err != nil {
 		return "", nil, err
 	}
@@ -159,8 +125,8 @@ func readPlan(rc *graph.RunContext) (abs string, data []byte, err error) {
 	if err != nil {
 		return "", nil, &PlanError{Path: abs, Reason: "cannot be read", Err: err}
 	}
-	if len(bytes.TrimSpace(data)) == 0 {
-		return "", nil, &PlanError{Path: abs, Reason: "is empty"}
+	if err := CheckPlan(data); err != nil {
+		return abs, nil, &PlanError{Path: abs, Reason: "is empty"}
 	}
 	return abs, data, nil
 }
