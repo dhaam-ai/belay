@@ -229,6 +229,101 @@ type Manifest struct {
 	Budget Budget `json:"budget"`
 	// Agent identifies the backend, model and mode this run used.
 	Agent AgentInfo `json:"agent"`
+	// Output is how this run delivers its result, pinned when the run was
+	// created and never read from live configuration afterwards. The zero
+	// Output is an in-place run, which is what every manifest written
+	// before this field existed decodes as. Set it with SetOutput, which
+	// also records the capability a branch run depends on.
+	Output Output `json:"output"`
+}
+
+// OutputMode names one way a run delivers its result. It is deliberately
+// not internal/config's own output mode: configuration also accepts
+// "auto", which is a question ("branch if this workspace can take one")
+// rather than an answer. Only the answer reaches a manifest, so a resumed
+// run can never re-ask it and get a different one.
+type OutputMode string
+
+const (
+	// OutputInPlace edits the workspace directly, which is what every
+	// belay before branch output did.
+	OutputInPlace OutputMode = "in_place"
+	// OutputBranch works in the run's own git worktree, on its own
+	// branch, and commits once the quality gate has passed.
+	OutputBranch OutputMode = "branch"
+)
+
+// CapabilityOutputBranch is the capability a branch-output run's manifest
+// declares in its requires list (ADR-0011).
+//
+// Output is a control field: a belay that did not understand it would
+// decode a branch-mode manifest, drop the block, and resume the run
+// editing the user's checkout in place — the one thing the run was
+// started not to do — and then write the manifest back without it. Naming
+// the capability turns that into a refusal that says to upgrade.
+//
+// Only a run that depends on the field declares it, so an in-place run,
+// whose behaviour is unchanged, requires nothing and stays resumable by
+// any belay that reads schema version 2.
+const CapabilityOutputBranch = "output.branch"
+
+// Output is how a run delivers its result: the mode, and, for a branch
+// run, everything about the branch it works on that outlives the process
+// that created it.
+//
+// It is plain data and holds no live handle, for the same reason
+// belay.Workspace does: a resumed run reconstructs its git repository,
+// isolator and branch from these fields alone.
+type Output struct {
+	// Mode is how the run delivers its result. Empty means OutputInPlace;
+	// see Branched.
+	Mode OutputMode `json:"mode"`
+	// Repo is the absolute path to the top of the git repository the run
+	// works in. Empty for an in-place run.
+	Repo string `json:"repo"`
+	// Branch is the branch the run commits to, such as
+	// "belay/20260101T000000Z-c0ffee000000".
+	Branch string `json:"branch"`
+	// Base is the commit Branch was created from: the run's "before", and
+	// what a promotion's changed-file count is measured against.
+	Base string `json:"base"`
+	// BaseRef is the branch that was checked out when the run started,
+	// which is what a pull request proposes to merge into.
+	BaseRef string `json:"base_ref"`
+	// WorkTree is the absolute path of the run's own git worktree, the
+	// tree its agent edits and its tests run in.
+	WorkTree string `json:"work_tree"`
+	// Prefix is the run's path within the repository, as git reports it
+	// ("sub/" or ""), so a run started in a subdirectory works on that
+	// subdirectory inside WorkTree rather than on the repository top.
+	Prefix string `json:"prefix"`
+	// PullRequest records that the caller asked for a draft pull request
+	// when the run was started, so a resume that was given no flags still
+	// opens one.
+	PullRequest bool `json:"pull_request"`
+}
+
+// Branched reports whether o delivers its result on a branch.
+//
+// It asks for OutputBranch rather than "not OutputInPlace" deliberately.
+// The zero Output is what a manifest written before this field existed
+// decodes as, and reading that as a branch would send every such run into
+// a promote node it was never started with — and, on resume, into a
+// worktree nothing ever created.
+func (o Output) Branched() bool { return o.Mode == OutputBranch }
+
+// SetOutput pins how this run delivers its result, and records the
+// capability that pin depends on.
+//
+// It is one call rather than two because the field and its capability are
+// one decision: a caller that assigned Output directly would write a
+// manifest an older belay silently misreads, and nothing would catch it
+// until that run was resumed. See CapabilityOutputBranch.
+func (m *Manifest) SetOutput(o Output) {
+	m.Output = o
+	if o.Branched() {
+		m.Requires = addCapability(m.Requires, CapabilityOutputBranch)
+	}
 }
 
 // NewManifest returns the manifest for a freshly started run: SchemaVersion

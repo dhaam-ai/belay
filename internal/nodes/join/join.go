@@ -8,7 +8,7 @@
 // returns a Patch setting state.Winner to the chosen candidate's ID. That is
 // all it does. It copies no files, merges nothing, and destroys no
 // workspaces: a winner is a decision, and acting on that decision is not
-// this node's job — see "Promotion is manual" below.
+// this node's job — see "Promotion" below.
 //
 // # The selection table
 //
@@ -41,19 +41,27 @@
 // and a stale winner from an earlier attempt outliving a join that found
 // none would be a lie the blackboard told forever.
 //
-// # Promotion is manual
+// # Promotion
 //
-// The winning candidate's changes are NOT copied back into the original
-// repository, by this node or by anything else in belay. ADR-0004 chose
-// plain directory copies over git worktrees and accepted "manual merge of
-// winning code" as the price: with worktrees, promoting a winner would be a
+// Who acts on the decision depends on what the candidates are, and it is
+// never this node.
+//
+// When they are branches — a run that delivers its result on a branch, whose
+// candidates are git worktrees — the winner goes to the promote node, which
+// merges its branch into the run's. WithOnSelected is how that edge is wired,
+// from the run's manifest, and the Note then says so instead of asking for a
+// copy by hand.
+//
+// When they are directory copies, nothing in belay promotes them. ADR-0004
+// chose plain directory copies over git worktrees and accepted "manual merge
+// of winning code" as the price: with worktrees, promoting a winner is a
 // branch merge; with directory copies there is no merge algorithm, and
 // inventing one here — copy every file that differs? every file the agent
 // reported changing? what about deletions? — would be a silent, unreviewable
 // three-way merge written by a node that has never seen the original tree.
 //
-// So the honest cost, which Run states in its Note, logs at Info, and this
-// doc states here, is that a human must do it:
+// So for those runs the honest cost, which Run states in its Note, logs at
+// Info, and this doc states here, is that a human must do it:
 //
 //  1. Take the winner's directory from state.Candidates[i].Dir, where i is
 //     the candidate whose ID equals state.Winner.
@@ -63,7 +71,8 @@
 //  3. Copy the wanted changes back by hand, resolving anything that
 //     conflicts with work done in the original tree since the run started.
 //  4. Delete the candidate directories under <run-dir>/candidates when
-//     finished; nothing reclaims them automatically.
+//     finished; nothing reclaims them automatically. (A run that promotes by
+//     merge has its candidates destroyed by the promote node instead.)
 //
 // # Errors versus results
 //
@@ -87,13 +96,39 @@ import (
 	"github.com/dhaam-ai/belay/internal/state"
 )
 
-// Node is the join graph node. It holds no state: everything it needs
-// arrives in the graph.RunContext, so one value is safe to register once and
-// reuse for the life of a process.
-type Node struct{}
+// Node is the join graph node. What it selects comes entirely from the
+// graph.RunContext; the one thing it holds is where a winner goes, which is
+// wiring, fixed when the node is built and the same for every execution.
+type Node struct {
+	// onSelected is where a selected winner goes: graph.End for a run that
+	// promotes by hand, or the node that merges it.
+	onSelected string
+}
 
-// New returns the join node.
-func New() *Node { return &Node{} }
+// Option configures where a join Node sends the winner it selected.
+//
+// The value it carries is decided once, when the run is created, and pinned
+// in the run's manifest; internal/nodes explains why an edge may not be read
+// from live configuration.
+type Option func(*Node)
+
+// WithOnSelected sends the selected winner to next instead of ending the
+// run. A run whose candidates are branches passes graph.NodePromote, which
+// merges the winner; the Note then stops telling the person to copy it by
+// hand, because belay is about to do it.
+func WithOnSelected(next string) Option {
+	return func(n *Node) { n.onSelected = next }
+}
+
+// New returns the join node. Without options a selected winner ends the run
+// and its changes are promoted by hand.
+func New(opts ...Option) *Node {
+	n := &Node{onSelected: graph.End}
+	for _, opt := range opts {
+		opt(n)
+	}
+	return n
+}
 
 var _ graph.Node = (*Node)(nil)
 
@@ -126,7 +161,7 @@ func (n *Node) Run(ctx context.Context, rc *graph.RunContext) (graph.Result, err
 	if !outcome.Selected() {
 		return noWinner(log, outcome), nil
 	}
-	return winner(log, outcome), nil
+	return winner(log, outcome, n.onSelected), nil
 }
 
 // noWinner reports that every candidate failed.
@@ -147,17 +182,18 @@ func noWinner(log *slog.Logger, outcome Outcome) graph.Result {
 	}
 }
 
-// winner reports the selected candidate and ends the run.
-func winner(log *slog.Logger, outcome Outcome) graph.Result {
+// winner reports the selected candidate and routes it to next, which is
+// graph.End for a run nothing can merge for.
+func winner(log *slog.Logger, outcome Outcome, next string) graph.Result {
 	id := outcome.Winner.ID
 	dir := outcome.Winner.Dir
 
 	if dir == "" {
 		// Not fatal: the selection itself only needs an ID, and the run's
 		// record of who won is still correct. It is worth saying out loud
-		// because promotion is manual, and a winner with no directory
-		// leaves the user nothing to promote from.
-		log.Warn("join: the winning candidate records no directory, so there is nothing to promote by hand", "winner", id)
+		// because a winner with no directory leaves nothing to promote
+		// from, by hand or by merge.
+		log.Warn("join: the winning candidate records no directory, so there is nothing to promote", "winner", id)
 	}
 	if !outcome.Strategy.Exact() {
 		log.Warn("join: the selection strategy is a documented approximation",
@@ -165,21 +201,27 @@ func winner(log *slog.Logger, outcome Outcome) graph.Result {
 			"approximation", outcome.Strategy.Approximation,
 		)
 	}
-	log.Info("join: selected a winning candidate; its changes are NOT promoted automatically (ADR-0004)",
+	log.Info("join: selected a winning candidate",
 		"winner", id,
 		"dir", dir,
+		"next", next,
 		"strategy", string(outcome.Strategy.Name),
 		"passed", outcome.Passed,
 		"candidates", outcome.Total,
 		"issues", outcome.Winner.IssueCount,
 	)
 
+	selected := fmt.Sprintf("%s selected candidate %s of %d (%d passed)",
+		outcome.Strategy.Name, id, outcome.Total, outcome.Passed)
+	note := selected + "; " + graph.NodePromote + " merges its branch into the run's"
+	if next == graph.End {
+		note = selected + "; belay does not merge, so copy its changes back from " + dirOrUnknown(dir) + " by hand"
+	}
 	return graph.Result{
-		Next:   graph.End,
+		Next:   next,
 		Status: journal.StatusOK,
 		Patch:  state.Patch{Winner: &id},
-		Note: fmt.Sprintf("%s selected candidate %s of %d (%d passed); belay does not merge, so copy its changes back from %s by hand",
-			outcome.Strategy.Name, id, outcome.Total, outcome.Passed, dirOrUnknown(dir)),
+		Note:   note,
 	}
 }
 

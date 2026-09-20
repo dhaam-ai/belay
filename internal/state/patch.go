@@ -41,6 +41,8 @@ type Patch struct {
 	Candidates *[]Candidate
 	// Winner replaces State.Winner.
 	Winner *string
+	// Promotion replaces State.Promotion wholesale.
+	Promotion *Promotion
 	// History appends one HistoryEntry to State.History, or — if an entry
 	// with the same Seq is already present — replaces it in place. Seq is
 	// the dedup key that makes a repeated Apply of the same Patch
@@ -85,6 +87,9 @@ func (p Patch) Apply(s *State) error {
 	}
 	if p.Winner != nil {
 		s.Winner = *p.Winner
+	}
+	if p.Promotion != nil {
+		s.Promotion = *p.Promotion
 	}
 	if p.History != nil {
 		upsertHistory(&s.History, *p.History)

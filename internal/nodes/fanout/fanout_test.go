@@ -328,13 +328,68 @@ func ephemeralIsolator(t *testing.T, onCreate func(calls int)) *belaytest.FakeIs
 	return iso
 }
 
+// candidateDirs is the record fanout makes of the candidates
+// ephemeralIsolator creates: each in its own directory, and each one the
+// isolator says Destroy really removes.
 func candidateDirs(t *testing.T, src string, ids ...string) []state.Candidate {
 	t.Helper()
 	out := make([]state.Candidate, 0, len(ids))
 	for _, id := range ids {
-		out = append(out, state.Candidate{ID: id, Dir: filepath.Join(src+"-candidates", id)})
+		out = append(out, state.Candidate{ID: id, Dir: filepath.Join(src+"-candidates", id), Ephemeral: true})
 	}
 	return out
+}
+
+// TestFanoutRecordsWhetherACandidateIsEphemeral: whatever cleans candidates
+// up later — the promote node, once it has merged a winner — can destroy
+// only what it knows belay created, and the isolator is the only one that
+// knows. A "no isolation" isolator hands back the user's own tree with
+// Ephemeral false, and that tree must never be destroyed, so the flag has
+// to reach the blackboard for every candidate, not be assumed from the
+// first.
+func TestFanoutRecordsWhetherACandidateIsEphemeral(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		ephemeral func(call int) bool
+		want      []bool
+	}{
+		{name: "an isolator that copies", ephemeral: func(int) bool { return true }, want: []bool{true, true, true}},
+		{name: "an isolator that isolates nothing", ephemeral: func(int) bool { return false }, want: []bool{false, false, false}},
+		{
+			// Mixed, so a node that recorded one value for all of them,
+			// or took it from the first candidate, cannot pass.
+			name:      "each candidate is recorded as its own workspace was made",
+			ephemeral: func(call int) bool { return call%2 == 1 },
+			want:      []bool{false, true, false},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			layout, src := newLayout(t)
+			iso := &belaytest.FakeIsolator{}
+			calls := 0
+			iso.CreateFunc = func(_ context.Context, _ string, id string) (belay.Workspace, error) {
+				ws := belay.Workspace{ID: id, Dir: filepath.Join(src+"-candidates", id), Ephemeral: tc.ephemeral(calls)}
+				calls++
+				return ws, nil
+			}
+			rc := newRunContext(enabledConfig(len(tc.want)), layout, iso, state.Budget{LimitUSD: 10})
+
+			res, err := fanout.New().Run(context.Background(), rc)
+			if err != nil {
+				t.Fatalf("Run() error = %v, want nil", err)
+			}
+			if res.Patch.Candidates == nil {
+				t.Fatal("Patch.Candidates is nil, want the created candidates")
+			}
+			got := make([]bool, 0, len(*res.Patch.Candidates))
+			for _, c := range *res.Patch.Candidates {
+				got = append(got, c.Ephemeral)
+			}
+			if diff := cmp.Diff(tc.want, got); diff != "" {
+				t.Errorf("recorded Ephemeral per candidate mismatch (-want +got):\n%s", diff)
+			}
+		})
+	}
 }
 
 func TestRunCreatesAndRecordsCandidates(t *testing.T) {

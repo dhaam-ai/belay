@@ -9,7 +9,9 @@
 // (Result, nil) exactly like a failing test — the fix node is the whole point
 // of gating, so reaching it is the gate succeeding, not failing.
 //
-//   - Gate passes: (Result{Next: graph.End, Status: StatusOK}, nil).
+//   - Gate passes: (Result{Next: graph.End, Status: StatusOK}, nil), or
+//     Next: the node WithOnPass names, for a run that still has to commit
+//     what the gate passed.
 //   - Gate fails:  (Result{Next: graph.NodeFix, Status: StatusOK}, nil).
 //   - No verdict:  (Result{Status: StatusFailed}, err). The tool ran but
 //     reached no conclusion, or could not run at all.
@@ -97,10 +99,34 @@ var (
 // everything it produces leaves in the graph.Result. One Node is therefore
 // safe to register once and re-run for every step of every run, which is what
 // the dispatcher's crash-recovery contract requires of it.
-type Node struct{}
+type Node struct {
+	// onPass is where a passing gate goes: graph.End, or the node that
+	// promotes the change in a run that delivers one on a branch.
+	onPass string
+}
 
-// New returns a review Node.
-func New() *Node { return &Node{} }
+// Option configures where a review Node sends a run whose gate passed.
+//
+// The value it carries is decided once, when the run is created, and pinned
+// in the run's manifest; internal/nodes explains why an edge may not be read
+// from live configuration.
+type Option func(*Node)
+
+// WithOnPass sends a passing gate to next instead of ending the run. A run
+// that delivers its result on a branch passes graph.NodePromote, because its
+// change still has to be committed after the gate has passed.
+func WithOnPass(next string) Option {
+	return func(n *Node) { n.onPass = next }
+}
+
+// New returns a review Node. Without options a passing gate ends the run.
+func New(opts ...Option) *Node {
+	n := &Node{onPass: graph.End}
+	for _, opt := range opts {
+		opt(n)
+	}
+	return n
+}
 
 // Name implements graph.Node and returns graph.NodeReview.
 func (*Node) Name() string { return graph.NodeReview }
@@ -110,8 +136,10 @@ var _ graph.Node = (*Node)(nil)
 // Run implements graph.Node: it runs the configured quality gate and routes
 // on the verdict.
 //
-// A passing gate ends the run (graph.End); a failing gate routes to
-// graph.NodeFix. Both are (Result, nil). A non-nil error means no verdict was
+// A passing gate ends the run (graph.End), or goes to the successor
+// WithOnPass named; a failing gate routes to graph.NodeFix whatever that
+// option says, because the successor is where a pass goes and not a general
+// redirection. Both are (Result, nil). A non-nil error means no verdict was
 // reached, and every such Result leaves Next empty so that no error path can
 // route to the fix loop.
 //
@@ -121,7 +149,7 @@ var _ graph.Node = (*Node)(nil)
 // an agent internally must therefore account for its own spend at the adapter
 // or budget layer; this node cannot see it, and reporting a fabricated zero
 // is honest where inventing a number would not be.
-func (*Node) Run(ctx context.Context, rc *graph.RunContext) (graph.Result, error) {
+func (n *Node) Run(ctx context.Context, rc *graph.RunContext) (graph.Result, error) {
 	if rc == nil {
 		return graph.Result{Status: journal.StatusFailed}, errors.New("belay/review: nil run context")
 	}
@@ -142,7 +170,7 @@ func (*Node) Run(ctx context.Context, rc *graph.RunContext) (graph.Result, error
 	if err != nil {
 		return abortedOrFailed(err), err
 	}
-	return verdict(rc, report, failOn)
+	return verdict(rc, report, failOn, n.onPass)
 }
 
 // threshold converts review.fail_on, a config.Severity string, into the
@@ -245,8 +273,9 @@ func abortedOrFailed(err error) graph.Result {
 	return graph.Result{Status: journal.StatusFailed}
 }
 
-// verdict resolves the gate, records the report, and routes.
-func verdict(rc *graph.RunContext, report belay.QualityReport, failOn belay.Severity) (graph.Result, error) {
+// verdict resolves the gate, records the report, and routes: a pass to
+// onPass, a failure to the fix loop, and no verdict at all to nowhere.
+func verdict(rc *graph.RunContext, report belay.QualityReport, failOn belay.Severity, onPass string) (graph.Result, error) {
 	log := logger(rc)
 	gate := resolveGate(report.Gate, report.Counts, failOn)
 	if gate != report.Gate {
@@ -300,7 +329,7 @@ func verdict(rc *graph.RunContext, report belay.QualityReport, failOn belay.Seve
 
 	switch gate {
 	case belay.GatePass:
-		return graph.Result{Next: graph.End, Status: journal.StatusOK, Patch: patch, Note: note}, nil
+		return graph.Result{Next: onPass, Status: journal.StatusOK, Patch: patch, Note: note}, nil
 	case belay.GateFail:
 		return graph.Result{Next: graph.NodeFix, Status: journal.StatusOK, Patch: patch, Note: note}, nil
 	default:

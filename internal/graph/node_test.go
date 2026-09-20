@@ -109,6 +109,7 @@ func TestCanonicalNodeNamesAreDistinctAndRegistrable(t *testing.T) {
 	all := []string{
 		graph.NodePlan, graph.NodeApprove, graph.NodeCode, graph.NodeWrite,
 		graph.NodeTest, graph.NodeFix, graph.NodeReview, graph.NodeFanout, graph.NodeJoin,
+		graph.NodePromote,
 	}
 	r := graph.NewRegistry()
 	for _, n := range all {

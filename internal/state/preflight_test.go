@@ -91,8 +91,10 @@ func TestStorePreflight(t *testing.T) {
 			wantManifest: ManifestSchemaVersion,
 		},
 		{
+			// A name no belay has: "output.branch" stood in for one
+			// until this binary gained it.
 			name:         "state.json requiring a capability this belay lacks is refused, and nothing is written",
-			stateKeys:    map[string]any{"requires": []any{"output.branch"}},
+			stateKeys:    map[string]any{"requires": []any{"from.the.future"}},
 			wantErr:      ErrUnknownCapability,
 			wantManifest: 1,
 		},

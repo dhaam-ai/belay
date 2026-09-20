@@ -45,10 +45,18 @@
       "id": "c1",
       "dir": "/work/candidates/c1",
       "test_passed": true,
-      "issue_count": 0
+      "issue_count": 0,
+      "ephemeral": true
     }
   ],
   "winner": "c1",
+  "promotion": {
+    "branch": "belay/20260101T000000Z-c0ffee000000",
+    "base": "1111111",
+    "commit": "2222222",
+    "candidate": "c1",
+    "files": 2
+  },
   "history": [
     {
       "seq": 1,

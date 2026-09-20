@@ -296,7 +296,7 @@ func TestTest_JSONKeySetMatchesSpec(t *testing.T) {
 func TestState_JSONKeySetMatchesSpec(t *testing.T) {
 	assertExactJSONKeys(t, NewState("goal"), []string{
 		"schema_version", "requires", "goal", "plan", "code", "test", "review",
-		"fix", "candidates", "winner", "history",
+		"fix", "candidates", "winner", "promotion", "history",
 	})
 }
 
@@ -313,7 +313,26 @@ func TestFix_JSONKeySetMatchesSpec(t *testing.T) {
 }
 
 func TestCandidate_JSONKeySetMatchesSpec(t *testing.T) {
-	assertExactJSONKeys(t, Candidate{}, []string{"id", "dir", "test_passed", "issue_count"})
+	assertExactJSONKeys(t, Candidate{}, []string{"id", "dir", "test_passed", "issue_count", "ephemeral"})
+}
+
+func TestPromotion_JSONKeySetMatchesSpec(t *testing.T) {
+	assertExactJSONKeys(t, Promotion{}, []string{"branch", "base", "commit", "candidate", "files"})
+}
+
+// TestCandidate_EphemeralDefaultsToNotDestroyable states the one thing the
+// zero value has to mean. A candidate decoded from a state.json written
+// before the field existed, or one an isolator handed back unchanged
+// ("no isolation"), reads as false — and false is what stops anything
+// destroying a directory it cannot prove belay created.
+func TestCandidate_EphemeralDefaultsToNotDestroyable(t *testing.T) {
+	var decoded Candidate
+	if err := json.Unmarshal([]byte(`{"id":"c1","dir":"/work","test_passed":true}`), &decoded); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if decoded.Ephemeral {
+		t.Error("a candidate with no ephemeral key decoded as ephemeral, so promote would delete a tree it does not own")
+	}
 }
 
 // assertExactJSONKeys marshals v and fails the test unless its top-level
@@ -362,8 +381,14 @@ func TestStateGolden(t *testing.T) {
 		Source: "golangci-lint", Gate: belay.GatePass, Issues: []belay.Issue{}, Summary: "clean",
 	}, "")
 	st.Fix = Fix{Attempts: 0, GiveUp: false}
-	st.Candidates = []Candidate{{ID: "c1", Dir: "/work/candidates/c1", TestPassed: true, IssueCount: 0}}
+	st.Candidates = []Candidate{
+		{ID: "c1", Dir: "/work/candidates/c1", TestPassed: true, IssueCount: 0, Ephemeral: true},
+	}
 	st.Winner = "c1"
+	st.Promotion = Promotion{
+		Branch: "belay/20260101T000000Z-c0ffee000000", Base: "1111111", Commit: "2222222",
+		Candidate: "c1", Files: 2,
+	}
 	st.History = []HistoryEntry{
 		{Seq: 1, Node: "plan", Attempt: 1, Status: "ok", Next: "approve"},
 	}

@@ -19,9 +19,9 @@
 //
 // # A conditional node is decided once, when the run is created
 //
-// Some nodes belong only to some runs: one that promotes the change onto a
-// branch, a gate that checks it against the policy in belay.yaml. Each is
-// added by an Option, and every Option follows one rule. Whether a run has
+// Some nodes belong only to some runs: the one that promotes the change onto
+// a branch (WithBranchOutput), a gate that checks it against the policy in
+// belay.yaml. Each is added by an Option, and every Option follows one rule. Whether a run has
 // the node is decided once, when the run is created, and pinned in its
 // manifest. Every later call to Default or Route for that run, including the
 // one a resume makes days later, is given options built from the manifest,
@@ -67,6 +67,7 @@ import (
 	"github.com/dhaam-ai/belay/internal/nodes/fix"
 	"github.com/dhaam-ai/belay/internal/nodes/join"
 	"github.com/dhaam-ai/belay/internal/nodes/plan"
+	"github.com/dhaam-ai/belay/internal/nodes/promote"
 	"github.com/dhaam-ai/belay/internal/nodes/review"
 	"github.com/dhaam-ai/belay/internal/nodes/test"
 	"github.com/dhaam-ai/belay/internal/nodes/write"
@@ -85,15 +86,64 @@ type wiring struct {
 	offRoute []graph.Node
 }
 
+// replace swaps the registered node of the same name for n, wherever it sits.
+// An Option that wires an edge has to replace the node that carries it,
+// because a node's successors are fixed when it is built: that is what keeps
+// an edge and the node it leads to one decision (see Option).
+//
+// A node that is not there is not an error. The graph a run gets depends on
+// its configuration -- join is absent unless fanout is enabled -- and an
+// Option describes the edges of whatever nodes the run has.
+func (w *wiring) replace(n graph.Node) {
+	for _, list := range [][]graph.Node{w.route, w.offRoute} {
+		if i := slices.IndexFunc(list, func(m graph.Node) bool { return m.Name() == n.Name() }); i >= 0 {
+			list[i] = n
+		}
+	}
+}
+
+// after puts n on the route directly after the node named before, or at the
+// end when the route has no such node.
+func (w *wiring) after(before string, n graph.Node) {
+	i := slices.IndexFunc(w.route, func(m graph.Node) bool { return m.Name() == before })
+	if i < 0 {
+		w.route = append(w.route, n)
+		return
+	}
+	w.route = slices.Insert(w.route, i+1, n)
+}
+
 // Option changes the graph Default and Route build: it adds a conditional
 // node, or changes a node's successor to lead into one.
 //
 // It receives the wiring and nothing else. The value it acts on is captured
 // when the Option is constructed, from what the run's manifest pinned, which
-// is the rule in the package documentation. No Option exists yet. Each slice
-// that adds a conditional node adds one, with a row in this package's route
-// tests.
+// is the rule in the package documentation. WithBranchOutput is the first
+// one. Each slice that adds a conditional node adds another, with a row in
+// this package's route tests.
 type Option func(*wiring)
+
+// WithBranchOutput builds the graph of a run that delivers its result on a
+// git branch: the promote node is registered and put on the route after the
+// quality gate, and the two nodes that would otherwise end the run are wired
+// into it — a passing gate, and a selected fanout winner.
+//
+// It is opt-in, and it is the whole difference between the two output modes
+// as far as the graph is concerned. A run without it is exactly the run
+// belay has always had, editing its workspace in place and ending when the
+// gate passes.
+//
+// Whether a run gets it is decided once, when the run is created, and pinned
+// in the manifest as state.Output; every later call for that run, a resume
+// included, is given the same option. See this package's documentation for
+// why an edge may not be read from configuration that can change mid-run.
+func WithBranchOutput() Option {
+	return func(w *wiring) {
+		w.replace(review.New(review.WithOnPass(graph.NodePromote)))
+		w.replace(join.New(join.WithOnSelected(graph.NodePromote)))
+		w.after(graph.NodeReview, promote.New())
+	}
+}
 
 // wire builds the graph for cfg, then applies opts in the order given, each
 // to the graph the ones before it built.
@@ -143,7 +193,8 @@ func wire(cfg config.Config, opts []Option) *wiring {
 //	plan → approve → code → write → test → fix → review → END
 //
 // with test failures and failed quality gates both routing back through fix,
-// bounded by graph.give_up. When fanout is enabled the registry also carries
+// bounded by graph.give_up. WithBranchOutput adds promote after review, for a
+// run that commits its change to a branch. When fanout is enabled the registry also carries
 // fanout and join, off the route: no node routes into fanout yet, so no run
 // reaches either, and nothing runs a candidate (ADR-0019 is reserved for
 // that). Each Option adds to or changes that graph.
