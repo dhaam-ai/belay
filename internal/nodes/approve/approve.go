@@ -21,10 +21,17 @@
 //
 // The gate is a pure function of State.Plan and Config.Graph.Approval:
 //
+//   - The plan is there but cannot be approved as it stands — empty, or
+//     not UTF-8 (see CheckPlan): pause, saying what is wrong with the file.
 //   - Plan.Approved is true: route to graph.NodeCode.
 //   - Approval is disabled but the gate ran anyway: route to graph.NodeCode
 //     with a warning. See Node.Run for why this does not pause.
 //   - Otherwise: pause.
+//
+// A plan that cannot be approved is checked first, and before Approved,
+// because an approval recorded earlier says nothing about the bytes on
+// disk now: the pause exists so a person can edit them, and they may have
+// emptied the file since.
 //
 // On every path it re-reads the plan artifact and re-fingerprints it, so a
 // plan a human edited during the pause is recorded as what was actually
@@ -126,7 +133,10 @@ func readPlan(rc *graph.RunContext) (abs string, data []byte, err error) {
 		return "", nil, &PlanError{Path: abs, Reason: "cannot be read", Err: err}
 	}
 	if err := CheckPlan(data); err != nil {
-		return abs, nil, &PlanError{Path: abs, Reason: "is empty"}
+		// Returned as CheckPlan gave it, not wrapped in a PlanError: the
+		// plan is there, and a plan that is there is not unavailable. Run
+		// answers this with a pause, and abs is what the note names.
+		return abs, nil, err
 	}
 	return abs, data, nil
 }
@@ -148,6 +158,16 @@ func runID(l state.Layout) string {
 // is, and the exact command that continues the run.
 func pauseNote(planPath, id string) string {
 	return fmt.Sprintf("Plan is waiting for your approval. Review or edit %s, then continue with: belay resume %s", planPath, id)
+}
+
+// unapprovableNote is the message for a plan that is on disk but cannot be
+// approved — one a person emptied or saved in the wrong encoding while the
+// run was paused. Like pauseNote it is one line, names the file, and ends
+// with the command that continues the run, because the journal is the only
+// place this sentence survives.
+func unapprovableNote(planPath, reason, id string) string {
+	return fmt.Sprintf("The plan at %s %s, so there is nothing to approve. Put a plan back in that file, then continue with: belay resume %s",
+		planPath, reason, id)
 }
 
 // noteApproved is the note for the ordinary approved pass.
@@ -196,6 +216,25 @@ func (n *Node) Run(ctx context.Context, rc *graph.RunContext) (graph.Result, err
 	}
 
 	planPath, data, err := readPlan(rc)
+	if reason, wait := unapprovable(err); wait {
+		// The plan is on disk and a person can fix it in the editor they
+		// already have open, so the run waits instead of ending. Ending it
+		// used to cost them the whole run, and everything it had spent, for
+		// an editing slip -- `belay resume` refuses a run that has ended.
+		//
+		// Nothing is patched: State.Plan.Digest describes the plan the
+		// person was shown, and fingerprinting a broken file would leave
+		// the run's record claiming they approved these bytes.
+		id := runID(rc.Layout)
+		logger.Info("the plan cannot be approved as it stands",
+			slog.String("plan", planPath),
+			slog.String("reason", reason),
+			slog.String("resume", "belay resume "+id))
+		return graph.Result{
+			Status: journal.StatusPaused,
+			Note:   unapprovableNote(planPath, reason, id),
+		}, nil
+	}
 	if err != nil {
 		return graph.Result{}, err
 	}

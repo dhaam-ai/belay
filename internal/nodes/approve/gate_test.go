@@ -1,6 +1,7 @@
 package approve_test
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"io/fs"
@@ -14,6 +15,7 @@ import (
 
 	"github.com/dhaam-ai/belay/internal/graph"
 	"github.com/dhaam-ai/belay/internal/journal"
+	"github.com/dhaam-ai/belay/internal/nodes/approve"
 )
 
 // TestApprovalDisabledRoutesToCode documents and pins the decision for a
@@ -204,4 +206,71 @@ func snapshot(t *testing.T, root string) map[string]string {
 	sort.Strings(names)
 	t.Logf("run dir holds %d files: %v", len(names), names)
 	return out
+}
+
+// TestUnapprovablePlanPausesInsteadOfEndingTheRun covers the file a person
+// broke while the run was paused: they emptied plan.md, or saved it in an
+// encoding that is not UTF-8. Until now the gate returned an error for
+// that, the dispatcher ended the run, and `belay resume` refused the run
+// afterwards -- so an editing slip cost the whole run and everything it had
+// spent, although the only thing wrong was a file the person still had open.
+// The plan is theirs to fix, so the gate pauses and says what is wrong.
+func TestUnapprovablePlanPausesInsteadOfEndingTheRun(t *testing.T) {
+	tests := []struct {
+		name       string
+		plan       string
+		approved   bool
+		wantReason string
+	}{
+		{"emptied", "   \n\t\n", false, "is empty"},
+		{"emptied after it was approved", "", true, "is empty"},
+		{"saved as something that is not UTF-8", "# Plan\n\n1. \xff\xfe do the thing\n", false, "is not valid UTF-8"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			rc := newRC(t, planBody)
+			rc.State.Plan.Approved = tt.approved
+			rc.State.Plan.Digest = approve.Digest([]byte(planBody))
+			editPlan(t, rc, tt.plan)
+
+			res, err := approve.New().Run(context.Background(), rc)
+			if err != nil {
+				t.Fatalf("Run: %v; the gate must pause on a plan a person can fix, not end the run", err)
+			}
+			if verr := res.Validate(); verr != nil {
+				t.Fatalf("Run returned a Result the dispatcher cannot act on: %v", verr)
+			}
+			if got, want := res.Status, journal.StatusPaused; got != want {
+				t.Errorf("Status = %v, want %v", got, want)
+			}
+			if res.Next != "" {
+				t.Errorf("Next = %q, want empty: an unapprovable plan routes nowhere", res.Next)
+			}
+			plan := filepath.Join(rc.Layout.ArtifactsDir(), "plan.md")
+			for _, want := range []string{plan, tt.wantReason, "belay resume " + testRunID} {
+				if !strings.Contains(res.Note, want) {
+					t.Errorf("Note does not carry %q:\n%s", want, res.Note)
+				}
+			}
+			if strings.Contains(res.Note, "\n") {
+				t.Errorf("Note must stay one line so it reads in a timeline:\n%q", res.Note)
+			}
+			// The digest on the blackboard describes the plan the person
+			// was shown. Recording the broken file's fingerprint would make
+			// the run's record claim they approved these bytes.
+			if res.Patch.Plan != nil {
+				t.Errorf("Patch.Plan = %+v, want none: nothing approvable was read", *res.Patch.Plan)
+			}
+
+			// A dispatcher re-runs a node whose start has no finish.
+			rc.Attempt = 2
+			again, err := approve.New().Run(context.Background(), rc)
+			if err != nil {
+				t.Fatalf("re-run: %v", err)
+			}
+			if diff := cmp.Diff(res, again); diff != "" {
+				t.Errorf("re-running the gate changed its verdict (-first +second):\n%s", diff)
+			}
+		})
+	}
 }

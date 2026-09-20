@@ -59,6 +59,15 @@ that only `pkg/belay` carries a compatibility promise. Everything under
 
 ### Fixed
 
+- **Emptying the plan while a run waits for you no longer ends the run.**
+  The approve gate read `artifacts/plan.md` again as it ran, and a file
+  that had been emptied — or saved in an encoding that is not UTF-8 — ended
+  the run with an error. `belay resume` refuses a run that has ended, so an
+  editing slip cost the whole run and everything it had already spent. The
+  gate now pauses instead and says which file is wrong and what is wrong
+  with it; put a plan back in the file and `belay resume <run-id>` carries
+  on. A plan that is missing altogether is still an error: there is nothing
+  there for anyone to fix.
 - **The README describes what belay really does and prints.** Its dry-run
   example showed a ceiling of 1,000,000 tokens, 5 agent turns a step and a
   closing line belay never printed, and left out what reaching the ceiling

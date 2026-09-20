@@ -129,6 +129,11 @@ func TestUsageIsZero(t *testing.T) {
 	}
 }
 
+// TestPlanErrors covers the plans the gate cannot work with at all. A plan
+// that is there but unapprovable -- empty, or not UTF-8 -- is not among
+// them: it pauses instead, and TestUnapprovablePlanPausesInsteadOfEndingTheRun
+// covers it. Every row here is a run that cannot go on, because the file
+// State points at is not a file the gate can read.
 func TestPlanErrors(t *testing.T) {
 	tests := []struct {
 		name     string
@@ -155,19 +160,6 @@ func TestPlanErrors(t *testing.T) {
 				return filepath.Join(rc.Layout.ArtifactsDir(), "plan.md")
 			},
 			wantIs: fs.ErrNotExist,
-		},
-		{
-			name: "plan artifact is empty",
-			setup: func(t *testing.T, rc *graph.RunContext) {
-				t.Helper()
-				p := filepath.Join(rc.Layout.ArtifactsDir(), "plan.md")
-				if err := os.WriteFile(p, []byte("   \n\t\n"), 0o600); err != nil {
-					t.Fatalf("truncate plan: %v", err)
-				}
-			},
-			wantPath: func(rc *graph.RunContext) string {
-				return filepath.Join(rc.Layout.ArtifactsDir(), "plan.md")
-			},
 		},
 		{
 			name: "plan path escapes the artifacts directory",

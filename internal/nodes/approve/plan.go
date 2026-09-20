@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"path/filepath"
+	"unicode/utf8"
 
 	"github.com/dhaam-ai/belay/internal/state"
 )
@@ -18,6 +19,35 @@ import (
 // is not there is a run that cannot go on; a plan that is empty is a file
 // somebody can write in, so the gate waits instead of ending the run.
 var ErrPlanEmpty = errors.New("approve: the plan is empty")
+
+// ErrPlanNotUTF8 reports a plan that is not valid UTF-8.
+//
+// The plan is text: it is shown to a person, handed to a backend as a Go
+// string, and edited by internal/plandoc, which refuses such a document
+// rather than turn half of it into U+FFFD. A gate that waved it through
+// would send the agent a mangled plan and record a digest for bytes nobody
+// could read. Like ErrPlanEmpty it is something a person can fix in the
+// file they already have open, so it pauses the run rather than ending it.
+var ErrPlanNotUTF8 = errors.New("approve: the plan is not valid UTF-8")
+
+// unapprovable turns a CheckPlan refusal into the clause the gate's pause
+// note reads with, and reports whether the run may wait for a person to
+// put it right.
+//
+// Waiting is not the default: an error this function does not recognize
+// ends the run, because the gate cannot tell a person what to do about a
+// problem it has no words for. A new rule in CheckPlan adds its row here,
+// and this package's tests fail until it does.
+func unapprovable(err error) (reason string, ok bool) {
+	switch {
+	case errors.Is(err, ErrPlanEmpty):
+		return "is empty", true
+	case errors.Is(err, ErrPlanNotUTF8):
+		return "is not valid UTF-8", true
+	default:
+		return "", false
+	}
+}
 
 // PlanArtifact resolves the plan artifact recorded in State.Plan.Path to
 // the bare artifact name graph.RunContext.ReadArtifact wants and the
@@ -62,16 +92,17 @@ func PlanArtifact(l state.Layout, recorded string) (name, abs string, err error)
 	return name, abs, nil
 }
 
-// CheckPlan reports whether plan is a document the gate can put in front of
-// a person: nil when it is, ErrPlanEmpty when it is not.
+// CheckPlan reports whether plan is a document the gate can put in front
+// of a person: nil when it is, ErrPlanEmpty or ErrPlanNotUTF8 when it is
+// not.
 //
-// This is the gate's whole opinion on a plan's contents, and deliberately a
-// small one. It asks whether there is anything there, not whether the
-// document is well formed: a plan with no numbered steps, no headings at
-// all, or a shape internal/plandoc cannot edit is still a perfectly good
-// plan for a person to read and for the code node to implement, and a gate
-// that judged Markdown structure would start rejecting plans people wrote
-// on purpose.
+// This is the gate's whole opinion on a plan's contents, and deliberately
+// a small one. It asks whether there is anything there and whether it is
+// text, not whether the document is well formed: a plan with no numbered
+// steps, no headings at all, or a shape internal/plandoc cannot edit is
+// still a perfectly good plan for a person to read and for the code node
+// to implement, and a gate that judged Markdown structure would start
+// rejecting plans people wrote on purpose.
 //
 // It is exported so that every writer of a plan can check its bytes
 // against the same rule before saving them, rather than discovering at the
@@ -79,6 +110,9 @@ func PlanArtifact(l state.Layout, recorded string) (name, abs string, err error)
 func CheckPlan(plan []byte) error {
 	if len(bytes.TrimSpace(plan)) == 0 {
 		return ErrPlanEmpty
+	}
+	if !utf8.Valid(plan) {
+		return ErrPlanNotUTF8
 	}
 	return nil
 }
