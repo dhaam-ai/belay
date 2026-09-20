@@ -21,6 +21,8 @@
 //
 // The gate is a pure function of State.Plan and Config.Graph.Approval:
 //
+//   - A request for a new plan is outstanding (State.Plan.Regenerate):
+//     route to graph.NodePlan. See "Asking for a new plan" below.
 //   - The plan is there but cannot be approved as it stands — empty, or
 //     not UTF-8 (see CheckPlan): pause, saying what is wrong with the file.
 //   - Plan.Approved is true: route to graph.NodeCode.
@@ -37,6 +39,28 @@
 // plan a human edited during the pause is recorded as what was actually
 // approved. Per ADR-0002 it writes nothing itself — the new digest travels
 // home in Result.Patch.
+//
+// # Asking for a new plan
+//
+// A person reading the plan may want a different one rather than an edited
+// one. They say so with `belay plan --regenerate "<guidance>" <run-id>`,
+// which records a state.Regeneration request on the blackboard while the
+// run is paused. The gate then routes back to graph.NodePlan.
+//
+// This is an edge in the graph, and deliberately not a call the CLI makes
+// to the plan node on its own. A new plan costs money, takes minutes and
+// can be interrupted, so it has to be a node execution like any other:
+// journalled, charged to the budget ledger, visible in `belay timeline`,
+// and re-run from its start if the process dies halfway. A CLI that
+// invoked the agent itself would have none of that, and a crash would
+// leave a run whose journal says it is waiting at the gate while an agent
+// writes a plan nobody will ever see.
+//
+// The gate hands the request on untouched. Recording that it has been
+// served belongs to the node that serves it (internal/nodes/plan), so a
+// re-run after a crash between the two sends the agent the same request,
+// with the same guidance, rather than a plan prompt with the one thing the
+// person asked for missing.
 package approve
 
 import (
@@ -170,6 +194,16 @@ func unapprovableNote(planPath, reason, id string) string {
 		planPath, reason, id)
 }
 
+// regenerateNote is the note for the edge back to the plan node.
+//
+// It names the request's number and not a word of the guidance the person
+// typed. Notes are journalled and rendered by `belay timeline`, and belay
+// only promises to redact captured subprocess output; what a person wrote
+// about their own repository stays in state.json, which is theirs.
+func regenerateNote(request int) string {
+	return fmt.Sprintf("A new plan was asked for (request %d); returning to the plan node.", request)
+}
+
 // noteApproved is the note for the ordinary approved pass.
 const noteApproved = "Plan approved; proceeding to code."
 
@@ -216,6 +250,51 @@ func (n *Node) Run(ctx context.Context, rc *graph.RunContext) (graph.Result, err
 	}
 
 	planPath, data, err := readPlan(rc)
+
+	// Re-fingerprint what is on disk right now, which is not necessarily
+	// what the plan node wrote: the pause exists precisely so a human can
+	// change it. An absent recorded digest is not an edit — nothing was
+	// ever fingerprinted to differ from.
+	//
+	// The zero Patch means "nothing changed", so only carry a Plan when the
+	// fingerprint on the blackboard is genuinely out of date. Setting the
+	// absolute value keeps re-application idempotent (see state.Patch), and
+	// copying State.Plan carries the regeneration request through untouched
+	// — serving it is the plan node's to record, not the gate's.
+	var patch state.Patch
+	var digest string
+	edited := false
+	if err == nil {
+		digest = Digest(data)
+		recorded := rc.State.Plan.Digest
+		edited = recorded != "" && recorded != digest
+		if recorded != digest {
+			updated := rc.State.Plan
+			updated.Digest = digest
+			patch.Plan = &updated
+		}
+	}
+
+	// A request for a new plan is answered whatever state the old plan is
+	// in, so this comes before every other branch. The node it routes to
+	// replaces the document, which makes the same edge the way out of a
+	// plan somebody emptied or deleted. Pending beats Approved for a
+	// blunter reason: an approval recorded before the request was made says
+	// nothing about a plan that does not exist yet, and acting on it would
+	// spend the run's budget writing the code the person just said they did
+	// not want.
+	if request := rc.State.Plan.Regenerate; request.Pending() {
+		logger.Info("a new plan was asked for; returning to the plan node",
+			slog.String("plan", planPath),
+			slog.Int("request", request.Request))
+		return graph.Result{
+			Next:   graph.NodePlan,
+			Status: journal.StatusOK,
+			Patch:  patch,
+			Note:   regenerateNote(request.Request),
+		}, nil
+	}
+
 	if reason, wait := unapprovable(err); wait {
 		// The plan is on disk and a person can fix it in the editor they
 		// already have open, so the run waits instead of ending. Ending it
@@ -237,24 +316,6 @@ func (n *Node) Run(ctx context.Context, rc *graph.RunContext) (graph.Result, err
 	}
 	if err != nil {
 		return graph.Result{}, err
-	}
-
-	// Re-fingerprint what is on disk right now, which is not necessarily
-	// what the plan node wrote: the pause exists precisely so a human can
-	// change it. An absent recorded digest is not an edit — nothing was
-	// ever fingerprinted to differ from.
-	digest := Digest(data)
-	recorded := rc.State.Plan.Digest
-	edited := recorded != "" && recorded != digest
-
-	// The zero Patch means "nothing changed", so only carry a Plan when the
-	// fingerprint on the blackboard is genuinely out of date. Setting the
-	// absolute value keeps re-application idempotent (see state.Patch).
-	var patch state.Patch
-	if recorded != digest {
-		updated := rc.State.Plan
-		updated.Digest = digest
-		patch.Plan = &updated
 	}
 
 	if rc.State.Plan.Approved {
