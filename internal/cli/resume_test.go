@@ -16,6 +16,7 @@ import (
 	"github.com/dhaam-ai/belay/internal/journal"
 	"github.com/dhaam-ai/belay/internal/nodes/approve"
 	"github.com/dhaam-ai/belay/internal/state"
+	"github.com/dhaam-ai/belay/pkg/belay"
 )
 
 // seedManifest writes a run directory holding only a manifest, which is all
@@ -565,7 +566,12 @@ func TestAnnounceContinueShowsTheRoute(t *testing.T) {
 
 // planWriter stands in for the plan node, which would call the agent. It
 // writes the artifact the approve gate reads and routes to that gate.
-type planWriter struct{ body string }
+// planWriter stands in for the plan node. usage is what its backend
+// reported spending, left zero by every test that is not about money.
+type planWriter struct {
+	body  string
+	usage belay.Usage
+}
 
 func (planWriter) Name() string { return graph.NodePlan }
 
@@ -580,6 +586,7 @@ func (n planWriter) Run(_ context.Context, rc *graph.RunContext) (graph.Result, 
 		Status: journal.StatusOK,
 		Next:   graph.NodeApprove,
 		Patch:  state.Patch{Plan: &plan},
+		Usage:  n.usage,
 		Note:   "wrote the plan",
 	}, nil
 }
@@ -903,12 +910,14 @@ func finishedANode(t *testing.T, layout state.Layout) bool {
 	return false
 }
 
-// TestResumeDoesNotApproveAPlanTheGateNeverReached covers the two ways a run
+// TestResumeDoesNotApproveAPlanTheGateNeverReached covers the three ways a run
 // can be paused at the approve gate without the gate ever having asked
-// anything, neither of which TestResumeApprovesOnlyAPlanTheGateAskedAbout can
+// anything, none of which TestResumeApprovesOnlyAPlanTheGateAskedAbout can
 // produce: a Ctrl-C that lands between the plan and the gate, which pauses the
-// run before the gate starts, and a journal in which no node has finished at
-// all. Resuming either must run the gate, not approve on the person's behalf.
+// run before the gate starts; one of belay's own limits stopping the run just
+// before the gate, which pauses it in the same place; and a journal in which
+// no node has finished at all. Resuming any of them must run the gate, not
+// approve on the person's behalf.
 func TestResumeDoesNotApproveAPlanTheGateNeverReached(t *testing.T) {
 	t.Run("Ctrl-C landed between the plan and the gate", func(t *testing.T) {
 		ws := goWorkspace(t)
@@ -961,6 +970,55 @@ func TestResumeDoesNotApproveAPlanTheGateNeverReached(t *testing.T) {
 		}
 		if got {
 			t.Error("awaitsApproval() = true; the gate never ran, so nobody was shown the plan")
+		}
+	})
+
+	// The budget ceiling, graph.max_steps and graph.node_timeout pause a run
+	// rather than ending it, so a run can now be paused at the gate because
+	// it ran out of money on the way there. The manifest then says exactly
+	// what it says for a gate that asked — paused, at approve — and only the
+	// journal can tell the two apart.
+	t.Run("the budget ceiling stopped the run just before the gate", func(t *testing.T) {
+		ws := goWorkspace(t)
+		plan, err := resolve(resolveRequest{workspace: ws, logger: quietLogger()})
+		if err != nil {
+			t.Fatalf("resolve: %v", err)
+		}
+		registry := graph.NewRegistry()
+		registry.MustRegister(
+			planWriter{body: "# Plan\n\nwrite a test\n", usage: belay.Usage{USD: 1.00}},
+			approve.New(),
+		)
+		plan.registry = registry
+		// A ceiling the plan step's own spend crosses, so the run stops
+		// before the gate is dispatched.
+		plan.config.Budget.MaxUSD = 0.50
+		plan.config.Budget.OnExceed = config.OnExceedAbort
+		store := seedRunDir(t, plan, "add tests")
+
+		dispatcher, err := graph.NewDispatcher(plan.options(store))
+		if err != nil {
+			t.Fatalf("graph.NewDispatcher: %v", err)
+		}
+		if _, err := dispatcher.Run(context.Background()); !errors.Is(err, belay.ErrBudgetExceeded) {
+			t.Fatalf("Run: %v, want one wrapping belay.ErrBudgetExceeded", err)
+		}
+
+		chosen, err := chooseRun(ws, store.Layout().RunID())
+		if err != nil {
+			t.Fatalf("chooseRun: %v", err)
+		}
+		if chosen.status != state.RunStatusPaused || chosen.node != graph.NodeApprove {
+			t.Fatalf("the run is %v at %q, want paused at %q: the ceiling stops it before the gate",
+				chosen.status, chosen.node, graph.NodeApprove)
+		}
+
+		got, err := awaitsApproval(chosen, store.Layout())
+		if err != nil {
+			t.Fatalf("awaitsApproval: %v", err)
+		}
+		if got {
+			t.Error("awaitsApproval() = true; the gate never ran, so resuming must not approve the plan")
 		}
 	})
 

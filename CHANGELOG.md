@@ -51,7 +51,11 @@ that only `pkg/belay` carries a compatibility promise. Everything under
   A step that overran `graph.node_timeout` runs again from its start. The
   exit code is unchanged: an invocation belay stopped this way still exits 3,
   so scripts can tell it from a run that paused for you to read the plan.
-  `belay runs` lists such a run as waiting, and `belay resume` accepts it.
+  `belay runs` lists such a run as waiting and `belay resume` accepts it —
+  except that a run stopped right before the plan gate is still listed as
+  "needs plan approval", since that listing reads only manifest.json.
+  Resuming it does the right thing regardless: it runs the gate and asks,
+  rather than approving a plan nobody was shown.
 
 ### Fixed
 
