@@ -4,11 +4,13 @@ package git
 
 import (
 	"context"
+	"fmt"
 	"log/slog"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -139,6 +141,27 @@ func (f *fixture) git(dir string, args ...string) string {
 	return strings.TrimRight(string(out), "\n")
 }
 
+// gitFails runs a raw git command that is expected to fail, such as a merge
+// a test means to conflict, and fails the test when it succeeds.
+func (f *fixture) gitFails(dir string, args ...string) {
+	f.t.Helper()
+	ctx, cancel := context.WithTimeout(f.t.Context(), time.Minute)
+	defer cancel()
+
+	cmd := exec.CommandContext(ctx, "git", args...) //nolint:gosec // every argument comes from a test literal
+	cmd.Dir = dir
+	cmd.Env = []string{
+		"HOME=" + f.home,
+		"PATH=" + os.Getenv("PATH"),
+		"TMPDIR=" + os.Getenv("TMPDIR"),
+		"GIT_TERMINAL_PROMPT=0",
+		"LC_ALL=C",
+	}
+	if err := cmd.Run(); err == nil {
+		f.t.Fatalf("git %s in %q succeeded, and the test needs it to fail", strings.Join(args, " "), dir)
+	}
+}
+
 // dir makes a directory under the fixture root and returns its path.
 func (f *fixture) dir(name string) string {
 	f.t.Helper()
@@ -246,3 +269,68 @@ func (rec *recorder) reset() {
 
 // subcommand returns the git subcommand c runs.
 func subcommand(c bexec.Command) string { return subcommandOf(c.Args) }
+
+// count returns how many commits are reachable from HEAD in dir.
+func (f *fixture) count(dir string) int {
+	f.t.Helper()
+	n, err := strconv.Atoi(f.git(dir, "rev-list", "--count", "HEAD"))
+	if err != nil {
+		f.t.Fatalf("cannot read the commit count in %q: %v", dir, err)
+	}
+	return n
+}
+
+// mergeCount returns how many merge commits are reachable from HEAD in dir.
+func (f *fixture) mergeCount(dir string) int {
+	f.t.Helper()
+	n, err := strconv.Atoi(f.git(dir, "rev-list", "--merges", "--count", "HEAD"))
+	if err != nil {
+		f.t.Fatalf("cannot read the merge count in %q: %v", dir, err)
+	}
+	return n
+}
+
+// tree returns every tracked-looking file under dir and its contents, as one
+// string, so two states of a working tree can be compared. .git and .belay
+// are left out: git writes in one and belay in the other, and neither is the
+// user's work.
+func (f *fixture) tree(dir string) string {
+	f.t.Helper()
+	var b strings.Builder
+	err := filepath.WalkDir(dir, func(path string, d os.DirEntry, err error) error {
+		switch {
+		case err != nil:
+			return err
+		case d.IsDir() && (d.Name() == ".git" || d.Name() == ".belay"):
+			return filepath.SkipDir
+		case d.IsDir():
+			return nil
+		}
+		body, err := os.ReadFile(path) //nolint:gosec // G304: path comes from walking a directory this fixture made under t.TempDir().
+		if err != nil {
+			return err
+		}
+		rel, err := filepath.Rel(dir, path)
+		if err != nil {
+			return err
+		}
+		fmt.Fprintf(&b, "%s\x00%s\x00", rel, body)
+		return nil
+	})
+	if err != nil {
+		f.t.Fatalf("cannot read the tree at %q: %v", dir, err)
+	}
+	return b.String()
+}
+
+// writeExecutable writes an executable file, such as a git hook.
+func (f *fixture) writeExecutable(path, body string) {
+	f.t.Helper()
+	if err := os.MkdirAll(filepath.Dir(path), 0o750); err != nil {
+		f.t.Fatalf("MkdirAll(%q) error = %v", filepath.Dir(path), err)
+	}
+	// #nosec G306 -- a hook git will not execute proves nothing.
+	if err := os.WriteFile(path, []byte(body), 0o700); err != nil {
+		f.t.Fatalf("WriteFile(%q) error = %v", path, err)
+	}
+}

@@ -57,6 +57,46 @@
 // includeIf, core.sshCommand for a push. That is no new trust: by the time
 // belay commits, the test node has already run the repository's own code.
 //
+// # The working tree an agent can write to
+//
+// A coding agent has write access to the workspace it works in, and a
+// worktree's .git is an ordinary text file naming the git directory to use.
+// So every call here that writes — Commit and Integrate — first proves the
+// directory it was given is a working tree of this repository, and belongs
+// to itself (see verifyWorktree). Comparing only the common git directory,
+// which is the obvious check, is not enough: a .git rewritten to name this
+// repository's MAIN worktree keeps the same common directory, and git then
+// stages the agent's files into the user's own index and commits them onto
+// the branch the user has checked out. That was verified against real git
+// before the check was written.
+//
+// What this package does NOT defend against is configuration that runs code
+// as part of an ordinary git operation — an LFS filter, core.sshCommand —
+// because that configuration lives in the repository the user already
+// trusts, and belay has run its tests by then.
+//
+// # What it refuses to do
+//
+// These are decisions, not gaps:
+//
+//   - It never runs a repository's hooks, signs a commit, or lets git
+//     garbage-collect during a run. See the hardening above.
+//   - It never runs `git worktree prune`, which would also drop the user's
+//     own stale entries. [Repo.RemoveWorktree] removes one registration.
+//   - It never deletes a branch whose tip no other ref holds, and never
+//     deletes one a worktree has checked out. [Repo.ContainedElsewhere] is
+//     the question a caller asks first.
+//   - It never moves a branch that already exists: [Repo.CreateBranch] is
+//     create-only and [Repo.DeleteBranch] is compare-and-swap, both against
+//     the object ID the caller last saw.
+//   - It never deletes a git lock file. It cannot tell a crashed git from a
+//     running one, so the error names the lock and stops.
+//   - It never curates a commit. What [Repo.Commit] records is what
+//     `git status` shows, which is the tree the tests and the quality gate
+//     ran against.
+//   - It never resolves a conflict. A conflicting merge is predicted with
+//     merge-tree and reported, with the working tree untouched.
+//
 // # Parsing
 //
 // Output is read only in forms git promises not to change: -z and

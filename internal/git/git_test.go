@@ -13,6 +13,7 @@ import (
 	"time"
 
 	bexec "github.com/dhaam-ai/belay/internal/exec"
+	"github.com/dhaam-ai/belay/internal/vcs"
 	"github.com/dhaam-ai/belay/pkg/belay"
 )
 
@@ -459,7 +460,22 @@ func hardenedCalls(t *testing.T, f *fixture, dir string) []hardenedCall {
 			return err
 		}},
 		{name: "DeleteBranch", call: func(r *Repo) error {
-			return r.DeleteBranch(t.Context(), "hardened-branch", f.git(dir, "rev-parse", "HEAD"))
+			return r.DeleteBranch(t.Context(), "hardened-branch", f.git(dir, "rev-parse", "refs/heads/hardened-branch"))
+		}},
+		{name: "Commit", call: func(r *Repo) error {
+			f.write(dir, "a.txt", "changed for the hardening test\n")
+			_, err := r.Commit(t.Context(), dir, vcs.Message{Subject: "belay: hardening"})
+			return err
+		}},
+		{name: "Changed", call: func(r *Repo) error {
+			_, err := r.Changed(t.Context(), "HEAD~1", "HEAD")
+			return err
+		}},
+		{name: "Integrate", call: func(r *Repo) error {
+			f.git(dir, "branch", "hardened-merge")
+			commitOn(f, dir, "hardened-merge", "work to integrate\n")
+			_, err := r.Integrate(t.Context(), dir, "hardened-merge", vcs.Message{Subject: "belay: hardening merge"})
+			return err
 		}},
 	}
 }
