@@ -7,12 +7,17 @@ import (
 	"fmt"
 	"io/fs"
 	"os"
+	"os/exec"
+	"path/filepath"
+	"strings"
+	"syscall"
 	"testing"
 	"time"
 
 	"github.com/dhaam-ai/belay/internal/config"
 	"github.com/dhaam-ai/belay/internal/graph"
 	"github.com/dhaam-ai/belay/internal/journal"
+	"github.com/dhaam-ai/belay/internal/procgroup"
 	"github.com/dhaam-ai/belay/internal/state"
 	"github.com/dhaam-ai/belay/pkg/belay"
 )
@@ -180,6 +185,20 @@ func (h *harness) records(t *testing.T) []journal.Record {
 		t.Fatalf("journal has a torn tail after a clean dispatcher shutdown")
 	}
 	return res.Records
+}
+
+// lastNodeFinished returns the run's final node_finished record, which is
+// where a node execution's Usage is journalled.
+func (h *harness) lastNodeFinished(t *testing.T) journal.Record {
+	t.Helper()
+	recs := h.records(t)
+	for i := len(recs) - 1; i >= 0; i-- {
+		if recs[i].Event == journal.EventNodeFinished {
+			return recs[i]
+		}
+	}
+	t.Fatal("journal holds no node_finished record")
+	return journal.Record{}
 }
 
 // timeline renders the journal compactly for assertion.
@@ -406,6 +425,206 @@ func TestDispatcher_CrashResume_ReRunsUnfinishedNodeAtAttempt2(t *testing.T) {
 	}
 }
 
+// TestDispatcher_HealChargesAnAttemptItNeverSawFinish is ADR-0007's rule for
+// the one spend belay cannot know. A process killed inside a node never
+// reported what that attempt cost, and the backend may have spent any amount
+// before the kill. heal used to close the attempt as free, so a run killed
+// during a paid step and resumed paid for that step twice while the ledger
+// counted it once.
+//
+// The attempt is now charged the most any single step of this run has
+// recorded, marked estimated, so the total never claims to be exact. With
+// nothing recorded yet there is no evidence to charge from, and the attempt
+// is charged nothing rather than a number belay made up.
+func TestDispatcher_HealChargesAnAttemptItNeverSawFinish(t *testing.T) {
+	planSpend := belay.Usage{InputTokens: 1000, OutputTokens: 200, USD: 3.00}
+	codeSpend := belay.Usage{InputTokens: 10, OutputTokens: 5, USD: 1.00}
+	tests := []struct {
+		name       string
+		seed       []journal.Record
+		wantCharge belay.Usage
+		wantTotal  belay.Usage
+	}{
+		{
+			name: "killed inside a step after the run had spent",
+			seed: []journal.Record{
+				{Event: journal.EventRunStarted},
+				{Event: journal.EventNodeStarted, Node: graph.NodePlan, Attempt: 1},
+				{
+					Event: journal.EventNodeFinished, Node: graph.NodePlan, Attempt: 1,
+					Status: journal.StatusOK, Next: graph.NodeCode,
+					Usage: &journal.Usage{InputTokens: 1000, OutputTokens: 200, USD: 3.00},
+				},
+				{Event: journal.EventNodeStarted, Node: graph.NodeCode, Attempt: 1},
+			},
+			wantCharge: belay.Usage{InputTokens: 1000, OutputTokens: 200, USD: 3.00, Estimated: true},
+			wantTotal: belay.Usage{
+				InputTokens:  planSpend.InputTokens*2 + codeSpend.InputTokens,
+				OutputTokens: planSpend.OutputTokens*2 + codeSpend.OutputTokens,
+				USD:          planSpend.USD*2 + codeSpend.USD, Estimated: true,
+			},
+		},
+		{
+			name: "killed inside the first step, before anything was spent",
+			seed: []journal.Record{
+				{Event: journal.EventRunStarted},
+				{Event: journal.EventNodeStarted, Node: graph.NodeCode, Attempt: 1},
+			},
+			wantCharge: belay.Usage{},
+			wantTotal:  codeSpend,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			h := newRun(t, budgetCfg(100.00, 0), "survive a kill -9")
+			h.seedJournal(t, tt.seed...)
+
+			code := &fakeNode{name: graph.NodeCode, steps: []nodeStep{{
+				res: Result{Next: graph.End, Status: journal.StatusOK, Usage: codeSpend},
+			}}}
+			out, err := h.dispatcher(t, ok(graph.NodePlan, graph.NodeCode), code).Run(context.Background())
+			if err != nil {
+				t.Fatalf("Run() error = %v, want nil", err)
+			}
+
+			var healed journal.Record
+			for _, r := range h.records(t) {
+				if r.Interrupted() {
+					healed = r
+				}
+			}
+			if healed.Usage == nil {
+				t.Fatalf("no interrupted attempt with a usage block in the journal: %v", h.timeline(t))
+			}
+			got := belay.Usage{
+				InputTokens: healed.Usage.InputTokens, OutputTokens: healed.Usage.OutputTokens,
+				USD: healed.Usage.USD, Estimated: healed.Usage.Estimated,
+			}
+			if got != tt.wantCharge {
+				t.Errorf("healed attempt charged %+v, want %+v", got, tt.wantCharge)
+			}
+			if !closeTo(out.Usage.USD, tt.wantTotal.USD) || out.Usage.InputTokens != tt.wantTotal.InputTokens ||
+				out.Usage.OutputTokens != tt.wantTotal.OutputTokens || out.Usage.Estimated != tt.wantTotal.Estimated {
+				t.Errorf("Outcome.Usage = %+v, want %+v", out.Usage, tt.wantTotal)
+			}
+		})
+	}
+}
+
+// TestDispatcher_GivesANodeItsEvidenceDirectoryToRecordProcessesIn: every
+// process a node starts goes through internal/exec, which records it in the
+// directory on its context so that a belay killed with SIGKILL can find the
+// process again. The dispatcher is what puts it there, and it must be this
+// execution's own evidence directory.
+func TestDispatcher_GivesANodeItsEvidenceDirectoryToRecordProcessesIn(t *testing.T) {
+	h := newRun(t, config.Default(), "record what it starts")
+	var seen string
+	node := &contextReadingNode{name: graph.NodePlan, read: func(ctx context.Context) {
+		seen = procgroup.DirFrom(ctx)
+	}}
+
+	if _, err := h.dispatcher(t, node).Run(context.Background()); err != nil {
+		t.Fatalf("Run() error = %v, want nil", err)
+	}
+
+	want, err := h.layout.NodeDir(1, graph.NodePlan)
+	if err != nil {
+		t.Fatalf("NodeDir: %v", err)
+	}
+	if seen != want {
+		t.Errorf("the node's context carried %q, want its evidence directory %q", seen, want)
+	}
+}
+
+// contextReadingNode hands its context to read before finishing, so a test
+// can assert what the dispatcher put on it.
+type contextReadingNode struct {
+	name string
+	read func(context.Context)
+}
+
+func (n *contextReadingNode) Name() string { return n.name }
+
+func (n *contextReadingNode) Run(ctx context.Context, _ *graph.RunContext) (graph.Result, error) {
+	n.read(ctx)
+	return Result{Next: graph.End, Status: journal.StatusOK}, nil
+}
+
+// TestDispatcher_HealKillsProcessGroupsAKilledRunLeftRunning is the whole
+// point of recording a process group: a belay killed with SIGKILL leaves the
+// agent and the test suite running, in groups the terminal's Ctrl-C never
+// reaches, and nothing stopped them. Resuming the run kills them.
+//
+// The run below is in the state a kill -9 leaves: a node_started nothing
+// closed, and a live process group recorded in that execution's evidence
+// directory.
+func TestDispatcher_HealKillsProcessGroupsAKilledRunLeftRunning(t *testing.T) {
+	h := newRun(t, config.Default(), "clean up after a kill -9")
+	h.seedJournal(t,
+		journal.Record{Event: journal.EventRunStarted},
+		journal.Record{Event: journal.EventNodeStarted, Node: graph.NodeTest, Attempt: 1},
+	)
+
+	// The process the dead belay had started, recorded exactly as
+	// internal/exec records one.
+	sleeper := exec.Command("sleep", "60")
+	sleeper.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	if err := sleeper.Start(); err != nil {
+		t.Fatalf("start sleep: %v", err)
+	}
+	exited := make(chan struct{})
+	go func() {
+		if err := sleeper.Wait(); err != nil {
+			t.Logf("sleeper exited: %v", err) // expected: killed
+		}
+		close(exited)
+	}()
+	t.Cleanup(func() {
+		if err := syscall.Kill(-sleeper.Process.Pid, syscall.SIGKILL); err != nil &&
+			!errors.Is(err, syscall.ESRCH) {
+			t.Errorf("clean up process group: %v", err)
+		}
+		<-exited
+	})
+
+	nodeDir, err := h.layout.NodeDir(1, graph.NodeTest)
+	if err != nil {
+		t.Fatalf("NodeDir: %v", err)
+	}
+	tracked, err := procgroup.Track(nodeDir, []string{"go", "test", "./..."})
+	if err != nil {
+		t.Fatalf("Track: %v", err)
+	}
+	if err := tracked.Started(sleeper.Process.Pid); err != nil {
+		t.Fatalf("Started: %v", err)
+	}
+
+	out, err := h.dispatcher(t, ok(graph.NodeTest, graph.End)).Run(context.Background())
+	if err != nil {
+		t.Fatalf("Run() error = %v, want nil", err)
+	}
+	if out.Status != state.RunStatusCompleted {
+		t.Fatalf("Outcome.Status = %v, want completed", out.Status)
+	}
+
+	select {
+	case <-exited:
+	case <-time.After(10 * time.Second):
+		t.Fatalf("process %d is still running: resuming the run did not kill the group the kill -9 left behind",
+			sleeper.Process.Pid)
+	}
+
+	// The record is spent, so a later resume does not act on a pid that by
+	// then may belong to somebody else.
+	left, err := filepath.Glob(filepath.Join(nodeDir, "pgroup-*.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(left) != 0 {
+		t.Errorf("records left behind: %v", left)
+	}
+}
+
 // TestDispatcher_CrashResume_PatchIsNotDoubleApplied covers the crash window
 // the dispatcher's write ordering deliberately makes reachable: the patch was
 // applied, then the process died before node_finished was journalled.
@@ -567,7 +786,7 @@ func TestDispatcher_PausedRunRefusesRunAndAdvancesUnderResume(t *testing.T) {
 // Budget.
 // ---------------------------------------------------------------------------
 
-func TestDispatcher_BudgetExceededAbortsBeforeTheNodeRuns(t *testing.T) {
+func TestDispatcher_BudgetExceededStopsTheRunBeforeTheNodeRuns(t *testing.T) {
 	h := newRun(t, budgetCfg(5.00, 0), "spend nothing more")
 
 	// The manifest already records spend past the ceiling, as a crashed run
@@ -586,18 +805,24 @@ func TestDispatcher_BudgetExceededAbortsBeforeTheNodeRuns(t *testing.T) {
 	}
 	// The whole point: the ceiling is checked before the node is dispatched.
 	if plan.calls != 0 {
-		t.Errorf("plan ran %d times, want 0: the budget must abort before a node executes", plan.calls)
+		t.Errorf("plan ran %d times, want 0: the budget must stop the run before a node executes", plan.calls)
 	}
-	if out.Status != state.RunStatusAborted || out.ExitCode != graph.ExitAborted {
-		t.Errorf("Outcome = {%v, exit %d}, want {aborted, exit %d}", out.Status, out.ExitCode, graph.ExitAborted)
+	// Paused, not ended: raising the ceiling and resuming continues this
+	// run. The exit code is unchanged.
+	if out.Status != state.RunStatusPaused || out.ExitCode != graph.ExitAborted {
+		t.Errorf("Outcome = {%v, exit %d}, want {paused, exit %d}", out.Status, out.ExitCode, graph.ExitAborted)
 	}
 	// No node_started was ever written, so nothing is left open.
-	want := []string{"run_started", "run_aborted"}
+	want := []string{"run_started", "run_paused"}
 	if got := h.timeline(t); !equalStrings(got, want) {
 		t.Errorf("timeline =\n  %v\nwant\n  %v", got, want)
 	}
-	if h.manifest(t).Status != state.RunStatusAborted {
-		t.Errorf("manifest.Status = %v, want aborted", h.manifest(t).Status)
+	if h.manifest(t).Status != state.RunStatusPaused {
+		t.Errorf("manifest.Status = %v, want paused", h.manifest(t).Status)
+	}
+	// The note names the settings to raise, for anyone reading the journal.
+	if !strings.Contains(out.Note, "budget.max_usd") {
+		t.Errorf("Outcome.Note = %q, want it to name the setting to raise", out.Note)
 	}
 }
 
@@ -644,9 +869,372 @@ func TestDispatcher_ResumeContinuesTheLedgerRatherThanResettingIt(t *testing.T) 
 	}
 }
 
+// TestDispatcher_ResumeRebuildsTheLedgerFromTheJournal closes the stale
+// window ADR-0007's ledger used to leave open. The dispatcher appends a
+// node's node_finished, Usage included, and only then saves the manifest's
+// budget block. A crash between the two left a manifest that had never heard
+// of the node's spend, and a resume that restored the ledger from that
+// manifest let the run spend it again. The journal is the durable record, so
+// the ledger is rebuilt from it.
+func TestDispatcher_ResumeRebuildsTheLedgerFromTheJournal(t *testing.T) {
+	journalled := belay.Usage{InputTokens: 1000, OutputTokens: 200, USD: 3.00}
+	tests := []struct {
+		name     string
+		maxUSD   float64
+		wantCode int
+		wantUSD  float64
+		wantErr  error
+	}{
+		{
+			name:     "a resume counts the spend the journal recorded",
+			maxUSD:   100.00,
+			wantCode: 1,
+			wantUSD:  3.00 + 1.00,
+		},
+		{
+			name:     "a resume meets the ceiling the journal says the run reached",
+			maxUSD:   2.00,
+			wantCode: 0,
+			wantUSD:  3.00,
+			wantErr:  belay.ErrBudgetExceeded,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			h := newRun(t, budgetCfg(tt.maxUSD, 0), "count what the journal says")
+			// The manifest's budget block is still zero: the previous
+			// process died after journalling plan's spend and before
+			// saving the manifest.
+			h.seedJournal(t,
+				journal.Record{Event: journal.EventRunStarted},
+				journal.Record{Event: journal.EventNodeStarted, Node: graph.NodePlan, Attempt: 1},
+				journal.Record{
+					Event: journal.EventNodeFinished, Node: graph.NodePlan, Attempt: 1,
+					Status: journal.StatusOK, Next: graph.NodeCode,
+					Usage: &journal.Usage{
+						InputTokens: journalled.InputTokens, OutputTokens: journalled.OutputTokens,
+						USD: journalled.USD,
+					},
+				},
+			)
+
+			code := &fakeNode{name: graph.NodeCode, steps: []nodeStep{{
+				res: Result{
+					Next: graph.End, Status: journal.StatusOK,
+					Usage: belay.Usage{InputTokens: 10, OutputTokens: 5, USD: 1.00},
+				},
+			}}}
+			out, err := h.dispatcher(t, ok(graph.NodePlan, graph.NodeCode), code).Resume(context.Background())
+
+			if tt.wantErr != nil && !errors.Is(err, tt.wantErr) {
+				t.Fatalf("Resume() error = %v, want one wrapping %v", err, tt.wantErr)
+			}
+			if tt.wantErr == nil && err != nil {
+				t.Fatalf("Resume() error = %v, want nil", err)
+			}
+			if code.calls != tt.wantCode {
+				t.Errorf("code ran %d times, want %d", code.calls, tt.wantCode)
+			}
+			if !closeTo(out.Usage.USD, tt.wantUSD) {
+				t.Errorf("Outcome.Usage.USD = %v, want %v: the spend the journal recorded before the crash was lost",
+					out.Usage.USD, tt.wantUSD)
+			}
+			if got := h.manifest(t).Budget; !closeTo(got.SpentUSD, tt.wantUSD) {
+				t.Errorf("manifest.Budget.SpentUSD = %v, want %v", got.SpentUSD, tt.wantUSD)
+			}
+		})
+	}
+}
+
+// TestDispatcher_RecordsWhatARejectedNodeSpent is the first half of the
+// budget-integrity contract ADR-0007 makes: money a backend reports having
+// spent is spent, whatever the dispatcher then decides about the node's
+// verdict.
+//
+// Every rejected path used to journal a zero Usage and never call
+// Ledger.Record, so an agent that burned $2.50 and then timed out, was
+// cancelled, or reported an error cost the run nothing on paper. The run
+// could then be resumed and spend its whole ceiling over again.
+func TestDispatcher_RecordsWhatARejectedNodeSpent(t *testing.T) {
+	spent := belay.Usage{InputTokens: 1000, OutputTokens: 500, USD: 2.50}
+	timeoutCfg := func() config.Config {
+		cfg := config.Default()
+		cfg.Graph.NodeTimeout = config.NewDuration(20 * time.Millisecond)
+		return cfg
+	}
+
+	tests := []struct {
+		name  string
+		cfg   config.Config
+		pause bool
+		node  func(cancel context.CancelFunc) graph.Node
+	}{
+		{
+			name: "the node returned an error after the backend had spent",
+			cfg:  config.Default(),
+			node: func(context.CancelFunc) graph.Node {
+				return &fakeNode{name: graph.NodePlan, steps: []nodeStep{{
+					res: Result{Usage: spent},
+					err: errors.New("the agent CLI reported an error"),
+				}}}
+			},
+		},
+		{
+			name: "the node returned an unusable Result after the backend had spent",
+			cfg:  config.Default(),
+			node: func(context.CancelFunc) graph.Node {
+				return &fakeNode{name: graph.NodePlan, steps: []nodeStep{{
+					res: Result{Usage: spent},
+				}}}
+			},
+		},
+		{
+			name: "the node outlived graph.node_timeout after the backend had spent",
+			cfg:  timeoutCfg(),
+			node: func(context.CancelFunc) graph.Node {
+				return &fakeNode{name: graph.NodePlan, steps: []nodeStep{{
+					res:       Result{Next: graph.End, Status: journal.StatusOK, Usage: spent},
+					sleep:     150 * time.Millisecond,
+					ignoreCtx: true,
+				}}}
+			},
+		},
+		{
+			name: "the run was cancelled after the backend had spent",
+			cfg:  config.Default(),
+			node: func(cancel context.CancelFunc) graph.Node {
+				return &interruptingNode{name: graph.NodePlan, cancel: cancel, usage: spent}
+			},
+		},
+		{
+			name:  "the run was paused by a cancellation after the backend had spent",
+			cfg:   config.Default(),
+			pause: true,
+			node: func(cancel context.CancelFunc) graph.Node {
+				return &interruptingNode{name: graph.NodePlan, cancel: cancel, usage: spent}
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			h := newRun(t, tt.cfg, "spend, then fall over")
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+
+			out, _ := h.pausingDispatcher(t, tt.pause, tt.node(cancel)).Run(ctx)
+
+			if !closeTo(out.Usage.USD, spent.USD) {
+				t.Errorf("Outcome.Usage.USD = %v, want %v: the spend the node reported vanished",
+					out.Usage.USD, spent.USD)
+			}
+			if out.Usage.InputTokens != spent.InputTokens || out.Usage.OutputTokens != spent.OutputTokens {
+				t.Errorf("Outcome.Usage tokens = in %d / out %d, want in %d / out %d",
+					out.Usage.InputTokens, out.Usage.OutputTokens, spent.InputTokens, spent.OutputTokens)
+			}
+			if got := h.manifest(t).Budget; !closeTo(got.SpentUSD, spent.USD) {
+				t.Errorf("manifest.Budget.SpentUSD = %v, want %v: a resume would restore the wrong total",
+					got.SpentUSD, spent.USD)
+			}
+			// The journal is the durable source of truth the ledger is
+			// rebuilt from, so the record must carry the figure too.
+			rec := h.lastNodeFinished(t)
+			if rec.Usage == nil || !closeTo(rec.Usage.USD, spent.USD) {
+				t.Errorf("node_finished usage = %+v, want USD %v", rec.Usage, spent.USD)
+			}
+		})
+	}
+}
+
 // ---------------------------------------------------------------------------
 // Guards: steps, timeout, node failure.
 // ---------------------------------------------------------------------------
+
+// TestDispatcher_GuardsPauseSoARaisedLimitContinuesTheRun is the decision
+// that the dispatcher's own limits — the budget ceiling, graph.max_steps and
+// graph.node_timeout — stop a run without ending it.
+//
+// They used to end the run for good, so the work and the money already spent
+// were unreachable: the only way on was a new run, from nothing. A limit is a
+// statement about how much the person is willing to spend, and they can
+// change their mind; the run pauses, and `belay resume` re-checks it against
+// the configuration as it is then, because limits are read live.
+func TestDispatcher_GuardsPauseSoARaisedLimitContinuesTheRun(t *testing.T) {
+	spent := belay.Usage{InputTokens: 100, OutputTokens: 50, USD: 2.00}
+	tests := []struct {
+		name string
+		// cfg is the configuration whose limit stops the run.
+		cfg config.Config
+		// seed puts the run in the state that limit refuses.
+		seed func(*state.Manifest)
+		// raise is the same configuration with the limit lifted.
+		raise func(config.Config) config.Config
+		// nodes for the first dispatch and, fresh, for the resume.
+		nodes   func() []graph.Node
+		wantErr error
+		// wantNode is where the run pauses.
+		wantNode string
+		// wantTimeline is the journal after the pause.
+		wantTimeline []string
+	}{
+		{
+			name: "the budget ceiling",
+			cfg:  budgetCfg(5.00, 0),
+			seed: func(m *state.Manifest) {
+				m.Budget = state.Budget{LimitUSD: 5.00, SpentUSD: 7.50, TokensIn: 100, TokensOut: 50}
+			},
+			raise: func(c config.Config) config.Config { c.Budget.MaxUSD = 100.00; return c },
+			nodes: func() []graph.Node {
+				return []graph.Node{&fakeNode{name: graph.NodePlan, steps: []nodeStep{{
+					res: Result{Next: graph.End, Status: journal.StatusOK, Usage: spent},
+				}}}}
+			},
+			wantErr:      belay.ErrBudgetExceeded,
+			wantNode:     graph.NodePlan,
+			wantTimeline: []string{"run_started", "run_paused"},
+		},
+		{
+			name: "graph.max_steps",
+			cfg: func() config.Config {
+				c := budgetCfg(100.00, 0)
+				c.Graph.MaxSteps = 1
+				return c
+			}(),
+			seed:  func(*state.Manifest) {},
+			raise: func(c config.Config) config.Config { c.Graph.MaxSteps = 5; return c },
+			nodes: func() []graph.Node {
+				return []graph.Node{
+					&fakeNode{name: graph.NodePlan, steps: []nodeStep{{
+						res: Result{Next: graph.NodeCode, Status: journal.StatusOK, Usage: spent},
+					}}},
+					ok(graph.NodeCode, graph.End),
+				}
+			},
+			wantErr:  graph.ErrMaxSteps,
+			wantNode: graph.NodeCode,
+			wantTimeline: []string{
+				"run_started", "plan#1 started", "plan#1 finished ok -> code", "run_paused",
+			},
+		},
+		{
+			name: "graph.node_timeout",
+			cfg: func() config.Config {
+				c := budgetCfg(100.00, 0)
+				c.Graph.NodeTimeout = config.NewDuration(20 * time.Millisecond)
+				return c
+			}(),
+			seed: func(*state.Manifest) {},
+			raise: func(c config.Config) config.Config {
+				c.Graph.NodeTimeout = config.NewDuration(30 * time.Second)
+				return c
+			},
+			nodes: func() []graph.Node {
+				return []graph.Node{&fakeNode{name: graph.NodePlan, steps: []nodeStep{
+					{
+						res:       Result{Next: graph.End, Status: journal.StatusOK, Usage: spent},
+						sleep:     150 * time.Millisecond,
+						ignoreCtx: true,
+					},
+					{res: Result{Next: graph.End, Status: journal.StatusOK, Usage: spent}},
+				}}}
+			},
+			wantErr:  graph.ErrNodeTimeout,
+			wantNode: graph.NodePlan,
+			// The attempt is closed as one to run again, naming its own
+			// node, which is what makes the resume re-run it.
+			wantTimeline: []string{
+				"run_started", "plan#1 started", "plan#1 finished aborted -> plan", "run_paused",
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			h := newRun(t, tt.cfg, "stop, but do not end")
+			man := h.manifest(t)
+			tt.seed(&man)
+			if err := h.store.SaveManifest(man); err != nil {
+				t.Fatalf("SaveManifest() error = %v", err)
+			}
+
+			out, err := h.dispatcher(t, tt.nodes()...).Run(context.Background())
+
+			if !errors.Is(err, tt.wantErr) {
+				t.Fatalf("Run() error = %v, want one wrapping %v", err, tt.wantErr)
+			}
+			if out.Status != state.RunStatusPaused {
+				t.Errorf("Outcome.Status = %v, want paused: a limit stops a run, it does not end it", out.Status)
+			}
+			// The exit code does not change: this invocation still stopped
+			// short of where the graph would have taken it.
+			if out.ExitCode != graph.ExitAborted {
+				t.Errorf("Outcome.ExitCode = %d, want %d", out.ExitCode, graph.ExitAborted)
+			}
+			if out.Node != tt.wantNode {
+				t.Errorf("Outcome.Node = %q, want %q", out.Node, tt.wantNode)
+			}
+			if got := h.timeline(t); !equalStrings(got, tt.wantTimeline) {
+				t.Fatalf("timeline =\n  %v\nwant\n  %v", got, tt.wantTimeline)
+			}
+			if got := h.manifest(t).Status; got != state.RunStatusPaused {
+				t.Errorf("manifest.Status = %v, want paused, so `belay runs` offers the run", got)
+			}
+			paused := h.manifest(t).Budget.SpentUSD
+
+			// Raising the limit and resuming continues the same run, with
+			// everything it had already spent still counted.
+			h.cfg = tt.raise(tt.cfg)
+			out2, err2 := h.dispatcher(t, tt.nodes()...).Resume(context.Background())
+			if err2 != nil {
+				t.Fatalf("Resume() after raising the limit error = %v, want nil", err2)
+			}
+			if out2.Status != state.RunStatusCompleted {
+				t.Errorf("Outcome.Status after the resume = %v, want completed", out2.Status)
+			}
+			if out2.Usage.USD < paused {
+				t.Errorf("Outcome.Usage.USD after the resume = %v, less than the %v spent before the pause: "+
+					"resuming lost the run's spend", out2.Usage.USD, paused)
+			}
+		})
+	}
+}
+
+// TestDispatcher_APausedGuardIsRefusedByRunAndMetAgainIfTheLimitStands:
+// resuming re-checks the limit against the configuration as it is now. Left
+// alone, the run pauses again, having done nothing and spent nothing; a plain
+// `belay run` refuses it, as it refuses every paused run.
+func TestDispatcher_APausedGuardIsRefusedByRunAndMetAgainIfTheLimitStands(t *testing.T) {
+	h := newRun(t, budgetCfg(5.00, 0), "meet the ceiling again")
+	man := h.manifest(t)
+	man.Budget = state.Budget{LimitUSD: 5.00, SpentUSD: 7.50}
+	if err := h.store.SaveManifest(man); err != nil {
+		t.Fatalf("SaveManifest() error = %v", err)
+	}
+
+	plan := ok(graph.NodePlan, graph.End)
+	if _, err := h.dispatcher(t, plan).Run(context.Background()); !errors.Is(err, belay.ErrBudgetExceeded) {
+		t.Fatalf("Run() error = %v, want one wrapping belay.ErrBudgetExceeded", err)
+	}
+
+	// A plain Run refuses a paused run, whoever paused it.
+	out, err := h.dispatcher(t, plan).Run(context.Background())
+	if !errors.Is(err, graph.ErrRunPaused) || out.ExitCode != graph.ExitPaused {
+		t.Errorf("Run() on the paused run = {%v, exit %d}, want ErrRunPaused and exit %d",
+			err, out.ExitCode, graph.ExitPaused)
+	}
+
+	// Resumed with the ceiling unchanged, it meets it again.
+	out2, err2 := h.dispatcher(t, plan).Resume(context.Background())
+	if !errors.Is(err2, belay.ErrBudgetExceeded) {
+		t.Fatalf("Resume() error = %v, want one wrapping belay.ErrBudgetExceeded", err2)
+	}
+	if out2.Status != state.RunStatusPaused {
+		t.Errorf("Outcome.Status = %v, want paused", out2.Status)
+	}
+	if plan.calls != 0 {
+		t.Errorf("plan ran %d times, want 0: nothing may run while the run is over its ceiling", plan.calls)
+	}
+}
 
 func TestDispatcher_MaxStepsExceeded(t *testing.T) {
 	cfg := config.Default()
@@ -664,18 +1252,23 @@ func TestDispatcher_MaxStepsExceeded(t *testing.T) {
 	if loop.calls != 3 {
 		t.Errorf("node ran %d times, want exactly MaxSteps=3", loop.calls)
 	}
-	if out.Status != state.RunStatusAborted || out.ExitCode != graph.ExitAborted {
-		t.Errorf("Outcome = {%v, exit %d}, want {aborted, exit %d}", out.Status, out.ExitCode, graph.ExitAborted)
+	if out.Status != state.RunStatusPaused || out.ExitCode != graph.ExitAborted {
+		t.Errorf("Outcome = {%v, exit %d}, want {paused, exit %d}", out.Status, out.ExitCode, graph.ExitAborted)
 	}
 	if got := h.manifest(t).Step; got != 3 {
 		t.Errorf("manifest.Step = %d, want 3", got)
 	}
-	if last := h.timeline(t)[len(h.timeline(t))-1]; last != "run_aborted" {
-		t.Errorf("last journal record = %q, want run_aborted", last)
+	// Paused, so raising graph.max_steps and resuming lets the run go on
+	// from the step it reached.
+	if last := h.timeline(t)[len(h.timeline(t))-1]; last != "run_paused" {
+		t.Errorf("last journal record = %q, want run_paused", last)
+	}
+	if !strings.Contains(out.Note, "graph.max_steps") {
+		t.Errorf("Outcome.Note = %q, want it to name the setting to raise", out.Note)
 	}
 }
 
-func TestDispatcher_NodeTimeoutAbortsTheRun(t *testing.T) {
+func TestDispatcher_NodeTimeoutPausesTheRun(t *testing.T) {
 	cfg := config.Default()
 	cfg.Graph.NodeTimeout = config.NewDuration(20 * time.Millisecond)
 	h := newRun(t, cfg, "too slow")
@@ -692,17 +1285,18 @@ func TestDispatcher_NodeTimeoutAbortsTheRun(t *testing.T) {
 	if !errors.Is(err, graph.ErrNodeTimeout) {
 		t.Fatalf("Run() error = %v, want one wrapping ErrNodeTimeout", err)
 	}
-	if out.Status != state.RunStatusAborted || out.ExitCode != graph.ExitAborted {
-		t.Errorf("Outcome = {%v, exit %d}, want {aborted, exit %d}", out.Status, out.ExitCode, graph.ExitAborted)
+	if out.Status != state.RunStatusPaused || out.ExitCode != graph.ExitAborted {
+		t.Errorf("Outcome = {%v, exit %d}, want {paused, exit %d}", out.Status, out.ExitCode, graph.ExitAborted)
 	}
-	// The run ends rather than looping, and the node execution is closed as
-	// aborted so the journal stays resumable.
-	want := []string{"run_started", "plan#1 started", "plan#1 finished aborted", "run_aborted"}
+	// The run stops rather than looping, and the attempt is closed as one to
+	// run again, naming its own node: raising graph.node_timeout and
+	// resuming re-runs the step that overran.
+	want := []string{"run_started", "plan#1 started", "plan#1 finished aborted -> plan", "run_paused"}
 	if got := h.timeline(t); !equalStrings(got, want) {
 		t.Errorf("timeline =\n  %v\nwant\n  %v", got, want)
 	}
-	if out.Note == "" {
-		t.Error("Outcome.Note is empty, want a clear timeout explanation")
+	if !strings.Contains(out.Note, "graph.node_timeout") {
+		t.Errorf("Outcome.Note = %q, want a clear timeout explanation naming the setting", out.Note)
 	}
 }
 
@@ -1113,7 +1707,11 @@ type interruptingNode struct {
 	name   string
 	cancel context.CancelFunc
 	finish bool
-	calls  int
+	// usage is what the backend behind this node reported spending before
+	// the cancellation reached it. A node cut short still knows what it has
+	// already paid for.
+	usage belay.Usage
+	calls int
 	// seenStep records the RunContext.Step of each execution, which is the
 	// step number the run would have spent on it.
 	seenStep []int
@@ -1129,10 +1727,10 @@ func (n *interruptingNode) Run(ctx context.Context, rc *graph.RunContext) (graph
 	if n.finish {
 		return Result{
 			Next: graph.End, Status: journal.StatusOK,
-			Patch: state.Patch{Fix: &state.Fix{Attempts: 9}},
+			Patch: state.Patch{Fix: &state.Fix{Attempts: 9}}, Usage: n.usage,
 		}, nil
 	}
-	return Result{}, ctx.Err()
+	return Result{Usage: n.usage}, ctx.Err()
 }
 
 // TestDispatcher_CancellationEndsOrPausesTheRun is the Ctrl-C contract.
@@ -1271,9 +1869,9 @@ func (n outlivesItsDeadline) Run(ctx context.Context, _ *graph.RunContext) (grap
 // graph.node_timeout is stopped by a guard, not by the person running belay,
 // and PauseOnCancel leaves that verdict alone — including when the person
 // running belay also pressed Ctrl-C while the node overran. The timeout is
-// checked first; a cancellation that arrives while a node outlives its
-// deadline does not turn the dispatcher's verdict into a pause that resuming
-// would only meet again.
+// checked first, and it is the timeout the run records: both stop the run in
+// the same state now, and the reason is what tells a person to raise
+// graph.node_timeout rather than simply to resume.
 func TestDispatcher_PauseOnCancelDoesNotExcuseATimeout(t *testing.T) {
 	tests := []struct {
 		name string
@@ -1308,10 +1906,19 @@ func TestDispatcher_PauseOnCancelDoesNotExcuseATimeout(t *testing.T) {
 			if !errors.Is(err, graph.ErrNodeTimeout) {
 				t.Fatalf("Run() error = %v, want one wrapping ErrNodeTimeout", err)
 			}
-			if out.Status != state.RunStatusAborted {
-				t.Errorf("Outcome.Status = %v, want aborted", out.Status)
+			// Both stop the run the same way now, so the verdict is told
+			// from the interruption by the reason recorded, which is what
+			// says which setting to raise.
+			if errors.Is(err, graph.ErrInterrupted) {
+				t.Errorf("Run() error = %v: the timeout was reported as a Ctrl-C", err)
 			}
-			want := []string{"run_started", "plan#1 started", "plan#1 finished aborted", "run_aborted"}
+			if !strings.Contains(out.Note, "graph.node_timeout") {
+				t.Errorf("Outcome.Note = %q, want the timeout named, not the cancellation", out.Note)
+			}
+			if out.Status != state.RunStatusPaused {
+				t.Errorf("Outcome.Status = %v, want paused", out.Status)
+			}
+			want := []string{"run_started", "plan#1 started", "plan#1 finished aborted -> plan", "run_paused"}
 			if got := h.timeline(t); !equalStrings(got, want) {
 				t.Errorf("timeline =\n  %v\nwant\n  %v", got, want)
 			}
@@ -1320,23 +1927,25 @@ func TestDispatcher_PauseOnCancelDoesNotExcuseATimeout(t *testing.T) {
 }
 
 // TestDispatcher_GuardsComeBeforeTheCancellationPause: a run the budget
-// ceiling or graph.max_steps would end is ended, even when its context was
-// cancelled before the next node. Pausing it instead would hand `belay
-// resume` a run that can only meet the same guard again — and, for the budget,
-// a person who pressed Ctrl-C would be told the run is waiting for them when
-// it has in fact spent everything it may.
+// ceiling or graph.max_steps stops is stopped by that limit, even when its
+// context was cancelled before the next node. Both pause the run, so what is
+// at stake is the reason: a person told only that belay stopped when they
+// asked would resume, and meet the same limit again, never learning which
+// setting to raise.
 func TestDispatcher_GuardsComeBeforeTheCancellationPause(t *testing.T) {
 	tests := []struct {
-		name    string
-		cfg     config.Config
-		seed    func(*state.Manifest)
-		wantErr error
+		name        string
+		cfg         config.Config
+		seed        func(*state.Manifest)
+		wantErr     error
+		wantSetting string
 	}{
 		{
-			name:    "already over the budget ceiling",
-			cfg:     budgetCfg(5.00, 0),
-			seed:    func(m *state.Manifest) { m.Budget = state.Budget{LimitUSD: 5.00, SpentUSD: 7.50} },
-			wantErr: belay.ErrBudgetExceeded,
+			name:        "already over the budget ceiling",
+			cfg:         budgetCfg(5.00, 0),
+			seed:        func(m *state.Manifest) { m.Budget = state.Budget{LimitUSD: 5.00, SpentUSD: 7.50} },
+			wantErr:     belay.ErrBudgetExceeded,
+			wantSetting: "budget.max_usd",
 		},
 		{
 			name: "already at graph.max_steps",
@@ -1345,8 +1954,9 @@ func TestDispatcher_GuardsComeBeforeTheCancellationPause(t *testing.T) {
 				cfg.Graph.MaxSteps = 3
 				return cfg
 			}(),
-			seed:    func(m *state.Manifest) { m.Step = 3 },
-			wantErr: graph.ErrMaxSteps,
+			seed:        func(m *state.Manifest) { m.Step = 3 },
+			wantErr:     graph.ErrMaxSteps,
+			wantSetting: "graph.max_steps",
 		},
 	}
 	for _, tt := range tests {
@@ -1366,15 +1976,18 @@ func TestDispatcher_GuardsComeBeforeTheCancellationPause(t *testing.T) {
 				t.Fatalf("Run() error = %v, want one wrapping %v", err, tt.wantErr)
 			}
 			if errors.Is(err, graph.ErrInterrupted) {
-				t.Errorf("Run() error = %v: the guard's verdict was turned into a pause", err)
+				t.Errorf("Run() error = %v: the limit's verdict was reported as a Ctrl-C", err)
 			}
-			if out.Status != state.RunStatusAborted || out.ExitCode != graph.ExitAborted {
-				t.Errorf("Outcome = {%v, exit %d}, want {aborted, exit %d}", out.Status, out.ExitCode, graph.ExitAborted)
+			if out.Status != state.RunStatusPaused || out.ExitCode != graph.ExitAborted {
+				t.Errorf("Outcome = {%v, exit %d}, want {paused, exit %d}", out.Status, out.ExitCode, graph.ExitAborted)
 			}
 			if plan.calls != 0 {
 				t.Errorf("plan ran %d times, want 0", plan.calls)
 			}
-			want := []string{"run_started", "run_aborted"}
+			if !strings.Contains(out.Note, tt.wantSetting) {
+				t.Errorf("Outcome.Note = %q, want it to name %s", out.Note, tt.wantSetting)
+			}
+			want := []string{"run_started", "run_paused"}
 			if got := h.timeline(t); !equalStrings(got, want) {
 				t.Errorf("timeline =\n  %v\nwant\n  %v", got, want)
 			}

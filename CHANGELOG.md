@@ -38,6 +38,24 @@ that only `pkg/belay` carries a compatibility promise. Everything under
   `belay resume` does not offer it. Runs started by v0.1.x still resume, and
   are saved at version 2 from then on. With two belay installs, resume runs
   with the newer one. ADR-0011 records the decision.
+- **A run belay stops at one of its own limits is paused, not ended.**
+  Reaching `budget.max_usd` or `budget.max_tokens`, running out of
+  `graph.max_steps`, or overrunning `graph.node_timeout` used to end the run
+  for good: the only way on was a new run from nothing, which would spend the
+  whole budget again from zero. belay now pauses the run and says which
+  setting to raise. Raise it in belay.yaml and `belay resume <run-id>`
+  carries on with everything the run has already spent still counted; leave
+  it and the run stops at the same limit again, having done nothing and spent
+  nothing. These limits are read from belay.yaml every time a run is
+  resumed, unlike the shape of the graph, which is fixed when a run starts.
+  A step that overran `graph.node_timeout` runs again from its start. The
+  exit code is unchanged: an invocation belay stopped this way still exits 3,
+  so scripts can tell it from a run that paused for you to read the plan.
+  `belay runs` lists such a run as waiting and `belay resume` accepts it —
+  except that a run stopped right before the plan gate is still listed as
+  "needs plan approval", since that listing reads only manifest.json.
+  Resuming it does the right thing regardless: it runs the gate and asks,
+  rather than approving a plan nobody was shown.
 
 ### Fixed
 
@@ -222,6 +240,40 @@ that only `pkg/belay` carries a compatibility promise. Everything under
   candidate. The README, docs/architecture.md, docs/troubleshooting.md,
   docs/config.md, docs/adapters.md and examples/naive now say so. Running
   candidates is planned, and ADR-0019 is reserved for it.
+- **A step that fails, times out or is stopped is charged for what it
+  spent.** When the agent reported spending money and the step then
+  returned an error, ran past `graph.node_timeout`, or was stopped with
+  Ctrl-C, belay recorded the step as free: the money was left out of the
+  run's total and out of the journal. A run could then go past
+  `budget.max_usd`, and a run stopped with Ctrl-C and resumed could spend
+  its whole budget a second time. Whatever the agent reported spending is
+  now added to the run's total and written to the journal, however the step
+  ended.
+- **A resumed run no longer forgets what its last step cost.** belay
+  records a step's cost in the journal and then saves it in manifest.json.
+  If belay was killed between the two, `belay resume` read the older total
+  from manifest.json and let the run spend that step's cost again, past
+  `budget.max_usd`. A resume now adds up the cost of every step in the
+  journal, and never starts below the total manifest.json saved.
+- **A step cut short by a kill -9 is no longer free.** When belay is killed
+  in the middle of a step, nothing is left to say what that step spent, and
+  `belay resume` used to count it as nothing, so a run killed during a paid
+  step paid for it twice and counted it once. The step is now charged the
+  most any one step of the run has cost so far, and the run's cost is shown
+  as estimated from then on. A run killed in its first paid step, before
+  anything was spent, is still charged nothing, because there is nothing to
+  go on. ADR-0007 explains the choice.
+- **Resuming a run kills the agent and test processes a kill -9 left
+  running.** belay starts each of them in a process group of its own and
+  kills that group when a step is cancelled or times out — but only while
+  belay is alive to do it. After a kill -9, or a second Ctrl-C, they were
+  left running: your terminal's Ctrl-C never reaches them, so an agent could
+  keep working, and keep spending, with nothing watching it. belay now
+  writes down every process it starts, in that step's directory under
+  `nodes/`, before the process starts, and `belay resume` kills whatever is
+  still running from the step that was interrupted. It checks each process's
+  start time first, so a process id that has since been given to something
+  else is never signalled.
 
 ## v0.1.4 — 2026-09-17
 

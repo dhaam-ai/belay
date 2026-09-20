@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"github.com/google/go-cmp/cmp"
+	"github.com/google/go-cmp/cmp/cmpopts"
 
 	"github.com/dhaam-ai/belay/pkg/belay"
 )
@@ -262,5 +263,138 @@ func TestLedger_Restore_ContinuesAccumulating(t *testing.T) {
 	want := belay.Usage{InputTokens: 350, OutputTokens: 350, USD: 3.50}
 	if diff := cmp.Diff(want, resumed.Total()); diff != "" {
 		t.Errorf("Total() after resume+Record mismatch (-want +got):\n%s", diff)
+	}
+}
+
+// TestRebuild is how a resumed run gets its ledger back: from every
+// contribution the journal recorded, with the manifest's snapshot as a floor
+// the total never drops below. The journal is the durable record; the
+// manifest's budget block is saved after it and can lag it, which is the
+// stale window a resume used to restore from.
+func TestRebuild(t *testing.T) {
+	plan := belay.Usage{InputTokens: 100, OutputTokens: 50, USD: 1.00}
+	code := belay.Usage{InputTokens: 200, OutputTokens: 300, USD: 2.00, Estimated: true}
+	codeAgain := belay.Usage{InputTokens: 10, OutputTokens: 20, USD: 0.25}
+
+	tests := []struct {
+		name          string
+		entries       []NodeUsage
+		floor         Snapshot
+		wantTotal     belay.Usage
+		wantBreakdown []NodeUsage
+	}{
+		{
+			name:      "nothing recorded and nothing saved is a fresh ledger",
+			wantTotal: belay.Usage{},
+		},
+		{
+			name: "every contribution is summed, per node in first-seen order",
+			entries: []NodeUsage{
+				{Node: "plan", Usage: plan}, {Node: "code", Usage: code}, {Node: "code", Usage: codeAgain},
+			},
+			wantTotal: belay.Usage{InputTokens: 310, OutputTokens: 370, USD: 3.25, Estimated: true},
+			wantBreakdown: []NodeUsage{
+				{Node: "plan", Usage: plan},
+				{Node: "code", Usage: belay.Usage{InputTokens: 210, OutputTokens: 320, USD: 2.25, Estimated: true}},
+			},
+		},
+		{
+			name:      "a manifest behind the journal is ignored: the journal is newer",
+			entries:   []NodeUsage{{Node: "plan", Usage: plan}, {Node: "code", Usage: code}},
+			floor:     Snapshot{SpentUSD: 1.00, TokensIn: 100, TokensOut: 50},
+			wantTotal: belay.Usage{InputTokens: 300, OutputTokens: 350, USD: 3.00, Estimated: true},
+			wantBreakdown: []NodeUsage{
+				{Node: "plan", Usage: plan}, {Node: "code", Usage: code},
+			},
+		},
+		{
+			// A run whose manifest records spend its journal does not
+			// hold keeps that spend: rebuilding may only ever find more.
+			name:      "a manifest ahead of the journal is a floor the total never drops below",
+			entries:   []NodeUsage{{Node: "plan", Usage: plan}},
+			floor:     Snapshot{SpentUSD: 7.50, TokensIn: 900, TokensOut: 20, Estimated: true},
+			wantTotal: belay.Usage{InputTokens: 900, OutputTokens: 50, USD: 7.50, Estimated: true},
+			wantBreakdown: []NodeUsage{
+				{Node: "plan", Usage: plan},
+			},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			l := Rebuild(tt.entries, tt.floor)
+
+			if diff := cmp.Diff(tt.wantTotal, l.Total()); diff != "" {
+				t.Errorf("Total() mismatch (-want +got):\n%s", diff)
+			}
+			if diff := cmp.Diff(tt.wantBreakdown, l.Breakdown(), cmpopts.EquateEmpty()); diff != "" {
+				t.Errorf("Breakdown() mismatch (-want +got):\n%s", diff)
+			}
+
+			// A rebuilt ledger keeps accumulating like any other.
+			l.Record("test", belay.Usage{InputTokens: 1, OutputTokens: 1, USD: 0.50})
+			if got, want := l.Total().USD, tt.wantTotal.USD+0.50; got != want {
+				t.Errorf("Total().USD after one more Record = %v, want %v", got, want)
+			}
+		})
+	}
+}
+
+// TestLedger_Largest: the most any one Record call has cost, in each
+// dimension. A dispatcher charges it for an attempt a crash left open, whose
+// real cost nobody lived to report, so it must see every call the run made,
+// including those a resume rebuilt from the journal, and nothing that was
+// not a call.
+func TestLedger_Largest(t *testing.T) {
+	tests := []struct {
+		name   string
+		ledger func() *Ledger
+		want   belay.Usage
+	}{
+		{
+			name:   "a ledger that recorded nothing has no largest call",
+			ledger: New,
+			want:   belay.Usage{},
+		},
+		{
+			name: "each dimension is the largest any single call recorded",
+			ledger: func() *Ledger {
+				l := New()
+				l.Record("plan", belay.Usage{InputTokens: 900, OutputTokens: 10, USD: 0.50})
+				l.Record("code", belay.Usage{InputTokens: 100, OutputTokens: 700, USD: 2.00})
+				l.Record("approve", belay.Usage{})
+				return l
+			},
+			want: belay.Usage{InputTokens: 900, OutputTokens: 700, USD: 2.00},
+		},
+		{
+			// Two calls of one node are two calls, not one bigger one:
+			// a charge for one lost attempt must not grow with the number
+			// of attempts that came before it.
+			name: "calls are not summed per node",
+			ledger: func() *Ledger {
+				l := New()
+				l.Record("fix", belay.Usage{InputTokens: 10, OutputTokens: 10, USD: 1.00})
+				l.Record("fix", belay.Usage{InputTokens: 10, OutputTokens: 10, USD: 1.00})
+				return l
+			},
+			want: belay.Usage{InputTokens: 10, OutputTokens: 10, USD: 1.00},
+		},
+		{
+			name: "a rebuilt ledger knows the calls the journal recorded, and not the floor",
+			ledger: func() *Ledger {
+				return Rebuild(
+					[]NodeUsage{{Node: "code", Usage: belay.Usage{InputTokens: 50, OutputTokens: 60, USD: 1.25, Estimated: true}}},
+					Snapshot{SpentUSD: 40, TokensIn: 5000, TokensOut: 5000},
+				)
+			},
+			want: belay.Usage{InputTokens: 50, OutputTokens: 60, USD: 1.25, Estimated: true},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if diff := cmp.Diff(tt.want, tt.ledger().Largest()); diff != "" {
+				t.Errorf("Largest() mismatch (-want +got):\n%s", diff)
+			}
+		})
 	}
 }

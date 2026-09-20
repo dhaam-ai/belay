@@ -29,6 +29,19 @@
 // runaway-cost risk. That requires Setpgid, so this package targets unix
 // (macOS, Linux). It does not build on Windows.
 //
+// # Process-group records
+//
+// Killing the group on a timeout or a cancellation needs belay alive to do it.
+// A belay killed with SIGKILL, or quit by a second Ctrl-C, leaves the group
+// running, because the group is not the terminal's and the kernel hands it to
+// init. So when the context carries a directory (internal/procgroup's
+// WithDir, which the dispatcher sets to the node's evidence directory), Run
+// records the process there before starting it, fills in its group once it
+// has started, and removes the record once it has reaped it. A record that
+// outlives belay is how the next resume finds the group and kills it
+// (procgroup.Reap). Run refuses to start a process it cannot record, since it
+// could not stop that process after a crash.
+//
 // # Limits
 //
 // These are the gaps a reviewer should know about rather than rediscover.
@@ -38,11 +51,13 @@
 //     defeats the seeded values; only the built-in patterns still apply.
 //   - Process-group termination happens on the timeout and cancellation paths,
 //     where the child has not yet been reaped and its group id is still
-//     unambiguously ours. A child that exits cleanly while leaving descendants
-//     behind is not chased: after Wait reaps the child, the pid may be reused,
-//     and signalling a recycled group is worse than the leak it would prevent.
-//     When descendants outlive the child and still hold its pipes, Run logs it
-//     and closes the descriptors after the grace period.
+//     unambiguously ours, and on the resume after belay was killed, where a
+//     record's start time proves the same thing. A child that exits cleanly
+//     while leaving descendants behind is not chased: after Wait reaps the
+//     child, the pid may be reused, and signalling a recycled group is worse
+//     than the leak it would prevent. Its record is removed with it. When
+//     descendants outlive the child and still hold its pipes, Run logs it and
+//     closes the descriptors after the grace period.
 //   - Redaction runs at roughly 20 MB/s on pipe-sized chunks, so it is capped
 //     work rather than free work; output past MaxOutput is drained without
 //     being scanned, since it cannot reach a Result, the journal, or a prompt.
@@ -63,6 +78,8 @@ import (
 	"sync/atomic"
 	"syscall"
 	"time"
+
+	"github.com/dhaam-ai/belay/internal/procgroup"
 )
 
 // Defaults applied when a Command or Runner leaves a limit unset.
@@ -352,12 +369,35 @@ func (r *Runner) Run(ctx context.Context, c Command) (Result, error) {
 	cmd.Stderr = &sink{cap: errCap, red: errW}
 
 	log := r.logger()
+	// Recorded before it starts, so that no instant exists in which a belay
+	// killed with SIGKILL leaves this process running unrecorded; see
+	// "Process-group records" in the package doc. A process that cannot be
+	// recorded is one belay could not stop after a crash, so it is not
+	// started.
+	var group *procgroup.Tracked
+	if dir := procgroup.DirFrom(ctx); dir != "" {
+		g, err := procgroup.Track(dir, res.Args)
+		if err != nil {
+			return res, &StartError{Tool: res.Args[0], Err: err, Detail: red.Redact(err.Error())}
+		}
+		group = g
+	}
 	start := time.Now()
 	if err := cmd.Start(); err != nil {
 		res.Duration = time.Since(start)
+		forgetGroup(ctx, log, group)
 		return res, classifyStart(red, res.Args[0], err)
 	}
 	pid := cmd.Process.Pid
+	if group != nil {
+		if err := group.Started(pid); err != nil {
+			// The process is already running, and ending it would turn a
+			// bookkeeping failure into a failed step. It runs unrecorded,
+			// which is what every process did before records existed.
+			log.LogAttrs(ctx, slog.LevelWarn, "belay/exec: could not record the process group; if belay is killed now, it is left running",
+				slog.String("program", res.Args[0]), slog.Int("pid", pid), slog.String("error", red.Redact(err.Error())))
+		}
+	}
 	log.LogAttrs(ctx, slog.LevelDebug, "belay/exec: started",
 		slog.String("program", res.Args[0]), slog.Int("pid", pid),
 		slog.Duration("timeout", timeout))
@@ -388,6 +428,9 @@ func (r *Runner) Run(ctx context.Context, c Command) (Result, error) {
 	exited.Store(true)
 	close(done)
 	watcher.Wait()
+	// Reaped, and its group killed if the context ended it: nothing is left
+	// for a resume to chase.
+	forgetGroup(ctx, log, group)
 
 	res.Duration = time.Since(start)
 	_ = outW.Close()
@@ -440,6 +483,21 @@ func terminateGroup(pid int, grace time.Duration, done <-chan struct{}, exited *
 	case <-t.C:
 	}
 	signalGroup(pid, syscall.SIGKILL, exited)
+}
+
+// forgetGroup removes group's record once belay no longer needs it to find
+// the process: the process was reaped, or never started. A record that
+// cannot be removed is only logged. The next resume that heals this run finds
+// it, sees that the process is gone or that its pid now belongs to another
+// process, and leaves both alone.
+func forgetGroup(ctx context.Context, log *slog.Logger, group *procgroup.Tracked) {
+	if group == nil {
+		return
+	}
+	if err := group.Done(); err != nil {
+		log.LogAttrs(ctx, slog.LevelWarn, "belay/exec: could not remove a process-group record",
+			slog.String("error", err.Error()))
+	}
 }
 
 func signalGroup(pid int, sig syscall.Signal, exited *atomic.Bool) {

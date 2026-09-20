@@ -93,6 +93,14 @@ type Result struct {
 
 	// Usage is the token and USD cost attributable to this node, for the
 	// budget ledger and the timeline. Zero for nodes that call no agent.
+	//
+	// It is the one field of a Result that is read even when Run also
+	// returns an error, and even when the dispatcher throws the rest of the
+	// Result away. Spend is not a verdict: a backend that reports having
+	// burned $2.50 and then failed has burned it, and a node that returns
+	// (Result{}, err) after a paid call tells the budget ledger the call was
+	// free. A node whose backend reported usage must carry that usage on its
+	// error return too.
 	Usage belay.Usage
 
 	// Note is a short human-readable reason, surfaced in the journal and

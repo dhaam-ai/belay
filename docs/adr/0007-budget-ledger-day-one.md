@@ -46,3 +46,107 @@ A budget ledger tracks cumulative spend (USD and token counts) per run and per d
 - pkg/budget/ledger.go (T46)
 - pkg/adapter/claude/cost.go (T46)
 - docs/config.md (budget fields)
+
+---
+
+## Amendment (2026-09-19): every step is charged, a resume counts from the journal, and the ceiling pauses
+
+The ceiling this decision promises did not hold across a crash or a failed
+step. Three holes let a run spend past `budget.max_usd`:
+
+- **A rejected step was free.** When a step returned an error, ran past
+  `graph.node_timeout`, returned a result the dispatcher could not use, or was
+  stopped with Ctrl-C, the dispatcher journalled it with zero usage and never
+  added anything to the ledger. The Claude backend answers an `is_error` run
+  with its usage and an error together, so real, reported spend was thrown
+  away. Once Ctrl-C paused a run instead of ending it, a resumed run could
+  spend its whole ceiling a second time.
+- **A resume restored the ledger from a snapshot that could be stale.** The
+  dispatcher journals a step's completion, usage included, and only then saves
+  the manifest's budget block. A crash between the two left a manifest one
+  step behind, and the ledger was restored from it.
+- **A step belay never saw finish was free.** After a kill -9, the dispatcher
+  closes the attempt the crash left open, and charged it nothing.
+
+### Decision
+
+1. **Spend is not a verdict.** A step's `Result.Usage` is charged and
+   journalled however the dispatcher disposes of the rest of the Result. A
+   node whose backend reported usage carries it on its error return too. Only
+   the Patch of a rejected Result is thrown away.
+2. **The journal is the ledger's source of truth.** On every dispatch the
+   ledger is rebuilt from the usage on every `node_finished` record, the same
+   record everything else a resume decides is read from. The manifest's
+   snapshot is kept as a floor the total never drops below, so rebuilding can
+   only ever find more spend than before, never less.
+3. **An attempt a crash left open is charged the costliest step the run has
+   recorded**, in each dimension (tokens in, tokens out, dollars), and the
+   charge is marked estimated. The flag is sticky, so every total that
+   includes the charge says it is partly a guess. When the run has recorded
+   no spend yet, the charge is zero.
+
+The third point is a choice about which way to be wrong, because the real
+cost is unknowable: the process that would have reported it is dead, and an
+agent may have spent any amount before the kill. Charging nothing is wrong in
+the direction that breaks this ADR's promise. Charging too much only stops a
+run early, and a run stopped at its ceiling is paused, so raising the ceiling
+and resuming continues it. So the charge leans high, and it comes from the
+run's own evidence of what one of its steps costs, not from a second source of
+truth.
+
+### Consequences
+
+- A run killed during a paid step, then resumed, is charged the estimate for
+  the attempt that died and then the real cost of the attempt that runs it
+  again. Its total reads "(estimated)" from then on.
+- A run can still pass its ceiling in one case: killed during its first paid
+  step, before anything has been recorded, when there is no evidence to charge
+  from. The overshoot is at most what that one step cost.
+- A kill -9 during a step that spends nothing, such as the test step, is
+  charged as if it were the costliest step. That is the conservative choice
+  working as intended, and the price of it is a run that stops early.
+
+### Alternatives considered
+
+- **Charge the whole remaining budget.** Safe, but it stops every run that
+  crashed, including one killed while its tests were running, and makes a
+  resume after any crash need a raised ceiling.
+- **Estimate from the prompt size and a price table.** The output tokens and
+  the number of turns are exactly what is unknown, and a price table in the
+  dispatcher is a second source of truth for what a backend costs, which the
+  ledger's design already rejects.
+- **Charge the most this same node has cost before.** Nothing at all for the
+  commonest case, a crash during the first `code` or `fix` attempt.
+
+### Reaching the ceiling pauses the run; it does not end it
+
+This ADR said the run "aborts" at the cap, and it did: the run was over, and
+the only way on was a new run from nothing, which would spend everything again
+from zero. That made the cap punish the person for setting it low, and it
+worked against the ledger this ADR exists for, because the second run's spend
+was not counted against the first run's.
+
+A ceiling is not a verdict on the work. It is the figure someone chose
+beforehand for how much they were willing to pay, and they are allowed to
+change their mind when belay stops and tells them what it would cost to go on.
+So the run pauses at the ceiling, with the settings to raise in its note, and
+`belay resume` re-checks the ceiling against belay.yaml as it is then. The
+spend already made is kept, so resuming is not a fresh ceiling: a person who
+does not raise it simply meets it again, having run nothing and spent nothing.
+
+The same reasoning applies to the dispatcher's two other limits,
+`graph.max_steps` and `graph.node_timeout`, which pause a run for the same
+reason; internal/graph's Dispatcher doc argues it for the graph. The limits are
+read live on every dispatch, deliberately unlike the shape of the graph, which
+is pinned in the manifest when the run is created. The exit code does not
+change: an invocation stopped by a limit still exits 3.
+
+### Revisit if
+
+- A backend reports usage as it goes, so that the dispatcher could journal
+  partial spend before a crash instead of estimating it afterwards.
+- Estimated charges stop runs early often enough that people raise their
+  ceilings by reflex.
+- People routinely raise a ceiling and resume without reading what the run had
+  spent, which would mean the ceiling has stopped being a decision and become
+  a prompt to click through.

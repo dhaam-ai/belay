@@ -474,8 +474,16 @@ func TestAgentErrorsPropagate(t *testing.T) {
 			if !errors.Is(err, tt.err) {
 				t.Errorf("the backend's own error did not survive wrapping: %v", err)
 			}
-			if diff := cmp.Diff(graph.Result{}, res); diff != "" {
+			// Empty but for Usage: an error means no verdict, so nothing
+			// the node might have concluded may be carried out of it —
+			// but what the backend reported spending is an accounting
+			// fact, not a verdict, and the dispatcher charges the run for
+			// it. See graph.Result.Usage.
+			if diff := cmp.Diff(graph.Result{Usage: res.Usage}, res); diff != "" {
 				t.Errorf("Result on error (-want +got):\n%s", diff)
+			}
+			if res.Usage != (belay.Usage{InputTokens: 1200, OutputTokens: 340, USD: 0.0731}) {
+				t.Errorf("Result.Usage on error = %+v, want what the backend reported", res.Usage)
 			}
 		})
 	}
@@ -746,5 +754,23 @@ func TestFixRequestsEditTools(t *testing.T) {
 	// node runs the suite, and a shell is where an agent reaches the network.
 	if slices.Contains(call.AllowedTools, "Bash") {
 		t.Errorf("AllowedTools = %v: Bash is deliberately withheld from a repair", call.AllowedTools)
+	}
+}
+
+// TestRunCarriesTheBackendsSpendOnAnAgentFailure: the fix loop is the most
+// expensive part of a run, and a fix attempt that spent money and then failed
+// must still be charged for it. graph.Result.Usage is the one field the
+// dispatcher reads from a Result it otherwise rejects.
+func TestRunCarriesTheBackendsSpendOnAnAgentFailure(t *testing.T) {
+	h := newHarness(t, failingState(0))
+	spent := belay.Usage{InputTokens: 1200, OutputTokens: 340, USD: 0.0731}
+	h.agent.Errs = []error{errors.New("backend exploded after it had spent")}
+
+	res, err := fix.New().Run(context.Background(), h.rc)
+	if err == nil {
+		t.Fatalf("Run succeeded; want an error. Result = %+v", res)
+	}
+	if res.Usage != spent {
+		t.Errorf("Result.Usage = %+v, want %+v: the spend the backend reported was dropped", res.Usage, spent)
 	}
 }

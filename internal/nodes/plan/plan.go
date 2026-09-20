@@ -179,17 +179,22 @@ func (*Node) Run(ctx context.Context, rc *graph.RunContext) (graph.Result, error
 	// return a populated response alongside an error (its own budget
 	// guard, for one — see belay.AgentBackend.Invoke), and that partial
 	// output is exactly what someone diagnosing the failure wants.
+	//
+	// The same partial response is why every error return below carries
+	// resp.Usage: what the backend reports having spent it has spent, and
+	// graph.Result.Usage is the one field the dispatcher reads from a
+	// Result it rejects.
 	writeErr := writeResponseEvidence(rc, resp)
 	if invokeErr != nil {
-		return graph.Result{}, fmt.Errorf("plan: agent %q: %w", rc.Agent.Name(), invokeErr)
+		return graph.Result{Usage: resp.Usage}, fmt.Errorf("plan: agent %q: %w", rc.Agent.Name(), invokeErr)
 	}
 	if writeErr != nil {
-		return graph.Result{}, writeErr
+		return graph.Result{Usage: resp.Usage}, writeErr
 	}
 
 	text := strings.TrimSpace(resp.Text)
 	if text == "" {
-		return graph.Result{}, fmt.Errorf("%w: backend %q returned %d byte(s) of whitespace in %d turn(s)",
+		return graph.Result{Usage: resp.Usage}, fmt.Errorf("%w: backend %q returned %d byte(s) of whitespace in %d turn(s)",
 			ErrEmptyPlan, rc.Agent.Name(), len(resp.Text), resp.Turns)
 	}
 	// Trimmed, with exactly one trailing newline: the digest below covers
@@ -200,7 +205,7 @@ func (*Node) Run(ctx context.Context, rc *graph.RunContext) (graph.Result, error
 
 	path, err := rc.WriteArtifact(ArtifactName, doc)
 	if err != nil {
-		return graph.Result{}, fmt.Errorf("plan: archive plan: %w", err)
+		return graph.Result{Usage: resp.Usage}, fmt.Errorf("plan: archive plan: %w", err)
 	}
 
 	next := graph.NodeCode

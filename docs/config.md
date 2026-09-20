@@ -284,7 +284,7 @@ The most tokens, input and output together, a run may use across all its agent c
 **Valid values**: `"abort"`, `"warn"`
 
 What to do when budget is exceeded:
-- `"abort"`: Stop immediately and fail the run
+- `"abort"`: Stop the run before the next step. The run is paused, not ended: raise `budget.max_usd` or `budget.max_tokens` and run `belay resume <run-id>` to carry on with what it has already spent still counted. belay reads these limits again on every resume
 - `"warn"`: Log a warning but continue (not recommended)
 
 ## `fanout`

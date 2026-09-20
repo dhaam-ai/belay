@@ -434,6 +434,12 @@ func outcomeHeadline(outcome graph.Outcome, runErr error) string {
 		return "This run has already ended, so belay did nothing."
 	case errors.Is(runErr, context.Canceled), errors.Is(runErr, graph.ErrNodeAborted) && outcome.Steps == 0:
 		return "belay stopped because you asked it to. Everything it had done is saved."
+	case errors.Is(runErr, graph.ErrMaxSteps), errors.Is(runErr, graph.ErrNodeTimeout),
+		errors.Is(runErr, belay.ErrBudgetExceeded):
+		// One of belay's own limits. The run is paused rather than ended,
+		// and what follows says which setting to raise, so this must not
+		// read as "waiting for you" the way the approval gate does.
+		return fmt.Sprintf("belay stopped itself %s. Everything it did is saved.", did)
 	}
 
 	switch outcome.Status {
@@ -496,13 +502,38 @@ func spendText(outcome graph.Outcome) string {
 func nextSteps(view outcomeView) []string {
 	layout, outcome, runErr := view.layout, view.outcome, view.runErr
 	resume := "belay resume " + layout.RunID()
-	newRun := `belay run "what you want built"`
 
 	switch {
 	case errors.Is(runErr, graph.ErrInterrupted):
 		// Paused, but by Ctrl-C and not by the graph: nothing is waiting
 		// for the person to read, and resume re-runs the interrupted step.
 		return []string{"pick up where it stopped with:", "", "    " + resume}
+	// The three limits belay stops itself at come before the general paused
+	// case, which they would otherwise fall into and be told to read a plan
+	// nobody is waiting on. Each one is a setting the person chose and can
+	// change, and the run is paused, not ended: raising the limit and
+	// resuming continues this run, keeping everything it has already spent.
+	// Limits are re-read on the resume, which is why that works.
+	case errors.Is(runErr, graph.ErrMaxSteps):
+		return []string{
+			"the graph kept going round without finishing, so belay stopped it.",
+			"raise graph.max_steps in belay.yaml, then pick this run up again:",
+			"", "    " + resume,
+		}
+	case errors.Is(runErr, graph.ErrNodeTimeout):
+		return []string{
+			"one step ran longer than graph.node_timeout allows.",
+			"raise graph.node_timeout in belay.yaml, then pick this run up again:",
+			"", "    " + resume,
+		}
+	case errors.Is(runErr, belay.ErrBudgetExceeded):
+		// Crossing either ceiling stops a run with the same error, which
+		// does not say which one, so both settings are named.
+		return []string{
+			"the run reached its budget ceiling, so belay stopped it.",
+			"raise budget.max_usd or budget.max_tokens in belay.yaml, whichever it reached, then pick this run up again:",
+			"", "    " + resume,
+		}
 	case errors.Is(runErr, graph.ErrRunPaused), outcome.Status == state.RunStatusPaused:
 		lines := []string{"read the plan, edit it if you want to, then run:", "", "    " + resume}
 		if outcome.Node == graph.NodeApprove {
@@ -518,25 +549,6 @@ func nextSteps(view outcomeView) []string {
 	// A run that ended as aborted cannot be resumed: belay resume refuses
 	// it. Only a run that is paused or was interrupted is offered the
 	// command, so the report never names one that would refuse.
-	case errors.Is(runErr, graph.ErrMaxSteps):
-		return []string{
-			"the graph kept going round without finishing, so belay stopped it. this run has ended.",
-			"raise graph.max_steps in belay.yaml, or ask for less, and start a new run:",
-			"", "    " + newRun,
-		}
-	case errors.Is(runErr, graph.ErrNodeTimeout):
-		return []string{
-			"one step ran longer than graph.node_timeout allows. this run has ended.",
-			"raise graph.node_timeout in belay.yaml, and start a new run:", "", "    " + newRun,
-		}
-	case errors.Is(runErr, belay.ErrBudgetExceeded):
-		// Crossing either ceiling ends a run with the same error, which
-		// does not say which one, so both settings are named.
-		return []string{
-			"the run went past its budget ceiling, so belay stopped it. this run has ended.",
-			"raise budget.max_usd or budget.max_tokens in belay.yaml, whichever it reached, and start a new run:",
-			"", "    " + newRun,
-		}
 	case outcome.Status == state.RunStatusCompleted:
 		return []string{"review the change in your repository, then commit it"}
 	case outcome.Status == state.RunStatusAborted:

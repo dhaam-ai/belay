@@ -82,6 +82,16 @@ func (t *totals) add(u belay.Usage) {
 	t.estimated = t.estimated || u.Estimated
 }
 
+// atLeast raises each of t's figures to floor's wherever floor's is larger.
+// Estimated is sticky here as everywhere: a total built even partly from a
+// figure that was estimated stays marked as estimated.
+func (t *totals) atLeast(floor totals) {
+	t.inputTokens = max(t.inputTokens, floor.inputTokens)
+	t.outputTokens = max(t.outputTokens, floor.outputTokens)
+	t.micros = max(t.micros, floor.micros)
+	t.estimated = t.estimated || floor.estimated
+}
+
 // usage renders t as the public belay.Usage shape.
 func (t totals) usage() belay.Usage {
 	return belay.Usage{
@@ -98,20 +108,23 @@ func (t totals) usage() belay.Usage {
 // usage without racing.
 //
 // The zero value is not usable; construct one with New for a fresh run, or
-// Restore when continuing a run that already has a persisted Snapshot.
+// Rebuild when continuing a run that has already spent.
 type Ledger struct {
 	mu    sync.Mutex
 	nodes map[string]*totals
 	order []string // node names in first-seen order, for a stable Breakdown
 	total totals
+	// largest holds, in each dimension, the most any single Record call
+	// contributed. See Largest.
+	largest totals
 }
 
 // New returns an empty Ledger with no recorded usage, for a fresh run.
 //
-// Call Restore instead when resuming a run that already has a persisted
-// budget Snapshot: New always starts a run's spend at zero, which for a
-// resumed run would silently discard everything spent before the crash
-// and let the run spend up to the full ceiling all over again.
+// Call Rebuild instead when resuming a run: New always starts a run's spend
+// at zero, which for a resumed run would silently discard everything spent
+// before the crash and let the run spend up to the full ceiling all over
+// again.
 func New() *Ledger {
 	return &Ledger{nodes: make(map[string]*totals)}
 }
@@ -138,6 +151,10 @@ func (l *Ledger) Record(node string, u belay.Usage) {
 	}
 	t.add(u)
 	l.total.add(u)
+
+	var call totals
+	call.add(u)
+	l.largest.atLeast(call)
 }
 
 // Total returns the ledger's cumulative usage across every node recorded
@@ -146,6 +163,25 @@ func (l *Ledger) Total() belay.Usage {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	return l.total.usage()
+}
+
+// Largest returns the most any single Record call has contributed, in each
+// dimension separately: the largest input token count any one call recorded,
+// the largest output token count, and the largest USD amount, which need not
+// all come from the same call. Estimated is set if any call that set one of
+// those figures was itself estimated.
+//
+// It exists for the one charge belay has to make without a report: an
+// attempt a crash left open, whose process died before it could say what it
+// spent. A dispatcher charges that attempt Largest, as the most any step of
+// this run has shown it can cost. Two calls for one node count as two calls,
+// never one larger one, so the charge for a lost attempt does not grow with
+// the attempts that came before it. Rebuild's floor is not a call, and is not
+// considered.
+func (l *Ledger) Largest() belay.Usage {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.largest.usage()
 }
 
 // NodeUsage pairs a node name with its accumulated belay.Usage, as
@@ -227,6 +263,11 @@ func (l *Ledger) Snapshot(limitUSD float64) Snapshot {
 // Breakdown: the returned Ledger's Breakdown starts empty and grows only
 // with nodes Recorded after the resume, while its Total and Check still
 // correctly reflect all spend, from both before and after the crash.
+//
+// A dispatcher resuming a run calls Rebuild, not this: a Snapshot is saved
+// after the journal record it summarises, so it can be one node's spend
+// behind. Restore is for a caller that holds nothing but a Snapshot, such as
+// the fanout node reasoning about RunContext.Budget.
 func Restore(snap Snapshot) *Ledger {
 	l := New()
 	l.total = totals{
@@ -235,5 +276,38 @@ func Restore(snap Snapshot) *Ledger {
 		micros:       usdToMicros(snap.SpentUSD),
 		estimated:    snap.Estimated,
 	}
+	return l
+}
+
+// Rebuild returns the Ledger a resumed run continues with: every
+// contribution in entries Recorded in order, then the grand total raised to
+// floor in each dimension where floor records more.
+//
+// entries is the run's durable record of what each node execution cost — in
+// practice the Usage on every node_finished in its journal. A dispatcher
+// appends that record before it saves the manifest's budget block, so the
+// manifest can lag the journal by a node, and a resume that restored from the
+// manifest alone (Restore) let the run spend that node's cost a second time.
+// Rebuilding from the journal closes that window, and also brings back the
+// per-node Breakdown, which a Snapshot never held.
+//
+// floor is the manifest's Snapshot, and it only ever raises the total. The
+// journal is written first, so a manifest ahead of it should not happen; but
+// whichever of the two records more is the one to believe, because
+// under-counting is how a budget ceiling stops holding and over-counting
+// merely stops a run early, where a person can raise the ceiling and resume
+// it. Spend the floor adds belongs to no node, so after raising, Breakdown no
+// longer sums to Total.
+func Rebuild(entries []NodeUsage, floor Snapshot) *Ledger {
+	l := New()
+	for _, e := range entries {
+		l.Record(e.Node, e.Usage)
+	}
+	l.total.atLeast(totals{
+		inputTokens:  floor.TokensIn,
+		outputTokens: floor.TokensOut,
+		micros:       usdToMicros(floor.SpentUSD),
+		estimated:    floor.Estimated,
+	})
 	return l
 }

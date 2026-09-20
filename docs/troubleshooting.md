@@ -27,7 +27,7 @@ This document covers common failure modes, their symptoms, and remedies.
 
 **Remedy**:
 - If the goal is unclear, start a new run with a clearer one: `belay run "what you want built"`. belay.yaml has no prompt setting; the goal is what the agent is given
-- If the agent ran out of budget, increase budget.max_usd
+- If the agent ran out of budget, increase budget.max_usd and resume the run
 - If the working directory or model is wrong, edit belay.yaml and start a new run; `belay resume` does not re-run a run that completed
 
 ## Run is Paused
@@ -108,7 +108,7 @@ This document covers common failure modes, their symptoms, and remedies.
 
 ## Budget Exceeded
 
-**Symptom**: Run aborts with error: "belay: budget exceeded: spent $X of $Y limit"
+**Symptom**: The run stops with "belay: budget exceeded: spent $X of $Y limit", and belay says to raise the setting and resume.
 
 **Cause**: Cumulative cost of all agent invocations crossed the configured ceiling.
 
@@ -118,7 +118,7 @@ This document covers common failure modes, their symptoms, and remedies.
 3. Check if Usage.Estimated = true; estimated costs are lower-confidence
 
 **Remedy**:
-With `budget.on_exceed: abort` the run has ended, and `belay resume` will not continue it. Change belay.yaml, then start a new run:
+With `budget.on_exceed: abort` the run is paused, not ended. Raise the ceiling in belay.yaml and run `belay resume <run-id>`: belay reads the limits again as it starts, and the run continues with what it has already spent still counted, rather than spending it over again from a new run. The same holds for `graph.max_steps` and `graph.node_timeout`.
 - Increase budget.max_usd in belay.yaml (if the project is worth it)
 - Use a cheaper model (adjust agent.model in belay.yaml)
 - Scope the goal to fewer changes (smaller diffs cost fewer tokens)

@@ -42,7 +42,7 @@ Records are written with O_APPEND|O_WRONLY, synced after every append, and never
 - A run ending in a terminal state (`run_completed`, `run_failed`, `run_aborted`): refuse to resume (it is finished)
 - A half-written final record (crash mid-append): `journal.Open` discards it and heals the file before `ResolveStart` reads the journal, so the decision is made from the last complete record
 
-Nothing is recomputed from the journal. On resume the dispatcher reads state.json and manifest.json as they were last saved, and the journal decides only where to resume. The write order is what keeps the blackboard right: a node's changes reach state.json before its completion reaches the journal (see *Why Patch-Then-Journal Matters* below), so the journal never records a finished node whose changes are missing. The manifest has no such protection. It is saved after the journal record, so a crash between the two leaves it one node behind, its step count and budget snapshot missing that node, and nothing corrects it today: the budget ledger is restored from that snapshot. Rebuilding the ledger from the usage in the journal's `node_finished` records is planned.
+Only the budget ledger is recomputed from the journal. On resume the dispatcher reads state.json and manifest.json as they were last saved, and the journal decides where to resume. The write order is what keeps the blackboard right: a node's changes reach state.json before its completion reaches the journal (see *Why Patch-Then-Journal Matters* below), so the journal never records a finished node whose changes are missing. The manifest has no such protection. It is saved after the journal record, so a crash between the two leaves it one node behind, its step count and budget snapshot missing that node. The step count is left that way. The budget is not: the dispatcher rebuilds the ledger from the usage on every `node_finished` record in the journal, and uses the manifest's snapshot only as a floor the total never drops below, so a resumed run cannot spend that node's cost a second time.
 
 ### Layer 2: Node Execution
 
@@ -108,7 +108,7 @@ The critical invariant: two conforming adapters produce reports that serialize t
 
 The graph acts only on `Gate`: if GateFail, the run branches to the `fix` node (bounded by a loop counter); if GatePass, the run finishes; if GateError, the run fails (the tool could not reach a verdict, not "the code is bad").
 
-**Budget Ledger** (see `internal/budget/budget.go`): Day-one constraint (ADR-0007). Every node's Usage is added to a cumulative budget. Before each node the dispatcher checks the total against `budget.max_usd` and `budget.max_tokens` in belay.yaml. Once either is exceeded, `budget.on_exceed` decides: `abort`, the default, ends the run with an error wrapping belay.ErrBudgetExceeded; `warn` logs the overrun and carries on.
+**Budget Ledger** (see `internal/budget/budget.go`): Day-one constraint (ADR-0007). Every node's Usage is added to a cumulative budget. Before each node the dispatcher checks the total against `budget.max_usd` and `budget.max_tokens` in belay.yaml. Once either is exceeded, `budget.on_exceed` decides: `abort`, the default, stops the run with an error wrapping belay.ErrBudgetExceeded; `warn` logs the overrun and carries on. `abort` pauses the run rather than ending it, so raising the ceiling and running `belay resume` continues it with the spend it has already made still counted; the limits are read from belay.yaml on every dispatch, unlike the shape of the graph, which is pinned when the run is created.
 
 Usage.Estimated reports whether USD was computed from actual backend costs or estimated from a fallback table (belay.Usage.Estimated); callers can log differently for estimated costs.
 
@@ -167,8 +167,8 @@ The run progresses through a directed graph of nodes (see `internal/graph/node.g
 **Terminal States**:
 - StatusOK with Next="END": run completed successfully
 - StatusFailed: a node returned an error or returned StatusFailed
-- StatusAborted: budget exceeded, max steps reached, a node timeout, or the caller's context cancelled. `belay run` and `belay resume` set the dispatcher's `PauseOnCancel`, so for them a cancellation (Ctrl-C, SIGTERM) closes the interrupted attempt as aborted, naming the node itself as `next`, and pauses the run; `belay resume` re-runs that node
-- StatusPaused: human approval gate not granted; use `belay resume` to continue
+- StatusAborted: a node returned StatusAborted, ending the run
+- StatusPaused: the run is waiting and `belay resume` continues it. Four things pause a run: the human approval gate; the caller's context being cancelled, for which `belay run` and `belay resume` set the dispatcher's `PauseOnCancel`, so a Ctrl-C or SIGTERM closes the interrupted attempt as aborted, naming the node itself as `next`, and `belay resume` re-runs that node; and belay's own limits — the budget ceiling, `graph.max_steps` and `graph.node_timeout` — each of which records in its note the setting to raise. The invocation still exits 3 for a pause that was not the graph's own choice, so a script can tell the two apart
 
 If a node returns an error or an invalid Result, the dispatcher stops the run and records the failure. The user inspects the journal with `belay timeline`, fixes the underlying issue, and starts a new run: `belay resume` refuses a run that has failed.
 
@@ -202,7 +202,7 @@ Five pluggable interfaces in `pkg/belay` allow third-party implementations:
 
 1. **ToolchainMissing** (ErrToolchainMissing): A required binary is not installed (go, pytest, golangci-lint, sonar-scanner). The remedy is to install software, not to edit code. The graph routes this to a human, not to the fix loop.
 
-2. **BudgetExceeded** (ErrBudgetExceeded): Run cost crossed its configured ceiling. Not retryable; the run must abort.
+2. **BudgetExceeded** (ErrBudgetExceeded): Run cost crossed its configured ceiling. Retrying it unchanged only meets the ceiling again; the run is paused, and raising `budget.max_usd` or `budget.max_tokens` and resuming continues it.
 
 3. **GateFailed** (ErrGateFailed): A quality gate returned GateFail. This is not an error to the gate itself (it worked, returned a verdict), but a graph-level error for callers that want to exit non-zero. The node returns (QualityReport{Gate: GateFail}, nil); the graph branches to fix, not to error handling.
 
