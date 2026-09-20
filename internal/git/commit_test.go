@@ -665,3 +665,32 @@ func TestRepositoryHooksNeverRun(t *testing.T) {
 		t.Errorf("the repository's hooks ran: %q (read error %v)", body, err)
 	}
 }
+
+// A real repository's refusal must reach the node that has to pause on it.
+//
+// The promote node cannot import this package — this one builds only on unix,
+// and internal/graph, which hands a node its repository, must stay free of
+// build tags — so it recognises an unfinished merge by vcs.ErrDirtyTarget.
+// That only works if the error this package returns wraps it. Without this,
+// promote sees an opaque error, the run ends, and an ended run cannot be
+// resumed: a person one `git commit` from finishing loses the run.
+//
+// TestIntegrate's "a dirty target is refused" row proves the refusal; this
+// proves it is the refusal the other side of the seam is looking for.
+func TestDirtyTargetIsTheSentinelAcrossThePackageBoundary(t *testing.T) {
+	if !errors.Is(ErrDirtyTarget, vcs.ErrDirtyTarget) {
+		t.Errorf("ErrDirtyTarget does not wrap vcs.ErrDirtyTarget, so a node outside this package cannot recognise it")
+	}
+
+	f := newFixture(t)
+	top := f.repo("target")
+	repo := f.open(top)
+	f.git(top, "branch", "cand")
+	commitOn(f, top, "cand", "from the candidate\n")
+	f.write(top, "a.txt", "resolved by hand, not yet committed\n")
+
+	_, err := repo.Integrate(t.Context(), top, "cand", vcs.Message{Subject: "merge the candidate"})
+	if !errors.Is(err, vcs.ErrDirtyTarget) {
+		t.Errorf("Integrate into a dirty tree = %v, want an error wrapping vcs.ErrDirtyTarget", err)
+	}
+}

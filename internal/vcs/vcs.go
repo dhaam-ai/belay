@@ -36,8 +36,27 @@ package vcs
 
 import (
 	"context"
+	"errors"
 	"strings"
 )
+
+// ErrDirtyTarget reports a working tree with changes the caller did not make
+// and has not committed, which the operation would otherwise sweep into a
+// commit of its own.
+//
+// It is here, and not only in the package that drives git, for one reason:
+// the node that promotes a run's change has to tell this apart from every
+// other failure, and it cannot import that package. Promoting is the step a
+// person lands in when they finish a conflicting merge by hand in the run's
+// worktree, and stopping half way -- conflicts resolved, nothing committed --
+// is ordinary. Reported as an error it ends the run, and a run that has ended
+// cannot be resumed; recognised here it pauses, and `belay resume` finishes
+// the moment they commit.
+//
+// An implementation returns an error wrapping it, with the directory and what
+// is uncommitted, so errors.Is answers the question and the message still
+// says which tree.
+var ErrDirtyTarget = errors.New("vcs: the working tree has uncommitted changes")
 
 // Repository is the version control a promotion needs.
 //
