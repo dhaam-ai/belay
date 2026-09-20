@@ -330,6 +330,8 @@ func findFirstItem(buf []byte, lines []span, heading int) int {
 // rather than to the final step. That is what keeps deleting the last step
 // from leaving a stray blank line behind.
 func collectSteps(buf []byte, lines []span, first int) (steps []step, tailAt int) {
+	// first is a line findFirstItem already read a marker from, so this one
+	// cannot fail; every later item is checked by nextItem instead.
 	m, _ := parseMarker(body(buf, lines[first]))
 	list := m
 	i := first

@@ -123,6 +123,9 @@ func (s step) rewritten(lines []string, eol string, terminate bool) step {
 		}
 		first += pad + lines[0]
 	}
+	// first was just built from digits and a delimiter, so it always reads
+	// back as a marker; the zero marker a failure would return could only
+	// come from a bug in the writer above.
 	written, _ := parseMarker(first)
 	s.pad = written.pad
 
