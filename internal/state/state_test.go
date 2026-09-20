@@ -301,7 +301,7 @@ func TestState_JSONKeySetMatchesSpec(t *testing.T) {
 }
 
 func TestPlan_JSONKeySetMatchesSpec(t *testing.T) {
-	assertExactJSONKeys(t, Plan{}, []string{"path", "approved", "digest"})
+	assertExactJSONKeys(t, Plan{}, []string{"path", "approved", "digest", "regenerate"})
 }
 
 func TestCode_JSONKeySetMatchesSpec(t *testing.T) {
@@ -375,6 +375,10 @@ func keysOf(m map[string]json.RawMessage) []string {
 func TestStateGolden(t *testing.T) {
 	st := NewState("ship the widget")
 	st.Plan = Plan{Path: "artifacts/plan.md", Approved: true, Digest: "sha256:aaa"}
+	// A request that has been served: the guidance the current plan was
+	// written to, with nothing outstanding — which is what the document of
+	// a run that asked for a new plan and got one looks like.
+	st.SetRegeneration(Regeneration{Request: 1, Guidance: "fewer steps, and name the files", Served: 1})
 	st.Code = Code{SessionID: "sess-1", LastDiff: "artifacts/diff-0001.patch", ChangedFiles: []string{"a.go", "b.go"}}
 	st.Test = NewTest(belay.TestReport{Total: 5, Passed: 5, Failed: 0, Failures: []belay.TestFailure{}}, "artifacts/test.json")
 	st.Review = NewReview(belay.QualityReport{

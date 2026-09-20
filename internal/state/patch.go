@@ -67,6 +67,11 @@ func (p Patch) Apply(s *State) error {
 	}
 	if p.Plan != nil {
 		s.Plan = *p.Plan
+		// A node hands back a Patch and never writes state.json itself
+		// (ADR-0002), so this is where the plan node serving a request for
+		// a new plan drops the capability that request declared. See
+		// State.requireRegeneration.
+		s.requireRegeneration()
 	}
 	if p.Code != nil {
 		s.Code = *p.Code

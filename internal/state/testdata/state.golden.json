@@ -5,7 +5,12 @@
   "plan": {
     "path": "artifacts/plan.md",
     "approved": true,
-    "digest": "sha256:aaa"
+    "digest": "sha256:aaa",
+    "regenerate": {
+      "request": 1,
+      "guidance": "fewer steps, and name the files",
+      "served": 1
+    }
   },
   "code": {
     "session_id": "sess-1",

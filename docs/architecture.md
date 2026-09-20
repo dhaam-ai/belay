@@ -125,6 +125,7 @@ Usage.Estimated reports whether USD was computed from actual backend costs or es
 **CLI** (`cmd/belay`, implemented in `internal/cli`):
 - `belay run "<what you want built>"`: start a new run. `--workspace` names the repository, and `--config` adds a settings file on top of belay.yaml
 - `belay resume <run-id>`: continue a paused or crashed run
+- `belay plan [run-id]`: read the plan a run stopped at; `--regenerate "<guidance>"` records a request for a new one and continues the run, so the plan node writes it
 - `belay runs`: list the workspace's runs
 - `belay timeline <run-id>`: inspect the journal and manifest
 - Config is validated on load; invalid settings abort before any work starts.
@@ -218,6 +219,7 @@ Five pluggable interfaces in `pkg/belay` allow third-party implementations:
 
 **User Recovery**: Users can:
 - `belay resume <run-id>`: continue a paused or crashed run (refusing runs already in terminal states)
+- `belay plan [run-id]`: read the plan a run stopped at, or ask for a different one with `--regenerate`
 - `belay timeline <run-id>`: inspect the journal and manifest to diagnose failures
 - `belay run` again once an external cause is fixed (e.g., a network outage): a run that failed cannot be continued, so the retry is a new run, and it starts from the working directory as the failed run left it
 

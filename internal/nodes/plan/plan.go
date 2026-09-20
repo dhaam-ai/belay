@@ -6,9 +6,10 @@
 // Run asks the configured belay.AgentBackend for a plan, archives the
 // answer as the run's plan.md artifact, and returns a state.Patch carrying
 // that artifact's run-relative path and a content digest. It routes to the
-// approve node when config.Graph.Approval is set and straight to the code
-// node when it is not. Approved always starts false: this node records
-// that a plan exists, never that anyone agreed with it.
+// approve node when config.Graph.Approval is set, or when it is answering
+// a request for a new plan, and straight to the code node otherwise.
+// Approved always starts false: this node records that a plan exists,
+// never that anyone agreed with it.
 //
 // # Purity
 //
@@ -30,6 +31,36 @@
 // prompt is half the model's input: a plan that came out wrong cannot be
 // diagnosed from the user prompt alone, and the system prompt is a
 // constant of whichever belay version happened to run.
+//
+// # Asking again
+//
+// The same node writes a run's second plan, and its third. A person at the
+// approve gate who wants a different plan records a state.Regeneration
+// request, and the gate routes back here (see internal/nodes/approve). The
+// node reads the request's guidance into a "# Revision" section of the
+// prompt, writes the answer over the same plan.md, and marks the request
+// served in its Patch.
+//
+// Three details are load-bearing:
+//
+//   - It keys on Regenerate.Request, not Regenerate.Pending. The Patch that
+//     marks the request served may be applied and durably saved before the
+//     dispatcher journals this node's finish; the re-run after a crash in
+//     that window then reads a request that already looks served. Keying on
+//     Pending would send that re-run an ordinary plan prompt, dropping the
+//     one thing the person said was wrong. Keying on Request asks the same
+//     question both times.
+//   - A run answering a request routes to the approve gate whatever
+//     graph.approval says now. The request exists only because somebody was
+//     standing at that gate; sending them to the code node instead would
+//     spend their budget on a plan they have never seen.
+//   - A revision the backend cannot fill does not end the run. See
+//     previousPlanStands: unlike a first plan, there is something to fall
+//     back to.
+//
+// The node never writes the snapshot of the plan it replaces. Whoever
+// records the request writes it first, under ReplacedArtifact's name, so
+// that no single interrupted execution can lose both documents.
 //
 // # Failure
 //
@@ -55,6 +86,7 @@ import (
 
 	"github.com/dhaam-ai/belay/internal/graph"
 	"github.com/dhaam-ai/belay/internal/journal"
+	"github.com/dhaam-ai/belay/internal/nodes/approve"
 	"github.com/dhaam-ai/belay/internal/state"
 	"github.com/dhaam-ai/belay/pkg/belay"
 )
@@ -66,6 +98,9 @@ const (
 	// after a crash must land on the same path rather than accumulate
 	// plan-1.md, plan-2.md for one logical plan.
 	ArtifactName = "plan.md"
+	// ReplacedPrefix begins the name of the artifact holding the plan a
+	// request for a new one replaced; see ReplacedArtifact.
+	ReplacedPrefix = "plan-replaced-"
 	// PromptFile is the node file holding belay.AgentRequest.Prompt
 	// exactly as sent.
 	PromptFile = "prompt.txt"
@@ -77,6 +112,20 @@ const (
 	// as JSON, including Usage and the backend's own Raw output.
 	ResponseFile = "response.json"
 )
+
+// ReplacedArtifact names the artifact holding the plan that request
+// replaced: "plan-replaced-1.md" for the first request of a run, and so on.
+//
+// One name per request, rather than one "plan-previous.md" overwritten
+// each time, because a person who asked twice has two plans behind them
+// and may want either. The snapshot is written by whoever records the
+// request, before the plan node runs, so that the document the person was
+// reading survives being replaced. It is never written by this node: a
+// node that both replaced the plan and kept the copy could lose both in
+// one interrupted execution.
+func ReplacedArtifact(request int) string {
+	return fmt.Sprintf("%s%d.md", ReplacedPrefix, request)
+}
 
 // DigestPrefix labels the hash algorithm state.Plan.Digest is computed
 // with, matching config.Config.Digest's own "sha256:<hex>" spelling.
@@ -163,7 +212,7 @@ func (*Node) Run(ctx context.Context, rc *graph.RunContext) (graph.Result, error
 	}
 
 	req := belay.AgentRequest{
-		Prompt:       userPrompt(rc.Goal, workDir),
+		Prompt:       userPrompt(rc.Goal, workDir, rc.State.Plan.Regenerate),
 		SystemPrompt: SystemPrompt,
 		WorkDir:      workDir,
 		AllowedTools: readOnlyTools(),
@@ -174,6 +223,7 @@ func (*Node) Run(ctx context.Context, rc *graph.RunContext) (graph.Result, error
 		return graph.Result{}, err
 	}
 
+	request := rc.State.Plan.Regenerate
 	resp, invokeErr := rc.Agent.Invoke(ctx, req)
 	// The response is recorded before the error is acted on: a backend may
 	// return a populated response alongside an error (its own budget
@@ -186,6 +236,9 @@ func (*Node) Run(ctx context.Context, rc *graph.RunContext) (graph.Result, error
 	// Result it rejects.
 	writeErr := writeResponseEvidence(rc, resp)
 	if invokeErr != nil {
+		if res, ok := previousPlanStands(rc, request, resp.Usage); ok {
+			return res, nil
+		}
 		return graph.Result{Usage: resp.Usage}, fmt.Errorf("plan: agent %q: %w", rc.Agent.Name(), invokeErr)
 	}
 	if writeErr != nil {
@@ -194,6 +247,9 @@ func (*Node) Run(ctx context.Context, rc *graph.RunContext) (graph.Result, error
 
 	text := strings.TrimSpace(resp.Text)
 	if text == "" {
+		if res, ok := previousPlanStands(rc, request, resp.Usage); ok {
+			return res, nil
+		}
 		return graph.Result{Usage: resp.Usage}, fmt.Errorf("%w: backend %q returned %d byte(s) of whitespace in %d turn(s)",
 			ErrEmptyPlan, rc.Agent.Name(), len(resp.Text), resp.Turns)
 	}
@@ -208,8 +264,15 @@ func (*Node) Run(ctx context.Context, rc *graph.RunContext) (graph.Result, error
 		return graph.Result{Usage: resp.Usage}, fmt.Errorf("plan: archive plan: %w", err)
 	}
 
+	// A run answering a request for a new plan goes back to the gate
+	// whatever graph.approval says now. The request can only exist because
+	// somebody was standing at that gate reading the last plan; sending
+	// them to the code node instead would spend their budget on a plan
+	// they have never seen. graph.approval is read from belay.yaml on every
+	// invocation, so "now" and "when the run started" are not the same
+	// question.
 	next := graph.NodeCode
-	if rc.Config.Graph.Approval {
+	if rc.Config.Graph.Approval || request.Request > 0 {
 		next = graph.NodeApprove
 	}
 
@@ -225,6 +288,13 @@ func (*Node) Run(ctx context.Context, rc *graph.RunContext) (graph.Result, error
 			// configuration that skips it, may say otherwise.
 			Approved: false,
 			Digest:   Digest(doc),
+			// Serving the request is recorded here, in the Patch of the
+			// node that served it, because a node writes no state itself
+			// (ADR-0002) and because Patch fields are absolute sets: a
+			// Plan built without it would silently drop the request, and
+			// the re-run after a crash would ask the agent a question
+			// missing the one thing the person said was wrong.
+			Regenerate: served(request),
 		}},
 		Usage: resp.Usage,
 		// Note carries no agent text: it is journalled and rendered, and
@@ -317,3 +387,72 @@ func logger(rc *graph.RunContext) *slog.Logger {
 }
 
 var _ graph.Node = (*Node)(nil)
+
+// served returns r with its outstanding request marked answered.
+//
+// It never lowers Served. A document whose Served already ran ahead of
+// Request is nonsense, but rewriting it downwards would make this node the
+// thing that wrote the nonsense, and state.Regeneration's whole protocol is
+// that neither counter goes backwards.
+func served(r state.Regeneration) state.Regeneration {
+	if r.Served < r.Request {
+		r.Served = r.Request
+	}
+	return r
+}
+
+// previousPlanStands answers a request for a new plan that the backend
+// could not fill, with the plan the person already had.
+//
+// A first plan has no fallback: nothing downstream can proceed without a
+// plan, so a backend that fails there is an error and the run ends (see
+// the package doc). A revision is the one case where that reasoning does
+// not hold. There is a plan on disk -- the one the person was reading when
+// they asked for another -- so ending the run would take a good plan away
+// from them as punishment for a backend that timed out, and `belay resume`
+// refuses a run that has ended.
+//
+// So: route back to the gate, with the request marked served so the gate
+// does not send the run round the same loop again, and with the plan the
+// person had left exactly where it was. The check is deliberately the
+// gate's own (approve.CheckPlan, approve.PlanArtifact): if what is on disk
+// is not something the gate would show a person, there is nothing to fall
+// back to and the caller's error stands.
+//
+// ok is false when the error should be returned as it always was.
+func previousPlanStands(rc *graph.RunContext, request state.Regeneration, usage belay.Usage) (graph.Result, bool) {
+	if request.Request == 0 {
+		return graph.Result{}, false
+	}
+	name, _, err := approve.PlanArtifact(rc.Layout, rc.State.Plan.Path)
+	if err != nil {
+		return graph.Result{}, false
+	}
+	data, err := rc.ReadArtifact(name)
+	if err != nil {
+		return graph.Result{}, false
+	}
+	if err := approve.CheckPlan(data); err != nil {
+		return graph.Result{}, false
+	}
+
+	plan := rc.State.Plan
+	plan.Digest = Digest(data)
+	// Unapproved, whatever it was before: what the person approved, if
+	// they ever did, is not what they asked for, and the gate is where
+	// they say whether the plan they still have will do.
+	plan.Approved = false
+	plan.Regenerate = served(request)
+
+	logger(rc).Warn("no new plan was written; the previous plan stands",
+		"request", request.Request, "plan", rc.State.Plan.Path)
+
+	return graph.Result{
+		Next:   graph.NodeApprove,
+		Status: journal.StatusOK,
+		Patch:  state.Patch{Plan: &plan},
+		Usage:  usage,
+		Note: fmt.Sprintf("No new plan could be written for request %d, so the previous plan stands; what the backend returned is in this step's %s.",
+			request.Request, ResponseFile),
+	}, true
+}

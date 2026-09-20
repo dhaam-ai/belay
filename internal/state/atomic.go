@@ -245,3 +245,31 @@ func writeJSON(path string, v any, perm fs.FileMode) error {
 	data = append(data, '\n')
 	return atomicWriteFile(path, data, perm)
 }
+
+// ReplaceArtifact durably replaces the run artifact called name — plan.md,
+// say — with data.
+//
+// It exists for the writers that are not a graph node: the CLI recording a
+// plan a person edited or asked to be replaced, while the run is paused
+// and no dispatcher is running. A node writes artifacts through
+// graph.RunContext.WriteArtifact instead, which is an ordinary truncating
+// write and is all a node needs, since a node's own crash re-runs the node.
+//
+// The difference is who else is looking. Between the write and the next
+// dispatch there is a paused run on disk whose state.json already names
+// this artifact and records its digest, and a person who may read the file
+// at any moment. A truncating write is briefly a shorter, wrong document;
+// this one is the old bytes until it is the new bytes, and the new bytes
+// are on the disk, not merely in the page cache, before it returns. See
+// atomicWriteFile.
+//
+// name is one path component, refused rather than cleaned if it could put
+// a file anywhere but the run's artifacts directory (Layout.ArtifactPath),
+// and the directory is created if the run has none yet.
+func ReplaceArtifact(l Layout, name string, data []byte) error {
+	abs, err := l.ArtifactPath(name)
+	if err != nil {
+		return err
+	}
+	return atomicWriteFile(abs, data, filePerm)
+}

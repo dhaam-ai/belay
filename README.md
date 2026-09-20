@@ -243,13 +243,25 @@ belay writes a plan to `.belay/runs/<run-id>/artifacts/plan.md`, prints where it
 
 ```bash
 # Look at the plan:
-cat .belay/runs/*/artifacts/plan.md
+belay plan
 
 # If you like it, continue:
 belay resume
 ```
 
 If something goes wrong, you can edit the plan before resuming, and belay will use your edited version.
+
+If it is not what you wanted at all, have the agent write another one instead
+of editing this one yourself:
+
+```bash
+belay plan --regenerate "fewer steps, and leave the parser alone"
+```
+
+belay keeps a copy of the plan it replaces beside it, writes the new plan with
+your words in the prompt, and stops at the plan again so you can read it. That
+is a step of the run like any other: it is journaled, it counts against the
+budget, and `belay resume` picks it up if it is interrupted.
 
 ### 6. Watch the run unfold
 
