@@ -141,3 +141,45 @@ func TestResizeKeepsTheSelectedStepOnScreen(t *testing.T) {
 		}
 	}
 }
+
+// hostile is a plan quoting text an agent copied out of a hostile
+// repository: an OSC 52 clipboard write ended by BEL, a clear-screen, a C1
+// control-sequence introducer, a NUL and a DEL.
+const hostile = "## Steps\n\n" +
+	"1. Copy \x1b]52;c;cm0gLXJmIH4K\x07 into the clipboard.\n" +
+	"2. Clear \x1b[2J the screen, then \u009b31m colour it.\n" +
+	"3. A NUL \x00 and a DEL \x7f in the text.\n"
+
+// TestPlanTextCannotDriveTheTerminal: nothing the plan says reaches the
+// terminal as a control character. Each is drawn as a visible stand-in, so
+// the person can see something odd is in their plan without the terminal
+// acting on it.
+func TestPlanTextCannotDriveTheTerminal(t *testing.T) {
+	for _, where := range []string{"plan", "goal"} {
+		opts := review()
+		if where == "plan" {
+			opts.Plan = []byte(hostile)
+		} else {
+			opts.Goal = "make \x1b]52;c;Zm9v\x07 it \u009b2J work"
+		}
+		content := open(t, opts, 100, 24).View().Content
+		for _, bad := range []string{"\x1b", "\x07", "\u009b", "\x00", "\x7f"} {
+			if strings.Contains(content, bad) {
+				t.Errorf("%s: the view carries %q to the terminal:\n%q", where, bad, content)
+			}
+		}
+	}
+	got := screenText(open(t, withPlan(hostile), 100, 24))
+	for _, want := range []string{"␛]52;c;cm0gLXJmIH4K␇", "␛[2J", "<9B>31m", "␀", "␡"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("the view does not show the stand-in %q:\n%s", want, got)
+		}
+	}
+}
+
+// withPlan is review() with plan as the plan.
+func withPlan(plan string) Options {
+	opts := review()
+	opts.Plan = []byte(plan)
+	return opts
+}

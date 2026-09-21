@@ -55,16 +55,47 @@ type line struct {
 	editor bool
 }
 
+// tabWidth is how many spaces a tab in the plan is drawn as: what the
+// editor turns a tab into, so a step reads the same open or closed.
+const tabWidth = 4
+
+// clean makes text from outside belay safe to draw: the plan, the goal, and
+// anything an error quotes. Every control character becomes a visible
+// stand-in rather than reaching the terminal, where an ESC or a C1 byte
+// starts a sequence the terminal acts on — writing the clipboard (OSC 52),
+// clearing the screen — and a plan can quote such text from the repository
+// it was written about. A C0 control or DEL becomes its Unicode control
+// picture (ESC is ␛), a C1 control its code in angle brackets, and a tab
+// spaces.
+func (g glyphs) clean(s string) string {
+	var b strings.Builder
+	for _, r := range s {
+		switch {
+		case r == '\t':
+			b.WriteString(strings.Repeat(" ", tabWidth))
+		case r < 0x20:
+			b.WriteRune(0x2400 + r)
+		case r == 0x7f:
+			b.WriteRune(0x2421)
+		case r >= 0x80 && r < 0xa0:
+			fmt.Fprintf(&b, "<%02X>", r)
+		default:
+			b.WriteRune(r)
+		}
+	}
+	return b.String()
+}
+
 // layout lays text out in lines no wider than width: every line of text,
-// wrapped at width.
-func layout(text []byte, width, step int) []line {
+// made safe to draw with clean and wrapped at width.
+func layout(text []byte, width, step int, clean func(string) string) []line {
 	var out []line
 	parts := strings.Split(string(text), "\n")
 	if len(parts) > 0 && parts[len(parts)-1] == "" {
 		parts = parts[:len(parts)-1]
 	}
 	for i, p := range parts {
-		p = strings.TrimSuffix(p, "\r")
+		p = clean(strings.TrimSuffix(p, "\r"))
 		for j, w := range wrap(p, width) {
 			out = append(out, line{text: w, step: step, first: step >= 0 && i == 0 && j == 0})
 		}
@@ -134,11 +165,12 @@ func (m Model) editorOpen() bool {
 // of the step it is editing.
 func (m Model) body() []line {
 	width := max(1, m.width-gutterWidth)
+	clean := m.glyphs.clean
 	if m.stepsErr != nil {
-		return layout(m.plan, width, -1)
+		return layout(m.plan, width, -1, clean)
 	}
 	head, steps, tail := m.doc.Parts()
-	lines := layout(head, width, -1)
+	lines := layout(head, width, -1, clean)
 	for i, step := range steps {
 		switch {
 		case m.editorOpen() && m.adding && i == m.editAt:
@@ -147,12 +179,12 @@ func (m Model) body() []line {
 			lines = append(lines, m.editorLines(i)...)
 			continue
 		}
-		lines = append(lines, layout(step, width, i)...)
+		lines = append(lines, layout(step, width, i, clean)...)
 	}
 	if m.editorOpen() && m.adding && m.editAt == len(steps) {
 		lines = append(lines, m.editorLines(-1)...)
 	}
-	return append(lines, layout(tail, width, -1)...)
+	return append(lines, layout(tail, width, -1, clean)...)
 }
 
 // editorLines is the editor, laid out as lines of the plan belonging to
@@ -242,13 +274,13 @@ func (m Model) gutter(l line) string {
 // header names the run and what was asked for, above a rule. Unsaved edits
 // are marked in words, so the mark survives a terminal without colour.
 func (m Model) header() []string {
-	title := "Plan for run " + m.opts.RunID
+	title := "Plan for run " + m.glyphs.clean(m.opts.RunID)
 	if m.dirty() {
 		title += m.glyphs.sep + "edited"
 	}
 	return []string{
 		fit(title, m.width, m.glyphs.more),
-		fit("You asked for: "+m.opts.Goal, m.width, m.glyphs.more),
+		fit("You asked for: "+m.glyphs.clean(m.opts.Goal), m.width, m.glyphs.more),
 		strings.Repeat(m.glyphs.rule, m.width),
 	}
 }
@@ -279,7 +311,7 @@ type block struct {
 func (m Model) footerLines() ([]string, int) {
 	blocks := []block{{lines: []string{strings.Repeat(m.glyphs.rule, m.width)}, drop: 5}}
 	if m.message != "" {
-		msg := wrap(m.message, max(1, m.width))
+		msg := wrap(m.glyphs.clean(m.message), max(1, m.width))
 		if len(msg) > maxMessageLines {
 			msg = append(msg[:maxMessageLines-1], fit(strings.Join(msg[maxMessageLines-1:], " "), m.width, m.glyphs.more))
 		}
@@ -420,7 +452,7 @@ func (m Model) tooSmall() []string {
 func (m Model) sentences(texts ...string) []string {
 	var out []string
 	for _, text := range texts {
-		out = append(out, wrap(text, max(1, m.width))...)
+		out = append(out, wrap(m.glyphs.clean(text), max(1, m.width))...)
 	}
 	return out
 }
