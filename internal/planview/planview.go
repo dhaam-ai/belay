@@ -72,6 +72,8 @@ const (
 	ActionLeave Action = iota
 	// ActionApprove approves the plan as saved, and continues the run.
 	ActionApprove
+	// ActionRegenerate asks the agent for a new plan.
+	ActionRegenerate
 )
 
 // Decision is what the person decided, which the command layer carries out
@@ -96,6 +98,8 @@ const (
 	leaving
 	// approving is the question asked before the plan is approved.
 	approving
+	// asking is the box for what a new plan should do differently.
+	asking
 )
 
 // Model is the viewer's state. It is a bubbletea model: every change to it
@@ -171,6 +175,8 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch key, isKey := msg.(tea.KeyPressMsg); {
 	case m.screen == editing:
 		m, cmd = m.edit(msg)
+	case m.screen == asking:
+		m, cmd = m.ask(msg)
 	case !isKey:
 	case m.screen == leaving:
 		m.answerLeaving(key)
@@ -216,7 +222,65 @@ func (m *Model) read(msg tea.KeyPressMsg) {
 		m.leave()
 	case "c":
 		m.askToApprove()
+	case "r":
+		m.openAsking()
 	}
+}
+
+// openAsking opens the box for what a new plan should do differently.
+//
+// The viewer asks nothing of the agent. It closes with the request, and
+// the command layer records it on the run exactly as `belay plan
+// --regenerate` does, so the new plan is written by the plan node inside
+// the dispatcher: journalled, charged to the budget, and resumable.
+func (m *Model) openAsking() {
+	if m.opts.Blocker != "" {
+		m.message = m.opts.Blocker
+		return
+	}
+	m.screen = asking
+	m.editor = m.newGuidanceBox()
+	m.follow()
+}
+
+// ask answers a message while the new-plan box is open: enter asks, esc
+// goes back, ctrl+c is leaving, and everything else is typing.
+func (m Model) ask(msg tea.Msg) (Model, tea.Cmd) {
+	if key, ok := msg.(tea.KeyPressMsg); ok {
+		switch key.String() {
+		case "enter":
+			m.submitAsking()
+			return m, nil
+		case "esc":
+			m.closeEditor()
+			return m, nil
+		case "ctrl+c":
+			m.closeEditor()
+			m.leave()
+			return m, nil
+		}
+	}
+	var cmd tea.Cmd
+	m.editor, cmd = m.editor.Update(msg)
+	m.follow()
+	return m, cmd
+}
+
+// submitAsking closes the viewer with a request for a new plan, saving any
+// edits first: the plan being replaced is kept beside the new one and given
+// to the agent to revise, and unsaved edits would be in neither.
+func (m *Model) submitAsking() {
+	guidance := strings.TrimSpace(m.editor.Value())
+	if guidance == "" {
+		m.message = "Say what the new plan should do differently; belay gives your words to the agent as you typed them."
+		return
+	}
+	if m.dirty() && !m.save() {
+		m.closeEditor()
+		return
+	}
+	m.decision = Decision{Action: ActionRegenerate, Guidance: guidance}
+	m.closing = true
 }
 
 // askToApprove asks the person to confirm the approval, showing what the

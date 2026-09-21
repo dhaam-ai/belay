@@ -176,12 +176,18 @@ func (m Model) View() tea.View {
 // cursor places the terminal's own cursor where the editor's is, or hides
 // it when nothing is being typed.
 func (m Model) cursor() *tea.Cursor {
-	if m.screen != editing || m.width < minWidth || m.height < minHeight {
+	if (m.screen != editing && m.screen != asking) || m.width < minWidth || m.height < minHeight {
 		return nil
 	}
 	c := m.editor.Cursor()
 	if c == nil {
 		return nil
+	}
+	if m.screen == asking {
+		footer, box := m.footerLines()
+		placed := *c
+		placed.Y += m.height - len(footer) + box
+		return &placed
 	}
 	top := -1
 	for i, l := range m.body() {
@@ -250,32 +256,121 @@ func (m Model) header() []string {
 // footer is the rule, the viewer's last message, and the key lines at the
 // foot of the page.
 func (m Model) footer() []string {
-	out := []string{strings.Repeat(m.glyphs.rule, m.width)}
+	lines, _ := m.footerLines()
+	return lines
+}
+
+// block is a run of footer lines, and how readily it gives way when the
+// screen is too short for the whole footer: blocks with a higher drop go
+// first, and a block with drop 0 never goes.
+type block struct {
+	lines []string
+	drop  int
+	box   bool // the new-plan box
+}
+
+// footerLines is the footer, and the index in it of the new-plan box's
+// first line, or -1 when the box is not open.
+//
+// On a short screen the footer gives way before the plan disappears
+// entirely: the rule, then the explanations, then the notes, in that
+// order, until the page fits. The question being asked, the box being typed
+// into and the keys that answer it are never dropped.
+func (m Model) footerLines() ([]string, int) {
+	blocks := []block{{lines: []string{strings.Repeat(m.glyphs.rule, m.width)}, drop: 5}}
 	if m.message != "" {
 		msg := wrap(m.message, max(1, m.width))
 		if len(msg) > maxMessageLines {
 			msg = append(msg[:maxMessageLines-1], fit(strings.Join(msg[maxMessageLines-1:], " "), m.width, m.glyphs.more))
 		}
-		out = append(out, msg...)
+		blocks = append(blocks, block{lines: msg, drop: 1})
 	}
-	return append(out, m.keyLines()...)
+	blocks = append(blocks, m.screenBlocks()...)
+
+	room := max(1, m.height-headerHeight-1)
+	for total(blocks) > room {
+		worst := -1
+		for i, b := range blocks {
+			if b.drop > 0 && (worst < 0 || b.drop > blocks[worst].drop) {
+				worst = i
+			}
+		}
+		if worst < 0 {
+			break
+		}
+		blocks = append(blocks[:worst], blocks[worst+1:]...)
+	}
+
+	var out []string
+	box := -1
+	for _, b := range blocks {
+		if b.box {
+			box = len(out)
+		}
+		out = append(out, b.lines...)
+	}
+	return out, box
+}
+
+// total counts the lines in blocks.
+func total(blocks []block) int {
+	n := 0
+	for _, b := range blocks {
+		n += len(b.lines)
+	}
+	return n
+}
+
+// screenBlocks is what the foot of the page says on the screen the viewer
+// is on: a question and its answers, or the keys that do something.
+func (m Model) screenBlocks() []block {
+	hints := func(h ...string) block {
+		return block{lines: []string{fit(strings.Join(h, m.glyphs.sep), m.width, m.glyphs.more)}}
+	}
+	switch m.screen {
+	case leaving:
+		return []block{
+			{lines: m.sentences("Your edits are not saved yet.")},
+			hints("y save and leave", "n leave without saving", "esc stay"),
+		}
+	case approving:
+		out := []block{
+			{lines: m.sentences("Approve this plan and continue the run? belay writes the code next.")},
+			{lines: m.sentences(m.spent())},
+		}
+		if m.dirty() {
+			out = append(out, block{lines: m.sentences("Your edits are saved first."), drop: 2})
+		}
+		return append(out, hints("y approve and continue", "n go back"))
+	case asking:
+		out := []block{
+			{lines: m.sentences("Say what the new plan should do differently. belay runs the plan step again with " +
+				"your words, and stops here again with the new plan."), drop: 4},
+			{lines: m.sentences(m.spent()), drop: 2},
+		}
+		if m.dirty() {
+			out = append(out, block{lines: m.sentences("Your edits are saved first, and kept with the plan they replace."), drop: 3})
+		}
+		return append(out,
+			block{lines: strings.Split(m.editor.View(), "\n"), box: true},
+			hints("enter asks for it", "esc goes back"))
+	}
+	var out []block
+	keys := m.keyLines()
+	for i, l := range keys {
+		b := block{lines: []string{l}}
+		if i == 0 && len(keys) > 1 {
+			b.drop = 3 // a status line or the editing keys, which the second line repeats in part
+		}
+		out = append(out, b)
+	}
+	return out
 }
 
 // keyLines says which keys do something now.
 func (m Model) keyLines() []string {
 	sep := m.glyphs.sep
 	hints := func(h ...string) string { return fit(strings.Join(h, sep), m.width, m.glyphs.more) }
-	if m.screen == leaving {
-		return append(m.sentences("Your edits are not saved yet."),
-			hints("y save and leave", "n leave without saving", "esc stay"))
-	}
-	if m.screen == approving {
-		out := m.sentences("Approve this plan and continue the run? belay writes the code next.", m.spent())
-		if m.dirty() {
-			out = append(out, m.sentences("Your edits are saved first.")...)
-		}
-		return append(out, hints("y approve and continue", "n go back"))
-	}
 	if m.screen == editing {
 		what := fmt.Sprintf("Editing step %d of %d.", m.editAt+1, m.doc.Len())
 		if m.adding {

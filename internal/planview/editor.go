@@ -73,3 +73,27 @@ func plainEditorStyles() textarea.Styles {
 		Cursor:  textarea.CursorStyle{Shape: tea.CursorBlock},
 	}
 }
+
+// newGuidanceBox returns the box a person types what a new plan should do
+// differently into, across the foot of the screen. enter sends it rather
+// than starting a new line: it is a sentence or two, not a document.
+func (m Model) newGuidanceBox() textarea.Model {
+	ed := textarea.New()
+	ed.ShowLineNumbers = false
+	ed.Prompt = m.glyphs.bar + " "
+	ed.KeyMap.Paste.SetEnabled(false)
+	ed.KeyMap.CopySelection.SetEnabled(false)
+	ed.KeyMap.InsertNewline.SetEnabled(false)
+	ed.SetVirtualCursor(false)
+	ed.SetStyles(plainEditorStyles())
+	ed.DynamicHeight = true
+	ed.MinHeight = 1
+	ed.MaxHeight = guidanceLines
+	ed.MaxContentHeight = maxStepLines
+	ed.SetWidth(max(1, m.width))
+	ed.Focus()
+	return ed
+}
+
+// guidanceLines is the most lines the new-plan box takes on the screen.
+const guidanceLines = 3

@@ -762,3 +762,92 @@ func TestABlockerStopsApprovingAndSaysWhy(t *testing.T) {
 		t.Errorf("the blocker is not said:\n%s", screenText(m))
 	}
 }
+
+// TestAskingForANewPlan: r opens a box for what the new plan should do
+// differently, above the spend so far, and enter asks for it. Nothing is
+// asked of the agent here: the viewer closes with the request, and the
+// command layer records it on the run the same way `belay plan
+// --regenerate` does.
+func TestAskingForANewPlan(t *testing.T) {
+	opts := review()
+	opts.Spend = Spend{SpentUSD: 0.42, LimitUSD: 5}
+	m, quit := quits(t, open(t, opts, 80, 24), "r")
+	if quit {
+		t.Fatal("r asked for a new plan without asking what it should be")
+	}
+	for _, want := range []string{"what the new plan should do differently", "$0.42 of $5.00", "enter asks for it", "esc goes back"} {
+		if !strings.Contains(flat(m), want) {
+			t.Errorf("the box does not say %q:\n%s", want, screenText(m))
+		}
+	}
+	m = typeText(t, m, "  fewer steps, and leave the parser alone  ")
+	m, quit = quits(t, m, "enter")
+	want := Decision{Action: ActionRegenerate, Guidance: "fewer steps, and leave the parser alone"}
+	if !quit || m.Decision() != want {
+		t.Errorf("enter: left = %v, decided %+v; want to leave with %+v", quit, m.Decision(), want)
+	}
+
+	// An empty request is not a request, and esc goes back.
+	m, quit = quits(t, keys(t, open(t, opts, 80, 24), "r"), "enter")
+	if quit || m.Decision().Action == ActionRegenerate {
+		t.Errorf("an empty request was sent (left = %v, %+v)", quit, m.Decision())
+	}
+	if !strings.Contains(flat(m), "Say what") {
+		t.Errorf("an empty request is not explained:\n%s", screenText(m))
+	}
+	m = keys(t, m, "esc")
+	if m.Decision().Action != ActionLeave || !strings.Contains(flat(m), "c approve") {
+		t.Errorf("esc did not go back to the plan:\n%s", screenText(m))
+	}
+}
+
+// TestAskingForANewPlanSavesEditsFirst: the plan being replaced is kept
+// beside the new one, and handed to the agent to revise, so edits nobody
+// saved are saved first, or they would be in neither.
+func TestAskingForANewPlanSavesEditsFirst(t *testing.T) {
+	var s saves
+	m := keys(t, dirtyViewer(t, &s), "r")
+	if !strings.Contains(flat(m), "saved first") {
+		t.Errorf("the box does not say the edits are saved first:\n%s", screenText(m))
+	}
+	m = typeText(t, m, "shorter")
+	m, quit := quits(t, m, "enter")
+	if !quit || m.Decision().Action != ActionRegenerate {
+		t.Fatalf("enter: left = %v, decided %+v", quit, m.Decision())
+	}
+	if want := edited(t, 0, "Add a dryRun field to runOptions. Now."); !bytes.Equal(s.last(), want) {
+		t.Errorf("saved before asking:\n%s\nwant:\n%s", s.last(), want)
+	}
+}
+
+// TestABlockerStopsAskingForANewPlan: a new plan is a step of the run like
+// any other, so a run that cannot continue cannot be asked for one.
+func TestABlockerStopsAskingForANewPlan(t *testing.T) {
+	opts := review()
+	opts.Blocker = "belay cannot find the claude command line on PATH."
+	m, quit := quits(t, open(t, opts, 80, 24), "r")
+	if quit || strings.Contains(flat(m), "enter asks for it") {
+		t.Fatalf("a run that cannot continue was offered a new plan (left = %v):\n%s", quit, screenText(m))
+	}
+	if !strings.Contains(flat(m), "cannot find the claude command line") {
+		t.Errorf("the blocker is not said:\n%s", screenText(m))
+	}
+}
+
+// TestTheNewPlanBoxUsesTheTerminalsOwnCursor: the cursor follows the words
+// typed into the new-plan box at the foot of the page.
+func TestTheNewPlanBoxUsesTheTerminalsOwnCursor(t *testing.T) {
+	m := typeText(t, keys(t, open(t, review(), 80, 24), "r"), "fewer steps")
+	c := m.View().Cursor
+	if c == nil {
+		t.Fatal("no cursor is shown in the new-plan box")
+	}
+	rows := strings.Split(screenText(m), "\n")
+	if c.Y < 0 || c.Y >= len(rows) || !strings.Contains(rows[c.Y], "fewer steps") {
+		t.Fatalf("the cursor is on row %d, not on the box holding the words typed", c.Y)
+	}
+	row := rows[c.Y]
+	if want := utf8.RuneCountInString(row[:strings.Index(row, "fewer steps")+len("fewer steps")]); c.X != want {
+		t.Errorf("the cursor is at column %d, want %d, the end of the words", c.X, want)
+	}
+}
