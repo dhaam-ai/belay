@@ -34,7 +34,7 @@ func IsTerminal(f *os.File) bool {
 // os.Stdin, and opens /dev/tty when that is not a terminal: it would take
 // the controlling terminal from under a piped or scheduled invocation, or
 // sit waiting on a pipe for keys nobody will type. For the same reason it
-// always hands the program its input, its output and its context.
+// always hands the program its input and its output.
 //
 // It also always hands it a colour profile, rather than letting the library
 // detect one. The library's detection reads NO_COLOR as a boolean, so
@@ -42,30 +42,49 @@ func IsTerminal(f *os.File) bool {
 // runs `tmux info` as a subprocess inside tmux. The profile is ASCII: no
 // colour reaches the terminal.
 //
-// An error means the viewer could not be shown or stopped working; nothing
-// was decided, and whatever the person had not saved is gone. A SIGINT from
-// outside — Ctrl-C itself is a key while the viewer is open — ends it as a
-// person leaving without saving would, with no error.
+// Every way the viewer stops is bubbletea's graceful quit. The library has
+// a second way, for a cancelled context or a SIGINT, and in v2.0.9 that one
+// closes the terminal reader while the goroutine reading keys is still
+// using it (tea.go, Program.shutdown, which waits for the read loop only
+// when it is not killing the program). So Run does not hand the program its
+// context: it quits the program itself when ctx is done, and returns ctx's
+// error. And a SIGINT from outside — Ctrl-C itself is a key while the
+// viewer is open — is turned into a quit, which leaves the way a person
+// leaving without saving would, with no error.
+//
+// Any other error means the viewer could not be shown or stopped working;
+// nothing was decided, and whatever the person had not saved is gone.
 func Run(ctx context.Context, in, out *os.File, opts Options) (Decision, error) {
 	if !IsTerminal(in) || !IsTerminal(out) {
 		return Decision{}, ErrNotATerminal
 	}
 	program := tea.NewProgram(New(opts),
-		tea.WithContext(ctx),
 		tea.WithInput(in),
 		tea.WithOutput(out),
 		tea.WithColorProfile(colorprofile.ASCII),
+		tea.WithFilter(quitOnInterrupt),
 	)
+	stop := context.AfterFunc(ctx, program.Quit)
+	defer stop()
 	final, err := program.Run()
 	switch {
-	case errors.Is(err, tea.ErrInterrupted):
-		return Decision{}, nil
 	case err != nil:
 		return Decision{}, fmt.Errorf("planview: %w", err)
+	case ctx.Err() != nil:
+		return Decision{}, fmt.Errorf("planview: %w", ctx.Err())
 	}
 	m, ok := final.(Model)
 	if !ok {
 		return Decision{}, fmt.Errorf("planview: the viewer ended as a %T", final)
 	}
 	return m.Decision(), nil
+}
+
+// quitOnInterrupt turns the interrupt bubbletea raises for a SIGINT into an
+// ordinary quit, so the viewer stops the one way that is safe (see Run).
+func quitOnInterrupt(_ tea.Model, msg tea.Msg) tea.Msg {
+	if _, ok := msg.(tea.InterruptMsg); ok {
+		return tea.QuitMsg{}
+	}
+	return msg
 }

@@ -7,6 +7,8 @@ import (
 	"path/filepath"
 	"testing"
 	"time"
+
+	tea "charm.land/bubbletea/v2"
 )
 
 // notTerminals opens one of each kind of file that is not a terminal and
@@ -98,5 +100,19 @@ func TestRunRefusesFilesThatAreNotTerminals(t *testing.T) {
 				t.Errorf("Run decided %+v, want nothing decided", decision)
 			}
 		})
+	}
+}
+
+// TestAnInterruptQuitsTheWaySafeForTheTerminal: bubbletea raises an
+// interrupt for a SIGINT from outside, and ends the program on it the way
+// that races its own key reader (see Run). The filter turns it into an
+// ordinary quit, and leaves every other message alone.
+func TestAnInterruptQuitsTheWaySafeForTheTerminal(t *testing.T) {
+	if got := quitOnInterrupt(nil, tea.InterruptMsg{}); got != (tea.QuitMsg{}) {
+		t.Errorf("quitOnInterrupt(InterruptMsg) = %#v, want QuitMsg", got)
+	}
+	key := tea.KeyPressMsg{Code: 'q', Text: "q"}
+	if got := quitOnInterrupt(nil, key); got != key {
+		t.Errorf("quitOnInterrupt(%v) = %#v, want the key untouched", key, got)
 	}
 }
