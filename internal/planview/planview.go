@@ -11,12 +11,42 @@ import (
 	tea "charm.land/bubbletea/v2"
 )
 
+// Options is what the viewer is given to show.
+type Options struct{}
+
+// Action is what the person decided to do with the run.
+type Action int
+
+// The decisions a person can leave the viewer with.
+const (
+	// ActionLeave leaves the run as it is: paused at its plan.
+	ActionLeave Action = iota
+)
+
+// Decision is what the person decided, which the command layer carries out
+// once the viewer has closed.
+type Decision struct {
+	// Action is what they decided.
+	Action Action
+	// Guidance is what they said a new plan should do differently.
+	Guidance string
+}
+
 // Model is the viewer's state. It is a bubbletea model: every change to it
 // arrives as a message through Update, which is what lets its tests drive it
 // with key presses and no terminal at all.
-type Model struct{}
+type Model struct {
+	decision Decision
+}
 
 var _ tea.Model = Model{}
+
+// New returns a viewer showing what opts describes.
+func New(Options) Model { return Model{} }
+
+// Decision returns what the person decided. It is ActionLeave until they
+// decide something else.
+func (m Model) Decision() Decision { return m.decision }
 
 // Init implements tea.Model.
 func (Model) Init() tea.Cmd { return nil }
