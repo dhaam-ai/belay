@@ -72,6 +72,18 @@ that only `pkg/belay` carries a compatibility promise. Everything under
 
 ### Fixed
 
+- **A step belay re-runs after a crash no longer counts its crashed attempt
+  as well as its own.** belay saves a step's changes and only then records
+  that the step finished, so a process killed in between left the changes
+  saved and the step unfinished, and resuming ran the step again — reading
+  the changes its own crashed attempt had already saved. For the fix step
+  that meant counting one repair twice: "fix attempt 2 of 3" when only one
+  repair had been made, and a run could give up a repair early. belay now
+  keeps a copy of what each step is given under `snapshots/` in the run's
+  directory, taken before the step runs, and a step run again after a crash
+  or a Ctrl-C is given that copy. It costs one small file per step. A run
+  started before this version keeps the old behaviour for the steps it had
+  already run.
 - **Emptying the plan while a run waits for you no longer ends the run.**
   The approve gate read `artifacts/plan.md` again as it ran, and a file
   that had been emptied — or saved in an encoding that is not UTF-8 — ended

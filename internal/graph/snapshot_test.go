@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -307,5 +308,285 @@ func writeFile(t *testing.T, path string, data []byte) {
 	}
 	if err := os.WriteFile(path, data, 0o600); err != nil {
 		t.Fatalf("WriteFile(%s) error = %v", path, err)
+	}
+}
+
+// countingFix is the fix node's counting, reduced to what the double
+// increment needs: it reads State.Fix.Attempts, sets it one higher (an
+// absolute set, as internal/nodes/fix does), and records what it read.
+func countingFix(next string, seen *[]int, during func(call int)) *funcNode {
+	return &funcNode{name: graph.NodeFix, run: func(_ context.Context, rc *graph.RunContext) (graph.Result, error) {
+		*seen = append(*seen, rc.State.Fix.Attempts)
+		if during != nil {
+			during(len(*seen))
+		}
+		return graph.Result{
+			Next: next, Status: journal.StatusOK,
+			Patch: state.Patch{Fix: &state.Fix{Attempts: rc.State.Fix.Attempts + 1}},
+		}, nil
+	}}
+}
+
+// TestDispatcher_CrashReRunDoesNotCountTheCrashedAttemptTwice reproduces the
+// double increment, through the real dispatcher.
+//
+// The dispatcher applies a node's patch and only then journals that the node
+// finished (see Dispatcher). A process killed between the two leaves
+// state.json holding the patch and the journal ending in the node's open
+// node_started, and the dispatcher re-runs the node at attempt 2. That re-run
+// used to read state.json — which already holds its own crashed attempt's
+// output — so a node whose patch is computed from what it read counts the
+// crashed attempt as well as its own: fix's "attempt 1 of 3" became "attempt 2
+// of 3", and a run could give up a repair early.
+//
+// The crash is reconstructed from what the first dispatch really wrote: the
+// journal and the manifest exactly as they stood when fix began (its
+// node_started is the journal's last record), and state.json exactly as fix's
+// own patch left it, captured by the next node before it changed anything.
+// A torn half-line stands for the node_finished the kill cut off.
+func TestDispatcher_CrashReRunDoesNotCountTheCrashedAttemptTwice(t *testing.T) {
+	h := newRun(t, config.Default(), "count each repair once")
+
+	var (
+		journalAtFix, manifestAtFix, stateAfterFix []byte
+		seen                                       []int
+	)
+	plan := ok(graph.NodePlan, graph.NodeFix)
+	fix := countingFix(graph.NodeTest, &seen, func(call int) {
+		if call == 1 {
+			journalAtFix = readFile(t, h.layout.JournalPath())
+			manifestAtFix = readFile(t, h.layout.ManifestPath())
+		}
+	})
+	testCalls := 0
+	test := &funcNode{name: graph.NodeTest, run: func(context.Context, *graph.RunContext) (graph.Result, error) {
+		testCalls++
+		if testCalls == 1 {
+			stateAfterFix = readFile(t, h.layout.StatePath())
+			return graph.Result{Status: journal.StatusPaused, Note: "stop here"}, nil
+		}
+		return graph.Result{Next: graph.End, Status: journal.StatusOK}, nil
+	}}
+
+	if _, err := h.dispatcher(t, plan, fix, test).Run(context.Background()); err != nil {
+		t.Fatalf("first Run() error = %v", err)
+	}
+
+	// The kill: fix's patch is durable, its node_finished is not.
+	writeFile(t, h.layout.JournalPath(), append(journalAtFix, []byte(`{"seq":`)...))
+	writeFile(t, h.layout.ManifestPath(), manifestAtFix)
+	writeFile(t, h.layout.StatePath(), stateAfterFix)
+	forgetSnapshotsAfter(t, h, lastSeq(t, journalAtFix))
+	if got := h.state(t).Fix.Attempts; got != 1 {
+		t.Fatalf("reconstructed crash: state.json Fix.Attempts = %d, want 1 (fix's patch landed)", got)
+	}
+
+	out, err := h.dispatcher(t, plan, fix, test).Resume(context.Background())
+	if err != nil {
+		t.Fatalf("Resume() error = %v", err)
+	}
+	if out.Status != state.RunStatusCompleted {
+		t.Fatalf("Outcome.Status = %v, want completed", out.Status)
+	}
+
+	if len(seen) != 2 {
+		t.Fatalf("fix ran %d times, want 2 (the crashed attempt and its re-run)", len(seen))
+	}
+	if seen[1] != 0 {
+		t.Errorf("fix's re-run read Fix.Attempts = %d, want 0: it must see the blackboard as it stood "+
+			"before the attempt it repeats, not that attempt's own patch", seen[1])
+	}
+	if got := h.state(t).Fix.Attempts; got != 1 {
+		t.Errorf("Fix.Attempts = %d after recovering, want 1: one repair was made, and it was counted twice", got)
+	}
+}
+
+// seedCrashedFix builds the disk a run leaves when fix's attempts were cut
+// short: the given records after run_started, the snapshot fix's first
+// attempt took (Fix.Attempts 0), and a state.json in which a crashed
+// attempt's patch landed (Fix.Attempts 1).
+func seedCrashedFix(t *testing.T, h *harness, recs ...journal.Record) {
+	t.Helper()
+	before := h.state(t)
+	if _, err := h.store.SaveSnapshotOnce(state.Snapshot{
+		RunID: testRunID, Node: graph.NodeFix, Seq: 2, Step: 1, State: before,
+	}); err != nil {
+		t.Fatalf("SaveSnapshotOnce() error = %v", err)
+	}
+	after := before
+	after.Fix = state.Fix{Attempts: 1}
+	if err := h.store.SaveState(after); err != nil {
+		t.Fatalf("SaveState() error = %v", err)
+	}
+	h.seedJournal(t, append([]journal.Record{{Event: journal.EventRunStarted}}, recs...)...)
+}
+
+// TestDispatcher_EveryReRunReadsTheSnapshotOfTheAttemptItRepeats: after two
+// crashes in a row the third attempt still reads the snapshot the first one
+// took. The second attempt took none — a re-run never does — so keying the
+// read on the attempt immediately before would find nothing and fall back to
+// a state.json that already holds a crashed attempt's patch.
+func TestDispatcher_EveryReRunReadsTheSnapshotOfTheAttemptItRepeats(t *testing.T) {
+	h := newRun(t, config.Default(), "crash twice")
+	seedCrashedFix(t, h,
+		journal.Record{Event: journal.EventNodeStarted, Node: graph.NodeFix, Attempt: 1}, // seq 2
+		journal.Record{
+			Event: journal.EventNodeFinished, Node: graph.NodeFix, Attempt: 1,
+			Status: journal.StatusAborted, Next: graph.NodeFix, Note: "interrupted",
+		},
+		journal.Record{Event: journal.EventNodeStarted, Node: graph.NodeFix, Attempt: 2}, // left open
+	)
+
+	var seen []int
+	fix := countingFix(graph.End, &seen, nil)
+	if _, err := h.dispatcher(t, fix).Resume(context.Background()); err != nil {
+		t.Fatalf("Resume() error = %v", err)
+	}
+
+	if len(seen) != 1 || seen[0] != 0 {
+		t.Fatalf("fix's third attempt read Fix.Attempts %v, want [0]: the blackboard from before its first attempt", seen)
+	}
+	if got := h.state(t).Fix.Attempts; got != 1 {
+		t.Errorf("Fix.Attempts = %d, want 1", got)
+	}
+}
+
+// TestDispatcher_AReRunTakesTheSnapshotItsFirstAttemptDidNotLiveToTake: an
+// attempt can die between its node_started and its snapshot. Then nothing of
+// it ran — the snapshot comes before the node — so state.json is still the
+// blackboard from before it, and the re-run saves that as the snapshot, keyed
+// where the first attempt's would have been.
+func TestDispatcher_AReRunTakesTheSnapshotItsFirstAttemptDidNotLiveToTake(t *testing.T) {
+	h := newRun(t, config.Default(), "snapshot at recovery")
+	before := h.state(t)
+	before.Plan = state.Plan{Path: "plan.md"}
+	if err := h.store.SaveState(before); err != nil {
+		t.Fatalf("SaveState() error = %v", err)
+	}
+	h.seedJournal(t,
+		journal.Record{Event: journal.EventRunStarted},
+		journal.Record{Event: journal.EventNodeStarted, Node: graph.NodeCode, Attempt: 1}, // seq 2, no snapshot
+	)
+
+	var saw seenBy
+	code := recording(graph.NodeCode, &saw, graph.Result{
+		Next: graph.End, Status: journal.StatusOK,
+		Patch: state.Patch{Code: &state.Code{LastDiff: "diff-0001.patch"}},
+	})
+	if _, err := h.dispatcher(t, code).Resume(context.Background()); err != nil {
+		t.Fatalf("Resume() error = %v", err)
+	}
+
+	snap := h.snapshotAt(t, 2, graph.NodeCode)
+	if diff := cmp.Diff(before, snap.State); diff != "" {
+		t.Errorf("snapshot taken at recovery differs from the blackboard before the execution (-want +got):\n%s", diff)
+	}
+	if len(saw.states) != 1 || saw.states[0].Plan.Path != "plan.md" || saw.states[0].Code.LastDiff != "" {
+		t.Errorf("the re-run was given %+v, want the blackboard from before the execution", saw.states)
+	}
+}
+
+// TestDispatcher_ACrashReRunOfAGateTakenUpAgainKeepsWhatThePersonDid: the
+// person approved the plan while the run waited at the gate, and the gate's
+// execution after that was killed. Its re-run must be given the blackboard
+// that execution was given, with the approval in it — not the one from the
+// start of the gate's visit, taken before anybody had approved anything,
+// which would ask the person again for an approval they had already given.
+func TestDispatcher_ACrashReRunOfAGateTakenUpAgainKeepsWhatThePersonDid(t *testing.T) {
+	cfg := config.Default()
+	cfg.Graph.Approval = true
+	h := newRun(t, cfg, "keep the approval")
+
+	var (
+		journalAtGate, manifestAtGate, stateAfterGate []byte
+		gateSaw                                       seenBy
+	)
+	gate := &funcNode{name: graph.NodeApprove, run: func(_ context.Context, rc *graph.RunContext) (graph.Result, error) {
+		gateSaw.states = append(gateSaw.states, rc.State)
+		if len(gateSaw.states) == 2 {
+			journalAtGate = readFile(t, h.layout.JournalPath())
+			manifestAtGate = readFile(t, h.layout.ManifestPath())
+		}
+		if rc.State.Plan.Approved {
+			return graph.Result{Next: graph.NodeCode, Status: journal.StatusOK}, nil
+		}
+		return graph.Result{Status: journal.StatusPaused, Note: "waiting for a person"}, nil
+	}}
+	codeCalls := 0
+	code := &funcNode{name: graph.NodeCode, run: func(context.Context, *graph.RunContext) (graph.Result, error) {
+		codeCalls++
+		if codeCalls == 1 {
+			stateAfterGate = readFile(t, h.layout.StatePath())
+			return graph.Result{Status: journal.StatusPaused, Note: "stop here"}, nil
+		}
+		return graph.Result{Next: graph.End, Status: journal.StatusOK}, nil
+	}}
+	plan := ok(graph.NodePlan, graph.NodeApprove)
+
+	if _, err := h.dispatcher(t, plan, gate, code).Run(context.Background()); err != nil {
+		t.Fatalf("Run() error = %v", err)
+	}
+	st := h.state(t) // what `belay resume` records before it dispatches
+	st.Plan.Approved = true
+	if err := h.store.SaveState(st); err != nil {
+		t.Fatalf("SaveState() error = %v", err)
+	}
+	if _, err := h.dispatcher(t, plan, gate, code).Resume(context.Background()); err != nil {
+		t.Fatalf("Resume() error = %v", err)
+	}
+
+	// The kill: the approving execution of the gate never finished.
+	writeFile(t, h.layout.JournalPath(), journalAtGate)
+	writeFile(t, h.layout.ManifestPath(), manifestAtGate)
+	writeFile(t, h.layout.StatePath(), stateAfterGate)
+	forgetSnapshotsAfter(t, h, lastSeq(t, journalAtGate))
+
+	out, err := h.dispatcher(t, plan, gate, code).Resume(context.Background())
+	if err != nil {
+		t.Fatalf("Resume() after the crash error = %v", err)
+	}
+	if len(gateSaw.states) != 3 || !gateSaw.states[2].Plan.Approved {
+		t.Fatalf("the gate's re-run was not given the approval (%d executions); it would ask again", len(gateSaw.states))
+	}
+	if out.Status != state.RunStatusCompleted {
+		t.Errorf("Outcome.Status = %v, want completed", out.Status)
+	}
+}
+
+// lastSeq returns the Seq of the last complete record in a captured journal.
+func lastSeq(t *testing.T, data []byte) uint64 {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "captured.ndjson")
+	writeFile(t, path, data)
+	res, err := journal.ReadFile(path)
+	if err != nil || len(res.Records) == 0 {
+		t.Fatalf("captured journal is unreadable or empty: %v", err)
+	}
+	return res.Records[len(res.Records)-1].Seq
+}
+
+// forgetSnapshotsAfter removes every snapshot the first dispatch took for an
+// execution after seq, which a process killed at seq would never have taken.
+// Leaving one would let a later execution find a snapshot keyed on a Seq the
+// truncated journal gives out again, which no real crash can produce: a
+// snapshot is written only after its node_started is durable, and a durable
+// record is never discarded.
+func forgetSnapshotsAfter(t *testing.T, h *harness, seq uint64) {
+	t.Helper()
+	entries, err := os.ReadDir(h.layout.SnapshotsDir())
+	if err != nil {
+		t.Fatalf("ReadDir(snapshots) error = %v", err)
+	}
+	for _, e := range entries {
+		prefix, _, found := strings.Cut(e.Name(), "-")
+		n, err := strconv.ParseUint(prefix, 10, 64)
+		if !found || err != nil {
+			continue
+		}
+		if n > seq {
+			if err := os.Remove(filepath.Join(h.layout.SnapshotsDir(), e.Name())); err != nil {
+				t.Fatalf("Remove(%s) error = %v", e.Name(), err)
+			}
+		}
 	}
 }

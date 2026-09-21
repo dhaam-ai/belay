@@ -246,8 +246,14 @@ type Options struct {
 // its patch from what it reads — fix counting its repairs — would count the
 // crashed attempt as well as its own. So before every execution at attempt 1
 // the dispatcher saves the blackboard it is about to hand the node as a
-// write-once snapshot, keyed on the execution's node_started Seq (see
-// blackboardFor and state.Snapshot, which argues the design).
+// write-once snapshot, keyed on the execution's node_started Seq, and a re-run
+// at a later attempt is handed the snapshot of the attempt it repeats instead
+// of state.json (see blackboardFor, attemptOneSeq, and state.Snapshot, which
+// argues the design).
+//
+// A crash in an execution recorded by a belay that took no snapshots leaves
+// none to read. The re-run then takes one from state.json, which is what
+// every belay before snapshots did, and may count that attempt twice.
 //
 // The snapshot is written after the node_started and before the node runs.
 // The first makes its key durable before anything depends on it; the second
@@ -461,7 +467,31 @@ func (d *Dispatcher) dispatch(ctx context.Context, resuming bool) (Outcome, erro
 		return out, err
 	}
 
-	return d.loop(ctx, jrnl, &man, ledger, start)
+	// A re-run at a later attempt is given the snapshot of the execution it
+	// repeats, found from the records as the crash left them, like start.
+	var repeats uint64
+	if start.Attempt > 1 {
+		repeats = attemptOneSeq(read.Records, start.Node)
+	}
+	return d.loop(ctx, jrnl, &man, ledger, start, repeats)
+}
+
+// attemptOneSeq returns the Seq of the node_started that began the execution
+// a re-run of node at a later attempt repeats: the last attempt-1
+// node_started for node in records. The attempts of one execution are
+// consecutive — a crash or a Ctrl-C re-runs the node at the next attempt
+// before any other node runs — so the last attempt 1 is theirs. For a gate
+// taken up again after a person acted, that is the execution after the
+// resume, not the start of the gate's visit.
+//
+// It returns 0 when records hold none, which no journal belay writes does.
+func attemptOneSeq(records []journal.Record, node string) uint64 {
+	for i := len(records) - 1; i >= 0; i-- {
+		if r := records[i]; r.Event == journal.EventNodeStarted && r.Node == node && r.Attempt == 1 {
+			return r.Seq
+		}
+	}
+	return 0
 }
 
 // heal repairs a journal whose final record shows the previous process died
@@ -732,9 +762,14 @@ func (d *Dispatcher) checkStartState(
 
 // loop executes nodes until the run ends. It is the body described by the
 // ordering contract on Dispatcher.
+//
+// repeats is the Seq of the attempt-1 node_started the first execution
+// repeats when it is a re-run at a later attempt (see attemptOneSeq), and is
+// otherwise unused: only the first execution of a dispatch can be a re-run,
+// since every node after it starts at attempt 1.
 func (d *Dispatcher) loop(
 	ctx context.Context, jrnl *journal.Journal, man *state.Manifest,
-	ledger *budget.Ledger, start journal.Result,
+	ledger *budget.Ledger, start journal.Result, repeats uint64,
 ) (Outcome, error) {
 	current, attempt, steps := start.Node, start.Attempt, 0
 
@@ -803,13 +838,23 @@ func (d *Dispatcher) loop(
 		// the node did to it.
 		logger := rc.Logger
 
-		if attempt == 1 {
-			view, err := d.blackboardFor(ctx, rc, started.Seq)
-			if err != nil {
-				return d.notRun(jrnl, ledger, current, attempt, steps, err)
+		// The blackboard the node is given: its own snapshot at attempt 1,
+		// and at a later attempt the snapshot of the attempt it repeats,
+		// never state.json, which may hold that attempt's patch.
+		key := started.Seq
+		if attempt > 1 {
+			if repeats == 0 {
+				logger.Warn("belay/graph: the journal does not show the attempt this re-run repeats; " +
+					"it is given state.json, which may already hold that attempt's patch")
+			} else {
+				key = repeats
 			}
-			rc.State = view
 		}
+		view, err := d.blackboardFor(ctx, rc, key)
+		if err != nil {
+			return d.notRun(jrnl, ledger, current, attempt, steps, err)
+		}
+		rc.State = view
 		logger.Info("belay/graph: node started")
 
 		exec := d.execute(ctx, node, rc)

@@ -661,7 +661,11 @@ func TestDispatcher_CrashResume_PatchIsNotDoubleApplied(t *testing.T) {
 	if fix.calls != 1 || fix.attempts[0] != 2 {
 		t.Fatalf("fix ran %d times at attempts %v, want 1 call at attempt 2", fix.calls, fix.attempts)
 	}
-	// The node saw the state its crashed attempt had already written.
+	// The node saw the state its crashed attempt had already written. That
+	// is only because this disk holds no snapshot, as a crash recorded by a
+	// belay that took none would leave it: a run this belay records hands the
+	// re-run the snapshot its first attempt took instead (see
+	// TestDispatcher_CrashReRunDoesNotCountTheCrashedAttemptTwice).
 	if fix.seenFix[0] != 1 {
 		t.Errorf("re-run observed Fix.Attempts = %d, want 1 (the crashed attempt's patch was durable)", fix.seenFix[0])
 	}
