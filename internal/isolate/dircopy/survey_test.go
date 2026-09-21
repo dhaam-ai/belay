@@ -103,6 +103,9 @@ func TestSurveyTree(t *testing.T) {
 		{
 			name: "chmod +x",
 			mutate: func(t *testing.T, root string) {
+				// #nosec G302 -- making a fixture file executable is the
+				// change under test; chmod leaves the mtime alone, so this
+				// row isolates the permission bits.
 				if err := os.Chmod(filepath.Join(root, "main.go"), 0o755); err != nil {
 					t.Fatalf("Chmod() error = %v", err)
 				}
