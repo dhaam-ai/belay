@@ -2,6 +2,7 @@ package planview
 
 import (
 	"bytes"
+	"errors"
 	"fmt"
 	"strings"
 	"testing"
@@ -641,5 +642,123 @@ func TestCtrlCWhileTypingAsksToo(t *testing.T) {
 	want := edited(t, 0, "Add a dryRun field to runOptions. Typed.")
 	if !bytes.Equal(s.last(), want) {
 		t.Errorf("saved:\n%s\nwant the typing kept and saved:\n%s", s.last(), want)
+	}
+}
+
+// flat is the screen's text with every run of whitespace made one space,
+// so a sentence the page wrapped still reads as one.
+func flat(m Model) string { return strings.Join(strings.Fields(screenText(m)), " ") }
+
+// TestApprovingShowsWhatItMaySpendFirst: c does not approve; it asks, and
+// the question says what the run has spent against its ceiling before the
+// person commits it to spending more. y approves, n goes back.
+func TestApprovingShowsWhatItMaySpendFirst(t *testing.T) {
+	opts := review()
+	opts.Spend = Spend{SpentUSD: 0.42, LimitUSD: 5}
+	m, quit := quits(t, open(t, opts, 80, 24), "c")
+	if quit {
+		t.Fatal("c approved the plan on one key, without showing the cost")
+	}
+	for _, want := range []string{"Approve this plan", "$0.42 of $5.00", "y approve", "n go back"} {
+		if !strings.Contains(flat(m), want) {
+			t.Errorf("the question does not say %q:\n%s", want, screenText(m))
+		}
+	}
+	if strings.Contains(flat(m), "estimated") {
+		t.Errorf("a reported spend is called an estimate:\n%s", screenText(m))
+	}
+	approved, quit := quits(t, m, "y")
+	if !quit || approved.Decision() != (Decision{Action: ActionApprove}) {
+		t.Errorf("y: left = %v, decided %+v; want to leave having approved", quit, approved.Decision())
+	}
+
+	back, quit := quits(t, m, "n")
+	if quit || back.Decision() != (Decision{Action: ActionLeave}) {
+		t.Errorf("n: left = %v, decided %+v; want to go back having decided nothing", quit, back.Decision())
+	}
+	if !strings.Contains(flat(back), "c approve") {
+		t.Errorf("n did not go back to the plan:\n%s", screenText(back))
+	}
+
+	opts.Spend.Estimated = true
+	m = keys(t, open(t, opts, 80, 24), "c")
+	if !strings.Contains(flat(m), "estimated") {
+		t.Errorf("an estimated spend is not marked as one:\n%s", screenText(m))
+	}
+}
+
+// TestApprovingSavesEditsFirst: the gate reads the plan file, so approving
+// with edits nobody saved would approve the plan without them. They are
+// saved first, and the question says they will be.
+func TestApprovingSavesEditsFirst(t *testing.T) {
+	var s saves
+	m := keys(t, dirtyViewer(t, &s), "c")
+	if !strings.Contains(flat(m), "saved first") {
+		t.Errorf("the question does not say the edits are saved first:\n%s", screenText(m))
+	}
+	m, quit := quits(t, m, "y")
+	if !quit || m.Decision().Action != ActionApprove {
+		t.Fatalf("y: left = %v, decided %+v; want to approve", quit, m.Decision())
+	}
+	if want := edited(t, 0, "Add a dryRun field to runOptions. Now."); !bytes.Equal(s.last(), want) {
+		t.Errorf("saved before approving:\n%s\nwant:\n%s", s.last(), want)
+	}
+
+	// A save that fails approves nothing.
+	failing := saves{errs: []error{errors.New("disk full")}}
+	m = keys(t, dirtyViewer(t, &failing), "c")
+	m, quit = quits(t, m, "y")
+	if quit || m.Decision().Action == ActionApprove {
+		t.Errorf("a plan that could not be saved was approved (left = %v, %+v)", quit, m.Decision())
+	}
+	if !strings.Contains(flat(m), "disk full") {
+		t.Errorf("the failed save is not explained:\n%s", screenText(m))
+	}
+}
+
+// TestAPlanTheGateRefusesCannotBeApproved: the approve gate is the one
+// judge of whether a plan can be approved, and the viewer asks it rather
+// than forming an opinion of its own. A plan it refuses cannot be approved
+// here, and the viewer says why in the gate's words.
+func TestAPlanTheGateRefusesCannotBeApproved(t *testing.T) {
+	tests := []struct {
+		name string
+		plan []byte
+		why  string
+	}{
+		{name: "empty", plan: []byte(" \n\t\n"), why: "the plan is empty"},
+		{name: "not UTF-8", plan: []byte("## Steps\n\n1. Caf\xe9.\n"), why: "not valid UTF-8"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			opts := review()
+			opts.Plan = tt.plan
+			m, quit := quits(t, open(t, opts, 80, 24), "c")
+			if quit || m.Decision().Action == ActionApprove {
+				t.Fatalf("a plan the gate refuses was approved (left = %v)", quit)
+			}
+			if !strings.Contains(flat(m), tt.why) {
+				t.Errorf("the refusal does not give the gate's reason %q:\n%s", tt.why, screenText(m))
+			}
+			if m, quit = quits(t, m, "y"); quit || m.Decision().Action == ActionApprove {
+				t.Error("y after the refusal approved the plan anyway")
+			}
+		})
+	}
+}
+
+// TestABlockerStopsApprovingAndSaysWhy: when the command layer knows the
+// run cannot continue from here — the agent it needs is not installed, say
+// — approving is refused with that reason, instead of approving and then
+// failing to start.
+func TestABlockerStopsApprovingAndSaysWhy(t *testing.T) {
+	opts := review()
+	opts.Blocker = "belay cannot find the claude command line on PATH."
+	m, quit := quits(t, open(t, opts, 80, 24), "c")
+	if quit || m.Decision().Action == ActionApprove {
+		t.Fatalf("approved a run that cannot continue (left = %v)", quit)
+	}
+	if !strings.Contains(flat(m), "cannot find the claude command line") {
+		t.Errorf("the blocker is not said:\n%s", screenText(m))
 	}
 }

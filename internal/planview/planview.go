@@ -11,10 +11,12 @@ import (
 	"bytes"
 	"errors"
 	"fmt"
+	"strings"
 
 	"charm.land/bubbles/v2/textarea"
 	tea "charm.land/bubbletea/v2"
 
+	"github.com/dhaam-ai/belay/internal/nodes/approve"
 	"github.com/dhaam-ai/belay/internal/plandoc"
 )
 
@@ -45,6 +47,20 @@ type Options struct {
 	// Save writes plan to the plan file. The viewer never writes a file
 	// itself: this is the only way anything it does reaches the disk.
 	Save func(plan []byte, overwrite bool) error
+	// Blocker is why the run cannot continue from here.
+	Blocker string
+	// Spend is what the run has spent, and may spend.
+	Spend Spend
+}
+
+// Spend is what a run has spent, and the most it may.
+type Spend struct {
+	// SpentUSD is what the run has spent so far.
+	SpentUSD float64
+	// LimitUSD is its ceiling.
+	LimitUSD float64
+	// Estimated is true when some of SpentUSD is an estimate.
+	Estimated bool
 }
 
 // Action is what the person decided to do with the run.
@@ -54,6 +70,8 @@ type Action int
 const (
 	// ActionLeave leaves the run as it is: paused at its plan.
 	ActionLeave Action = iota
+	// ActionApprove approves the plan as saved, and continues the run.
+	ActionApprove
 )
 
 // Decision is what the person decided, which the command layer carries out
@@ -76,6 +94,8 @@ const (
 	editing
 	// leaving is the question asked before unsaved edits are left behind.
 	leaving
+	// approving is the question asked before the plan is approved.
+	approving
 )
 
 // Model is the viewer's state. It is a bubbletea model: every change to it
@@ -154,6 +174,8 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case !isKey:
 	case m.screen == leaving:
 		m.answerLeaving(key)
+	case m.screen == approving:
+		m.answerApproving(key)
 	default:
 		m.message = ""
 		m.read(key)
@@ -192,7 +214,55 @@ func (m *Model) read(msg tea.KeyPressMsg) {
 		m.save()
 	case "q", "ctrl+c":
 		m.leave()
+	case "c":
+		m.askToApprove()
 	}
+}
+
+// askToApprove asks the person to confirm the approval, showing what the
+// run has spent — or says why the plan cannot be approved from here.
+//
+// Whether the plan can be approved is the approve gate's judgement, and
+// only the gate's: the viewer asks approve.CheckPlan, the rule the gate
+// itself applies when the run continues, and repeats its reason. A second
+// opinion here would sooner or later disagree with the gate, and a plan
+// would be approvable through one path and not through another.
+func (m *Model) askToApprove() {
+	if m.opts.Blocker != "" {
+		m.message = m.opts.Blocker
+		return
+	}
+	if err := approve.CheckPlan(m.plan); err != nil {
+		m.message = "belay cannot approve this plan: " + gateWords(err) +
+			". Press r to ask for a new plan, or write one into " + m.opts.Path + "."
+		return
+	}
+	m.screen = approving
+}
+
+// answerApproving answers the approval question: y saves any edits and
+// approves, n and esc go back, and ctrl+c is leaving.
+func (m *Model) answerApproving(key tea.KeyPressMsg) {
+	switch key.String() {
+	case "y":
+		m.screen = reading
+		if m.dirty() && !m.save() {
+			return
+		}
+		m.decision = Decision{Action: ActionApprove}
+		m.closing = true
+	case "n", "esc":
+		m.screen = reading
+	case "ctrl+c":
+		m.screen = reading
+		m.leave()
+	}
+}
+
+// gateWords is the approve gate's reason for refusing a plan, without the
+// package's name in front of it.
+func gateWords(err error) string {
+	return strings.TrimPrefix(err.Error(), "approve: ")
 }
 
 // edit answers a message while a step is open in the editor: ctrl+s keeps

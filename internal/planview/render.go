@@ -266,10 +266,15 @@ func (m Model) keyLines() []string {
 	sep := m.glyphs.sep
 	hints := func(h ...string) string { return fit(strings.Join(h, sep), m.width, m.glyphs.more) }
 	if m.screen == leaving {
-		return []string{
-			fit("Your edits are not saved yet.", m.width, m.glyphs.more),
-			hints("y save and leave", "n leave without saving", "esc stay"),
+		return append(m.sentences("Your edits are not saved yet."),
+			hints("y save and leave", "n leave without saving", "esc stay"))
+	}
+	if m.screen == approving {
+		out := m.sentences("Approve this plan and continue the run? belay writes the code next.", m.spent())
+		if m.dirty() {
+			out = append(out, m.sentences("Your edits are saved first.")...)
 		}
+		return append(out, hints("y approve and continue", "n go back"))
 	}
 	if m.screen == editing {
 		what := fmt.Sprintf("Editing step %d of %d.", m.editAt+1, m.doc.Len())
@@ -298,4 +303,30 @@ func (m Model) tooSmall() []string {
 		lines = lines[:max(0, m.height)]
 	}
 	return lines
+}
+
+// sentences lays out each sentence on lines of its own, wrapped rather than
+// cut: a question cut off at the edge of a narrow terminal is a question
+// nobody can answer.
+func (m Model) sentences(texts ...string) []string {
+	var out []string
+	for _, text := range texts {
+		out = append(out, wrap(text, max(1, m.width))...)
+	}
+	return out
+}
+
+// spent says what the run has spent against its ceiling, marking an
+// estimate as one.
+func (m Model) spent() string {
+	s := m.opts.Spend
+	amount := fmt.Sprintf("$%.2f", s.SpentUSD)
+	estimated := ""
+	if s.Estimated {
+		estimated = " (estimated)"
+	}
+	if s.LimitUSD <= 0 {
+		return "Spent so far: " + amount + estimated + ", with no dollar ceiling set."
+	}
+	return fmt.Sprintf("Spent so far: %s of $%.2f%s.", amount, s.LimitUSD, estimated)
 }
