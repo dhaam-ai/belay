@@ -530,3 +530,116 @@ func TestPlandocsRefusalsAreSaidInWords(t *testing.T) {
 		t.Errorf("a refused edit changed the plan: %q", s.last())
 	}
 }
+
+// quits presses k and reports whether the viewer asked bubbletea to close.
+func quits(t *testing.T, m Model, k string) (Model, bool) {
+	t.Helper()
+	next, cmd := m.Update(press(k))
+	model, ok := next.(Model)
+	if !ok {
+		t.Fatalf("Update returned a %T, want a Model", next)
+	}
+	if cmd == nil {
+		return model, false
+	}
+	_, quit := cmd().(tea.QuitMsg)
+	return model, quit
+}
+
+// dirtyViewer is a viewer with one unsaved edit, saving into s.
+func dirtyViewer(t *testing.T, s *saves) Model {
+	t.Helper()
+	m := keys(t, open(t, withSaves(s), 80, 24), "e")
+	m = typeText(t, m, " Now.")
+	return keys(t, m, "ctrl+s")
+}
+
+// TestLeavingNeverLosesEditsSilently: q and ctrl+c leave at once when
+// there is nothing unsaved. With edits nobody saved they ask first — save
+// and leave, leave without saving, or stay — and a second ctrl+c at that
+// question leaves without saving, the way a second Ctrl-C always does in
+// belay. Leaving decides nothing: the run stays paused at its plan.
+func TestLeavingNeverLosesEditsSilently(t *testing.T) {
+	for _, k := range []string{"q", "ctrl+c"} {
+		m, quit := quits(t, open(t, review(), 80, 24), k)
+		if !quit {
+			t.Errorf("%s with nothing unsaved did not leave", k)
+		}
+		if m.Decision() != (Decision{Action: ActionLeave}) {
+			t.Errorf("%s decided %+v, want to leave the run as it is", k, m.Decision())
+		}
+	}
+
+	tests := []struct {
+		name      string
+		keys      []string // after the key that asks
+		wantQuit  bool
+		wantSaves int
+	}{
+		{name: "y saves and leaves", keys: []string{"y"}, wantQuit: true, wantSaves: 1},
+		{name: "n leaves without saving", keys: []string{"n"}, wantQuit: true, wantSaves: 0},
+		{name: "esc stays", keys: []string{"esc"}, wantQuit: false, wantSaves: 0},
+		{name: "a second ctrl+c leaves without saving", keys: []string{"ctrl+c"}, wantQuit: true, wantSaves: 0},
+	}
+	for _, ask := range []string{"q", "ctrl+c"} {
+		for _, tt := range tests {
+			t.Run(ask+" then "+tt.name, func(t *testing.T) {
+				var s saves
+				m, quit := quits(t, dirtyViewer(t, &s), ask)
+				if quit {
+					t.Fatalf("%s left without asking about unsaved edits", ask)
+				}
+				got := strings.Join(strings.Fields(screenText(m)), " ")
+				for _, want := range []string{"not saved", "y save", "n leave without saving", "esc stay"} {
+					if !strings.Contains(got, want) {
+						t.Errorf("the question does not offer %q:\n%s", want, screenText(m))
+					}
+				}
+				for _, k := range tt.keys {
+					m, quit = quits(t, m, k)
+				}
+				if quit != tt.wantQuit {
+					t.Errorf("left = %v, want %v", quit, tt.wantQuit)
+				}
+				if len(s.plans) != tt.wantSaves {
+					t.Errorf("saved %d time(s), want %d", len(s.plans), tt.wantSaves)
+				}
+				if m.Decision() != (Decision{Action: ActionLeave}) {
+					t.Errorf("leaving decided %+v, want to leave the run as it is", m.Decision())
+				}
+				if !tt.wantQuit && !strings.Contains(screenText(m), "edited") {
+					t.Errorf("after staying, the edits are no longer marked:\n%s", screenText(m))
+				}
+			})
+		}
+	}
+}
+
+// TestCtrlCWhileTypingAsksToo: ctrl+c in the editor is leaving, not a
+// character, and the words typed but not yet kept count as unsaved. esc at
+// the question goes back to the editor with them intact; y keeps them and
+// saves them.
+func TestCtrlCWhileTypingAsksToo(t *testing.T) {
+	var s saves
+	m := keys(t, open(t, withSaves(&s), 80, 24), "e")
+	m = typeText(t, m, " Typed.")
+	m, quit := quits(t, m, "ctrl+c")
+	if quit {
+		t.Fatal("ctrl+c while typing left without asking")
+	}
+	if !strings.Contains(screenText(m), "Typed.") {
+		t.Errorf("while the question is asked, the words it is asking about are not on the screen:\n%s", screenText(m))
+	}
+	m = keys(t, m, "esc")
+	if !strings.Contains(screenText(m), "Typed.") {
+		t.Fatalf("after esc the typing is gone:\n%s", screenText(m))
+	}
+	m, _ = quits(t, m, "ctrl+c")
+	if _, quit = quits(t, m, "y"); !quit {
+		t.Fatal("y did not leave")
+	}
+	want := edited(t, 0, "Add a dryRun field to runOptions. Typed.")
+	if !bytes.Equal(s.last(), want) {
+		t.Errorf("saved:\n%s\nwant the typing kept and saved:\n%s", s.last(), want)
+	}
+}

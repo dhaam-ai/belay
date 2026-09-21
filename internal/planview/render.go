@@ -105,7 +105,7 @@ func (m *Model) follow() {
 	lines := m.body()
 	first, last := -1, -1
 	for i, l := range lines {
-		if (m.screen == editing && l.editor) || (m.screen != editing && l.step == m.selected) {
+		if (m.editorOpen() && l.editor) || (!m.editorOpen() && l.step == m.selected) {
 			if first < 0 {
 				first = i
 			}
@@ -124,6 +124,12 @@ func (m *Model) follow() {
 	m.offset = max(0, min(m.offset, len(lines)-height))
 }
 
+// editorOpen reports whether the editor is on the screen: while a step is
+// being typed, and under the question asked before leaving it.
+func (m Model) editorOpen() bool {
+	return m.screen == editing || (m.screen == leaving && m.back == editing)
+}
+
 // body lays the plan out for the screen's width, with the editor in place
 // of the step it is editing.
 func (m Model) body() []line {
@@ -135,15 +141,15 @@ func (m Model) body() []line {
 	lines := layout(head, width, -1)
 	for i, step := range steps {
 		switch {
-		case m.screen == editing && m.adding && i == m.editAt:
+		case m.editorOpen() && m.adding && i == m.editAt:
 			lines = append(lines, m.editorLines(-1)...)
-		case m.screen == editing && !m.adding && i == m.editAt:
+		case m.editorOpen() && !m.adding && i == m.editAt:
 			lines = append(lines, m.editorLines(i)...)
 			continue
 		}
 		lines = append(lines, layout(step, width, i)...)
 	}
-	if m.screen == editing && m.adding && m.editAt == len(steps) {
+	if m.editorOpen() && m.adding && m.editAt == len(steps) {
 		lines = append(lines, m.editorLines(-1)...)
 	}
 	return append(lines, layout(tail, width, -1)...)
@@ -218,7 +224,7 @@ func (m Model) screenLines() []string {
 // else.
 func (m Model) gutter(l line) string {
 	here := l.first && l.step == m.selected
-	if m.screen == editing {
+	if m.editorOpen() {
 		here = l.first && l.editor
 	}
 	if here {
@@ -259,6 +265,12 @@ func (m Model) footer() []string {
 func (m Model) keyLines() []string {
 	sep := m.glyphs.sep
 	hints := func(h ...string) string { return fit(strings.Join(h, sep), m.width, m.glyphs.more) }
+	if m.screen == leaving {
+		return []string{
+			fit("Your edits are not saved yet.", m.width, m.glyphs.more),
+			hints("y save and leave", "n leave without saving", "esc stay"),
+		}
+	}
 	if m.screen == editing {
 		what := fmt.Sprintf("Editing step %d of %d.", m.editAt+1, m.doc.Len())
 		if m.adding {

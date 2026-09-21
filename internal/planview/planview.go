@@ -74,6 +74,8 @@ const (
 	reading screen = iota
 	// editing is a step open in the editor.
 	editing
+	// leaving is the question asked before unsaved edits are left behind.
+	leaving
 )
 
 // Model is the viewer's state. It is a bubbletea model: every change to it
@@ -110,8 +112,13 @@ type Model struct {
 
 	// message is the viewer's answer to the last key, when it has one.
 	message string
+	// back is the screen the leaving question returns to on esc.
+	back screen
 
 	decision Decision
+	// closing is set once the person has decided, and the viewer is to
+	// close.
+	closing bool
 }
 
 var _ tea.Model = Model{}
@@ -140,14 +147,21 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.follow()
 		return m, nil
 	}
-	if m.screen == editing {
-		return m.edit(msg)
-	}
-	if key, ok := msg.(tea.KeyPressMsg); ok {
+	var cmd tea.Cmd
+	switch key, isKey := msg.(tea.KeyPressMsg); {
+	case m.screen == editing:
+		m, cmd = m.edit(msg)
+	case !isKey:
+	case m.screen == leaving:
+		m.answerLeaving(key)
+	default:
 		m.message = ""
 		m.read(key)
 	}
-	return m, nil
+	if m.closing {
+		return m, tea.Quit
+	}
+	return m, cmd
 }
 
 // read answers a key pressed while the person is reading the plan.
@@ -176,12 +190,15 @@ func (m *Model) read(msg tea.KeyPressMsg) {
 		m.undoChange()
 	case "s":
 		m.save()
+	case "q", "ctrl+c":
+		m.leave()
 	}
 }
 
 // edit answers a message while a step is open in the editor: ctrl+s keeps
-// the edit, esc throws it away, and everything else is typing.
-func (m Model) edit(msg tea.Msg) (tea.Model, tea.Cmd) {
+// the edit, esc throws it away, ctrl+c is leaving, and everything else is
+// typing.
+func (m Model) edit(msg tea.Msg) (Model, tea.Cmd) {
 	if key, ok := msg.(tea.KeyPressMsg); ok {
 		switch key.String() {
 		case "ctrl+s":
@@ -190,12 +207,56 @@ func (m Model) edit(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case "esc":
 			m.closeEditor()
 			return m, nil
+		case "ctrl+c":
+			m.leave()
+			return m, nil
 		}
 	}
 	var cmd tea.Cmd
 	m.editor, cmd = m.editor.Update(msg)
 	m.follow()
 	return m, cmd
+}
+
+// leave closes the viewer, deciding nothing, or asks first when there are
+// edits nobody has saved.
+func (m *Model) leave() {
+	if !m.unsaved() {
+		m.closing = true
+		return
+	}
+	m.back = m.screen
+	m.screen = leaving
+}
+
+// unsaved reports whether leaving now would lose anything: an edit made to
+// the plan and not saved, or words typed into the editor and not yet kept.
+func (m Model) unsaved() bool {
+	typing := m.screen == editing && (m.editor.Value() != m.shown)
+	return m.dirty() || typing
+}
+
+// answerLeaving answers the question asked before unsaved edits are left:
+// y saves them first, n and a second ctrl+c leave them, and esc goes back.
+func (m *Model) answerLeaving(key tea.KeyPressMsg) {
+	switch key.String() {
+	case "y":
+		m.screen = m.back
+		if m.screen == editing {
+			if m.keepEdit(); m.screen == editing {
+				return // refused; the reason is on the screen
+			}
+		}
+		if m.dirty() && !m.save() {
+			return
+		}
+		m.closing = true
+	case "n", "ctrl+c":
+		m.closing = true
+	case "esc":
+		m.screen = m.back
+		m.follow()
+	}
 }
 
 // selectStep moves the selection to step i, held inside the plan's steps,
@@ -328,22 +389,24 @@ func (m *Model) undoChange() {
 // dirty reports whether there are edits nobody has saved.
 func (m Model) dirty() bool { return !bytes.Equal(m.plan, m.disk) }
 
-// save writes the plan through Options.Save, and says what happened.
-func (m *Model) save() {
+// save writes the plan through Options.Save, says what happened, and
+// reports whether the file now holds the plan.
+func (m *Model) save() bool {
 	if !m.dirty() {
 		m.message = "There is nothing to save: the plan file already holds what you see."
-		return
+		return true
 	}
 	if m.opts.Save == nil {
 		m.message = "belay cannot save this plan from here."
-		return
+		return false
 	}
 	if err := m.opts.Save(m.plan, false); err != nil {
 		m.message = "belay could not save the plan: " + err.Error()
-		return
+		return false
 	}
 	m.disk = m.plan
 	m.message = "belay saved the plan to " + m.opts.Path + "."
+	return true
 }
 
 // refusal says, for a person, why plandoc would not make a change.
