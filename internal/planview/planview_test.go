@@ -2,6 +2,7 @@ package planview
 
 import (
 	"bytes"
+	"fmt"
 	"strings"
 	"testing"
 	"unicode/utf8"
@@ -377,5 +378,155 @@ func TestTheEditorUsesTheTerminalsOwnCursor(t *testing.T) {
 	}
 	if want := strings.Index(row, text) + len(text); c.X != utf8.RuneCountInString(row[:want]) {
 		t.Errorf("the cursor is at column %d, want %d, the end of the text", c.X, utf8.RuneCountInString(row[:want]))
+	}
+}
+
+// parsed returns the canonical plan as plandoc reads it.
+func parsed(t *testing.T) plandoc.Document {
+	t.Helper()
+	doc, err := plandoc.Parse([]byte(canonical))
+	if err != nil {
+		t.Fatalf("parse the canonical plan: %v", err)
+	}
+	return doc
+}
+
+// TestAddingAStepPutsItAfterTheSelection: a opens an empty editor below the
+// selected step, and ctrl+s adds what was typed there as the next step,
+// renumbering the ones after it the way plandoc does. The new step is then
+// the selected one.
+func TestAddingAStepPutsItAfterTheSelection(t *testing.T) {
+	var s saves
+	m := keys(t, open(t, withSaves(&s), 80, 24), "a")
+	m = typeText(t, m, "Write the test first.")
+	m = keys(t, m, "ctrl+s")
+	if line := selectedLine(m); !strings.Contains(line, "2. Write the test first.") {
+		t.Errorf("after adding, the selection is on %q, want the new step 2", line)
+	}
+	keys(t, m, "s")
+	want, err := parsed(t).Insert(1, "Write the test first.")
+	if err != nil {
+		t.Fatalf("Insert: %v", err)
+	}
+	if !bytes.Equal(s.last(), want.Bytes()) {
+		t.Errorf("saved:\n%s\nwant:\n%s", s.last(), want.Bytes())
+	}
+
+	// esc adds nothing, and an empty new step is refused like an emptied one.
+	var none saves
+	m = keys(t, open(t, withSaves(&none), 80, 24), "a", "esc", "s")
+	if len(none.plans) != 0 {
+		t.Errorf("a step abandoned with esc was saved: %q", none.last())
+	}
+	m = keys(t, m, "a", "ctrl+s")
+	if got := screenText(m); !strings.Contains(got, "cannot be empty") {
+		t.Errorf("an empty new step was not refused in words:\n%s", got)
+	}
+}
+
+// TestDeletingAStepCanBeUndone: d deletes the selected step at once — u
+// puts it back, which is why it does not ask first — and says so.
+func TestDeletingAStepCanBeUndone(t *testing.T) {
+	var s saves
+	m := keys(t, open(t, withSaves(&s), 80, 24), "j", "d")
+	if got := screenText(m); !strings.Contains(got, "u puts it back") {
+		t.Errorf("deleting a step did not say how to undo it:\n%s", got)
+	}
+	m = keys(t, m, "s")
+	want, err := parsed(t).Delete(1)
+	if err != nil {
+		t.Fatalf("Delete: %v", err)
+	}
+	if !bytes.Equal(s.last(), want.Bytes()) {
+		t.Errorf("saved:\n%s\nwant:\n%s", s.last(), want.Bytes())
+	}
+	m = keys(t, m, "u", "s")
+	if !bytes.Equal(s.last(), []byte(canonical)) {
+		t.Errorf("after undoing the delete, saved:\n%s\nwant the plan as it was", s.last())
+	}
+	if line := selectedLine(m); !strings.Contains(line, "2. Bind --dry-run") {
+		t.Errorf("after undoing, the selection is on %q, want the step that came back", line)
+	}
+}
+
+// TestMovingAStep: K and shift+up move the selected step up, J and
+// shift+down move it down, and the selection travels with it.
+func TestMovingAStep(t *testing.T) {
+	doc := parsed(t)
+	up, err := doc.Move(1, 0)
+	if err != nil {
+		t.Fatalf("Move: %v", err)
+	}
+	down, err := doc.Move(1, 2)
+	if err != nil {
+		t.Fatalf("Move: %v", err)
+	}
+	tests := []struct {
+		name     string
+		keys     []string
+		want     []byte
+		selected string
+	}{
+		{name: "K", keys: []string{"j", "K"}, want: up.Bytes(), selected: "1. Bind --dry-run"},
+		{name: "shift+up", keys: []string{"j", "shift+up"}, want: up.Bytes(), selected: "1. Bind --dry-run"},
+		{name: "J", keys: []string{"j", "J"}, want: down.Bytes(), selected: "3. Bind --dry-run"},
+		{name: "shift+down", keys: []string{"j", "shift+down"}, want: down.Bytes(), selected: "3. Bind --dry-run"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var s saves
+			m := keys(t, open(t, withSaves(&s), 80, 24), tt.keys...)
+			if line := selectedLine(m); !strings.Contains(line, tt.selected) {
+				t.Errorf("the selection is on %q, want %q", line, tt.selected)
+			}
+			keys(t, m, "s")
+			if !bytes.Equal(s.last(), tt.want) {
+				t.Errorf("saved:\n%s\nwant:\n%s", s.last(), tt.want)
+			}
+		})
+	}
+
+	// Moving the first step up, or the last down, changes nothing.
+	var s saves
+	m := keys(t, open(t, withSaves(&s), 80, 24), "K", "end", "J", "s")
+	if len(s.plans) != 0 {
+		t.Errorf("moving a step past the end of the list changed the plan: %q", s.last())
+	}
+	if got := screenText(m); !strings.Contains(got, "nothing to save") {
+		t.Errorf("want the plan unchanged:\n%s", got)
+	}
+}
+
+// TestPlandocsRefusalsAreSaidInWords: the two refusals a structural edit
+// can meet — deleting a plan's only step, and an edit that would move text
+// from one step into another — are said as sentences a person can act on,
+// never as plandoc's error text, and the plan is left as it was.
+func TestPlandocsRefusalsAreSaidInWords(t *testing.T) {
+	one := review()
+	one.Plan = []byte("## Steps\n\n1. The only step.\n")
+	got := screenText(keys(t, open(t, one, 80, 24), "d"))
+	if !strings.Contains(got, "at least one step") || strings.Contains(got, "plandoc:") {
+		t.Errorf("deleting the only step was not refused in words:\n%s", got)
+	}
+
+	var b strings.Builder
+	b.WriteString("## Steps\n\n")
+	for n := 1; n <= 10; n++ {
+		fmt.Fprintf(&b, "%d. Step %d.\n", n, n)
+	}
+	b.WriteString("   A line that belongs to no step.\n")
+	ten := review()
+	ten.Plan = []byte(b.String())
+	ten.Path = "/work/plan.md"
+	var s saves
+	ten.Save = s.save
+	m := keys(t, open(t, ten, 80, 24), "d")
+	got = strings.Join(strings.Fields(screenText(m)), " ")
+	if !strings.Contains(got, "text from one step into another") || !strings.Contains(got, "/work/plan.md") {
+		t.Errorf("an ambiguous edit was not refused in words naming the file:\n%s", got)
+	}
+	keys(t, m, "s")
+	if len(s.plans) != 0 {
+		t.Errorf("a refused edit changed the plan: %q", s.last())
 	}
 }

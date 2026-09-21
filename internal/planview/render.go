@@ -134,17 +134,23 @@ func (m Model) body() []line {
 	head, steps, tail := m.doc.Parts()
 	lines := layout(head, width, -1)
 	for i, step := range steps {
-		if m.screen == editing && i == m.editAt {
+		switch {
+		case m.screen == editing && m.adding && i == m.editAt:
+			lines = append(lines, m.editorLines(-1)...)
+		case m.screen == editing && !m.adding && i == m.editAt:
 			lines = append(lines, m.editorLines(i)...)
 			continue
 		}
 		lines = append(lines, layout(step, width, i)...)
 	}
+	if m.screen == editing && m.adding && m.editAt == len(steps) {
+		lines = append(lines, m.editorLines(-1)...)
+	}
 	return append(lines, layout(tail, width, -1)...)
 }
 
 // editorLines is the editor, laid out as lines of the plan belonging to
-// step i.
+// step i, or to no step while it holds a new one.
 func (m Model) editorLines(i int) []line {
 	var out []line
 	for j, text := range strings.Split(m.editor.View(), "\n") {
@@ -207,9 +213,15 @@ func (m Model) screenLines() []string {
 }
 
 // gutter is what is drawn beside a line of the plan: the cursor beside the
-// selected step's first line, and blank space beside everything else.
+// first line of what the person is working on — the editor while one is
+// open, the selected step otherwise — and blank space beside everything
+// else.
 func (m Model) gutter(l line) string {
-	if l.first && l.step == m.selected {
+	here := l.first && l.step == m.selected
+	if m.screen == editing {
+		here = l.first && l.editor
+	}
+	if here {
 		return m.glyphs.cursor + " "
 	}
 	return strings.Repeat(" ", gutterWidth)
@@ -248,8 +260,12 @@ func (m Model) keyLines() []string {
 	sep := m.glyphs.sep
 	hints := func(h ...string) string { return fit(strings.Join(h, sep), m.width, m.glyphs.more) }
 	if m.screen == editing {
+		what := fmt.Sprintf("Editing step %d of %d.", m.editAt+1, m.doc.Len())
+		if m.adding {
+			what = fmt.Sprintf("A new step %d.", m.editAt+1)
+		}
 		return []string{
-			fit(fmt.Sprintf("Editing step %d of %d.", m.editAt+1, m.doc.Len()), m.width, m.glyphs.more),
+			fit(what, m.width, m.glyphs.more),
 			hints("ctrl+s keeps the edit", "esc throws it away"),
 		}
 	}

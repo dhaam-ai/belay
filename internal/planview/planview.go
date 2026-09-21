@@ -10,6 +10,7 @@ package planview
 import (
 	"bytes"
 	"errors"
+	"fmt"
 
 	"charm.land/bubbles/v2/textarea"
 	tea "charm.land/bubbletea/v2"
@@ -100,10 +101,12 @@ type Model struct {
 
 	screen screen
 	// editor is the text box of the step being edited, editAt is the step,
-	// and shown is what the box held when it opened, as it shows it.
+	// and shown is what the box held when it opened, as it shows it. adding
+	// is true when the box holds a new step, which goes in at editAt.
 	editor textarea.Model
 	editAt int
 	shown  string
+	adding bool
 
 	// message is the viewer's answer to the last key, when it has one.
 	message string
@@ -161,6 +164,14 @@ func (m *Model) read(msg tea.KeyPressMsg) {
 		m.selectStep(m.doc.Len() - 1)
 	case "e", "enter":
 		m.openEditor()
+	case "a":
+		m.openNewStep()
+	case "d":
+		m.deleteStep()
+	case "K", "shift+up":
+		m.moveStep(-1)
+	case "J", "shift+down":
+		m.moveStep(+1)
 	case "u":
 		m.undoChange()
 	case "s":
@@ -202,9 +213,57 @@ func (m *Model) openEditor() {
 	}
 	m.screen = editing
 	m.editAt = m.selected
+	m.adding = false
 	m.editor = m.newEditor(steps[m.selected].Text)
 	m.shown = m.editor.Value()
 	m.follow()
+}
+
+// openNewStep opens an empty editor for a step to go in after the selected
+// one.
+func (m *Model) openNewStep() {
+	if m.doc.Len() == 0 {
+		return
+	}
+	m.screen = editing
+	m.editAt = m.selected + 1
+	m.adding = true
+	m.editor = m.newEditor("")
+	m.shown = ""
+	m.follow()
+}
+
+// deleteStep deletes the selected step. It does not ask first: u puts the
+// step back, and a question before every delete is a question people learn
+// to answer without reading.
+func (m *Model) deleteStep() {
+	if m.doc.Len() == 0 {
+		return
+	}
+	doc, err := m.doc.Delete(m.selected)
+	if err != nil {
+		m.message = m.refusal(err)
+		return
+	}
+	number := m.selected + 1
+	m.change(doc)
+	m.message = fmt.Sprintf("Deleted step %d; u puts it back.", number)
+}
+
+// moveStep moves the selected step by delta places, and the selection with
+// it. A step already at that end of the list stays where it is.
+func (m *Model) moveStep(delta int) {
+	to := m.selected + delta
+	if m.doc.Len() == 0 || to < 0 || to >= m.doc.Len() {
+		return
+	}
+	doc, err := m.doc.Move(m.selected, to)
+	if err != nil {
+		m.message = m.refusal(err)
+		return
+	}
+	m.selected = to
+	m.change(doc)
 }
 
 // keepEdit puts the editor's text into the plan, through plandoc, and closes
@@ -216,15 +275,24 @@ func (m *Model) openEditor() {
 // touched.
 func (m *Model) keepEdit() {
 	text := m.editor.Value()
-	if text == m.shown {
+	if !m.adding && text == m.shown {
 		m.closeEditor()
 		return
 	}
-	doc, err := m.doc.Edit(m.editAt, text)
+	var (
+		doc plandoc.Document
+		err error
+	)
+	if m.adding {
+		doc, err = m.doc.Insert(m.editAt, text)
+	} else {
+		doc, err = m.doc.Edit(m.editAt, text)
+	}
 	if err != nil {
 		m.message = m.refusal(err)
 		return
 	}
+	m.selected = m.editAt
 	m.change(doc)
 	m.closeEditor()
 }
