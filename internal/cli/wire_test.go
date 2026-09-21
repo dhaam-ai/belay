@@ -15,6 +15,7 @@ import (
 	"github.com/dhaam-ai/belay/internal/agent/claude"
 	"github.com/dhaam-ai/belay/internal/config"
 	"github.com/dhaam-ai/belay/internal/graph"
+	"github.com/dhaam-ai/belay/internal/isolate/dircopy"
 	"github.com/dhaam-ai/belay/internal/journal"
 	"github.com/dhaam-ai/belay/internal/state"
 )
@@ -505,4 +506,60 @@ func seedRunDir(t *testing.T, plan *runPlan, goal string) *state.Store {
 		t.Fatalf("save manifest: %v", err)
 	}
 	return state.NewStore(layout)
+}
+
+// TestEveryRunRecordsAWorkspaceDigest: a fork asks whether the workspace has
+// changed since the visit it re-runs, and can only answer for a run whose
+// snapshots carry a digest. So every run belay dispatches fingerprints its
+// workspace, with the survey a copy of the workspace would agree with —
+// belay's own writes under .belay do not change it.
+func TestEveryRunRecordsAWorkspaceDigest(t *testing.T) {
+	ws := goWorkspace(t)
+	plan, err := resolve(resolveRequest{workspace: ws, logger: quietLogger()})
+	if err != nil {
+		t.Fatalf("resolve: %v", err)
+	}
+	reached := false
+	registry := graph.NewRegistry()
+	registry.MustRegister(
+		planWriter{body: "# Plan\n\nwrite a test\n"},
+		routesTo{name: graph.NodeApprove, next: graph.NodeCode},
+		endsTheRun{reached: &reached},
+	)
+	plan.registry = registry
+	store := seedRunDir(t, plan, "add tests")
+
+	dispatcher, err := graph.NewDispatcher(plan.options(store))
+	if err != nil {
+		t.Fatalf("graph.NewDispatcher: %v", err)
+	}
+	if _, err := dispatcher.Run(context.Background()); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+
+	read, err := journal.ReadFile(store.Layout().JournalPath())
+	if err != nil {
+		t.Fatalf("journal.ReadFile: %v", err)
+	}
+	visits, err := journal.Visits(read.Records)
+	if err != nil || len(visits) == 0 {
+		t.Fatalf("journal.Visits() = %v, %v", visits, err)
+	}
+	want, err := dircopy.SurveyTree(context.Background(), ws, dircopy.DefaultSkip())
+	if err != nil {
+		t.Fatalf("SurveyTree: %v", err)
+	}
+	for _, v := range visits {
+		path, err := store.Layout().SnapshotPath(v.StartSeq, v.Node)
+		if err != nil {
+			t.Fatalf("SnapshotPath: %v", err)
+		}
+		snap, err := state.LoadSnapshot(path)
+		if err != nil {
+			t.Fatalf("no snapshot for %s: %v", v.Node, err)
+		}
+		if snap.WorkspaceDigest != want.Digest {
+			t.Errorf("snapshot of %s records workspace digest %q, want %q", v.Node, snap.WorkspaceDigest, want.Digest)
+		}
+	}
 }
