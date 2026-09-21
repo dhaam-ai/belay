@@ -1,12 +1,15 @@
 package planview
 
 import (
+	"bytes"
 	"strings"
 	"testing"
 	"unicode/utf8"
 
 	tea "charm.land/bubbletea/v2"
 	"github.com/charmbracelet/x/ansi"
+
+	"github.com/dhaam-ai/belay/internal/plandoc"
 )
 
 // canonical is a plan in the shape internal/nodes/plan's prompt asks for.
@@ -83,6 +86,68 @@ func keys(t *testing.T, m Model, ks ...string) Model {
 		m = send(t, m, press(k))
 	}
 	return m
+}
+
+// typeText types s one key at a time, with enter for a line break.
+func typeText(t *testing.T, m Model, s string) Model {
+	t.Helper()
+	for _, r := range s {
+		if r == '\n' {
+			m = send(t, m, press("enter"))
+			continue
+		}
+		m = send(t, m, tea.KeyPressMsg{Code: r, Text: string(r)})
+	}
+	return m
+}
+
+// saves records every call to Options.Save, and answers each with the next
+// of errs, or nil once they run out.
+type saves struct {
+	plans      [][]byte
+	overwrites []bool
+	errs       []error
+}
+
+func (s *saves) save(plan []byte, overwrite bool) error {
+	s.plans = append(s.plans, append([]byte(nil), plan...))
+	s.overwrites = append(s.overwrites, overwrite)
+	if len(s.errs) == 0 {
+		return nil
+	}
+	err := s.errs[0]
+	s.errs = s.errs[1:]
+	return err
+}
+
+// last is the plan most recently saved, or nil.
+func (s *saves) last() []byte {
+	if len(s.plans) == 0 {
+		return nil
+	}
+	return s.plans[len(s.plans)-1]
+}
+
+// withSaves is review() with Save recorded in s.
+func withSaves(s *saves) Options {
+	opts := review()
+	opts.Save = s.save
+	return opts
+}
+
+// edited returns the canonical plan with step i's text replaced by text,
+// exactly as plandoc writes it: what a save must hand over, byte for byte.
+func edited(t *testing.T, i int, text string) []byte {
+	t.Helper()
+	doc, err := plandoc.Parse([]byte(canonical))
+	if err != nil {
+		t.Fatalf("parse the canonical plan: %v", err)
+	}
+	doc, err = doc.Edit(i, text)
+	if err != nil {
+		t.Fatalf("edit step %d: %v", i, err)
+	}
+	return doc.Bytes()
 }
 
 // open builds a viewer for opts on a terminal of width by height cells.
@@ -174,5 +239,143 @@ func TestSelectionMovesThroughTheSteps(t *testing.T) {
 				t.Errorf("after %v the selection is on %q, want %q", tt.keys, line, tt.want)
 			}
 		})
+	}
+}
+
+// TestEditingAStepChangesOnlyThatStep: e opens the selected step for
+// editing, ctrl+s keeps the edit, and s saves. What is saved is plandoc's
+// own rewrite of that one step -- every other byte of the document as it
+// was -- because the approve gate fingerprints the file and a viewer that
+// reformatted what it did not touch would report edits nobody made.
+func TestEditingAStepChangesOnlyThatStep(t *testing.T) {
+	var s saves
+	m := keys(t, open(t, withSaves(&s), 80, 24), "j", "j", "e")
+	m = typeText(t, m, " Say so in the output.")
+	m = keys(t, m, "ctrl+s")
+
+	if len(s.plans) != 0 {
+		t.Fatal("keeping an edit saved the file; only s saves")
+	}
+	if got := screenText(m); !strings.Contains(got, "edited") {
+		t.Errorf("an unsaved edit is not marked as edited:\n%s", got)
+	}
+
+	m = keys(t, m, "s")
+	if len(s.plans) != 1 {
+		t.Fatalf("s saved %d time(s), want once", len(s.plans))
+	}
+	want := edited(t, 2, "Return from startRun before createRun when the flag is set. Say so in the output.")
+	if !bytes.Equal(s.last(), want) {
+		t.Errorf("saved:\n%s\nwant:\n%s", s.last(), want)
+	}
+	if s.overwrites[0] {
+		t.Error("an ordinary save asked to overwrite whatever is on disk")
+	}
+	got := screenText(m)
+	if strings.Contains(got, "edited") {
+		t.Errorf("the plan is still marked as edited after it was saved:\n%s", got)
+	}
+	if !strings.Contains(got, "saved") {
+		t.Errorf("saving did not say it saved:\n%s", got)
+	}
+}
+
+// TestEscapeThrowsAnEditAway: esc leaves the step as it was, and a plan
+// nobody changed is not written at all.
+func TestEscapeThrowsAnEditAway(t *testing.T) {
+	var s saves
+	m := keys(t, open(t, withSaves(&s), 80, 24), "e")
+	m = typeText(t, m, " and more")
+	m = keys(t, m, "esc", "s")
+	if len(s.plans) != 0 {
+		t.Errorf("a plan with no edits was saved: %q", s.last())
+	}
+	if line := selectedLine(m); !strings.HasSuffix(strings.TrimSpace(line), "1. Add a dryRun field to runOptions.") {
+		t.Errorf("the step reads %q after esc, want it as it was", line)
+	}
+	if got := screenText(m); !strings.Contains(got, "nothing to save") {
+		t.Errorf("s with nothing to save said nothing:\n%s", got)
+	}
+}
+
+// TestKeepingAnUnchangedEditChangesNothing: opening a step and keeping it
+// as it was is not an edit, so the plan is not marked edited.
+func TestKeepingAnUnchangedEditChangesNothing(t *testing.T) {
+	m := keys(t, open(t, review(), 80, 24), "e", "ctrl+s")
+	if got := screenText(m); strings.Contains(got, "edited") {
+		t.Errorf("a step kept exactly as it was marked the plan edited:\n%s", got)
+	}
+}
+
+// TestUndoTakesBackTheLastChange: u undoes one change at a time, back to
+// the plan as it was opened.
+func TestUndoTakesBackTheLastChange(t *testing.T) {
+	var s saves
+	m := keys(t, open(t, withSaves(&s), 80, 24), "e")
+	m = typeText(t, m, " One.")
+	m = keys(t, m, "ctrl+s", "j", "e")
+	m = typeText(t, m, " Two.")
+	m = keys(t, m, "ctrl+s", "u", "s")
+	if want := edited(t, 0, "Add a dryRun field to runOptions. One."); !bytes.Equal(s.last(), want) {
+		t.Errorf("after one undo, saved:\n%s\nwant:\n%s", s.last(), want)
+	}
+	m = keys(t, m, "u", "s")
+	if !bytes.Equal(s.last(), []byte(canonical)) {
+		t.Errorf("after two undos, saved:\n%s\nwant the plan as it was opened", s.last())
+	}
+	m = keys(t, m, "u")
+	if got := screenText(m); !strings.Contains(got, "nothing to undo") {
+		t.Errorf("u with nothing left to undo said nothing:\n%s", got)
+	}
+}
+
+// TestAnEmptyStepIsRefusedInWords: a step cannot be emptied, and the
+// person is told so in a sentence, with the editor still open so they can
+// type something or leave it with esc.
+func TestAnEmptyStepIsRefusedInWords(t *testing.T) {
+	m := keys(t, open(t, review(), 80, 24), "e")
+	for range len("Add a dryRun field to runOptions.") {
+		m = keys(t, m, "backspace")
+	}
+	m = keys(t, m, "ctrl+s")
+	got := screenText(m)
+	if !strings.Contains(got, "cannot be empty") {
+		t.Errorf("emptying a step was not refused in words:\n%s", got)
+	}
+	if strings.Contains(got, "plandoc:") {
+		t.Errorf("the refusal shows plandoc's error text rather than a sentence for a person:\n%s", got)
+	}
+	m = keys(t, m, "esc")
+	if line := selectedLine(m); !strings.Contains(line, "1. Add a dryRun field to runOptions.") {
+		t.Errorf("after esc the step reads %q, want it as it was", line)
+	}
+}
+
+// TestTheEditorUsesTheTerminalsOwnCursor: while a step is open the
+// terminal's cursor sits at the end of the text being typed, on the line
+// the editor is drawn on, and while the plan is only being read there is no
+// cursor at all. The real cursor needs no colour to be seen, and it is the
+// one a screen reader follows.
+func TestTheEditorUsesTheTerminalsOwnCursor(t *testing.T) {
+	m := open(t, review(), 80, 24)
+	if c := m.View().Cursor; c != nil {
+		t.Errorf("a cursor is shown at %d,%d while nothing is being typed", c.X, c.Y)
+	}
+	m = keys(t, m, "e")
+	c := m.View().Cursor
+	if c == nil {
+		t.Fatal("no cursor is shown while a step is being edited")
+	}
+	rows := strings.Split(screenText(m), "\n")
+	if c.Y < 0 || c.Y >= len(rows) {
+		t.Fatalf("the cursor is at row %d, off a screen of %d rows", c.Y, len(rows))
+	}
+	text := "Add a dryRun field to runOptions."
+	row := rows[c.Y]
+	if !strings.Contains(row, text) {
+		t.Fatalf("the cursor is on row %d, %q, not on the line being edited", c.Y, row)
+	}
+	if want := strings.Index(row, text) + len(text); c.X != utf8.RuneCountInString(row[:want]) {
+		t.Errorf("the cursor is at column %d, want %d, the end of the text", c.X, utf8.RuneCountInString(row[:want]))
 	}
 }

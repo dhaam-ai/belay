@@ -62,6 +62,15 @@ func TestViewFitsEveryTerminalSize(t *testing.T) {
 				assertFits(t, m, width, height)
 			}
 		}
+		// And with a step open in the editor, which is drawn in the step's
+		// place and resized with the window.
+		m = keys(t, m, "e")
+		for width := 1; width <= 200; width += 7 {
+			for height := 1; height <= 60; height += 3 {
+				m = send(t, m, tea.WindowSizeMsg{Width: width, Height: height})
+				assertFits(t, m, width, height)
+			}
+		}
 	}
 }
 

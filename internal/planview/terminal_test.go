@@ -16,20 +16,20 @@ import (
 	"golang.org/x/sys/unix"
 )
 
-// screen collects what the viewer draws, read off the master side of a
+// drawing collects what the viewer draws, read off the master side of a
 // pseudo-terminal.
-type screen struct {
+type drawing struct {
 	mu  sync.Mutex
 	buf bytes.Buffer
 }
 
-func (s *screen) Write(p []byte) (int, error) {
+func (s *drawing) Write(p []byte) (int, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.buf.Write(p)
 }
 
-func (s *screen) String() string {
+func (s *drawing) String() string {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.buf.String()
@@ -45,7 +45,7 @@ type runResult struct {
 // terminal a person types into.
 type terminal struct {
 	master, slave *os.File
-	drawn         *screen
+	drawn         *drawing
 	done          chan runResult
 	cancel        context.CancelFunc
 	before        *term.State
@@ -63,7 +63,7 @@ func startOnTerminal(t *testing.T, opts Options) *terminal {
 	if err != nil {
 		t.Fatalf("read the terminal's mode: %v", err)
 	}
-	tm := &terminal{master: master, slave: slave, drawn: &screen{}, done: make(chan runResult, 1), before: before}
+	tm := &terminal{master: master, slave: slave, drawn: &drawing{}, done: make(chan runResult, 1), before: before}
 	copied := make(chan struct{})
 	go func() {
 		defer close(copied)
