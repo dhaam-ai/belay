@@ -355,6 +355,63 @@ func TestValidateRules(t *testing.T) {
 	}
 }
 
+// TestValidatePlanArchiveDir pins where a finished run may put its plan:
+// somewhere inside the workspace that is not belay's scratch space or git's.
+//
+// The rule is what keeps archival from writing outside the repository it
+// was pointed at. A ".." would climb out of it, an absolute path ignores it,
+// and a directory under .belay or .git is one belay or git owns: a plan
+// moved into .belay would be deleted with the run directory it was moved
+// out of, which is the opposite of what archiving is for. The case of the
+// first segment is ignored, because on the case-insensitive file systems
+// macOS uses by default ".Belay" is .belay.
+func TestValidatePlanArchiveDir(t *testing.T) {
+	tests := []struct {
+		name    string
+		dir     string
+		archive bool
+		want    string // empty: valid
+	}{
+		{name: "the default", dir: "docs/plans", archive: true},
+		{name: "a trailing slash is the same directory", dir: "docs/plans/", archive: true},
+		{name: "a leading ./ is the same directory", dir: "./docs/plans", archive: true},
+		{name: "one level", dir: "plans", archive: true},
+		{name: "a name that only starts like .belay", dir: ".belayed/plans", archive: true},
+		{name: "empty", dir: "", archive: true, want: "want a directory inside the workspace"},
+		{name: "the workspace itself", dir: ".", archive: true, want: "want a directory inside the workspace"},
+		{name: "absolute", dir: "/srv/plans", archive: true, want: "not an absolute path"},
+		{name: "climbing out", dir: "../plans", archive: true, want: `no ".."`},
+		{name: "climbing out part way", dir: "docs/../../plans", archive: true, want: `no ".."`},
+		{name: "belay's own directory", dir: ".belay/plans", archive: true, want: "not under .belay or .git"},
+		{name: "belay's own directory, differently cased", dir: ".Belay/plans", archive: true, want: "not under .belay or .git"},
+		{name: "git's directory", dir: ".git/plans", archive: true, want: "not under .belay or .git"},
+		{name: "a NUL byte", dir: "docs/\x00plans", archive: true, want: "no NUL byte"},
+		// Checked whether or not archival is on, like every other setting:
+		// a typo is worth reporting before the day someone turns it on.
+		{name: "checked with archival off", dir: "../plans", archive: false, want: `no ".."`},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := Default()
+			cfg.Plan = Plan{Archive: tt.archive, ArchiveDir: tt.dir}
+			err := cfg.Validate()
+			if tt.want == "" {
+				if err != nil {
+					t.Fatalf("Validate() = %v, want nil", err)
+				}
+				return
+			}
+			var fieldErr *FieldError
+			if !errors.As(err, &fieldErr) || fieldErr.Field != "plan.archive_dir" || !errors.Is(err, ErrInvalid) {
+				t.Fatalf("Validate() = %v, want a *FieldError on plan.archive_dir wrapping ErrInvalid", err)
+			}
+			if !strings.Contains(err.Error(), tt.want) {
+				t.Errorf("message:\n  got  %s\n  want it to contain %s", err, tt.want)
+			}
+		})
+	}
+}
+
 func TestValidateReportsEveryProblemAtOnce(t *testing.T) {
 	cfg := Default()
 	cfg.Version = 9

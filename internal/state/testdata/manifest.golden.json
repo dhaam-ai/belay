@@ -9,7 +9,7 @@
   "status": "running",
   "current_node": "code",
   "step": 2,
-  "config_digest": "sha256:d518ea254aa2f4b3cbad7cce292877b42ac32defac24f9cbfe1529bc85d6bc3b",
+  "config_digest": "sha256:1e0be982d3c082373b6873929845b204f7ad4f2ab1944525fe53f4047c664fb3",
   "config_snapshot": {
     "agent.backend": "claude-code",
     "agent.max_turns": "30",
@@ -27,6 +27,8 @@
     "graph.max_steps": "60",
     "graph.node_timeout": "15m0s",
     "output.mode": "auto",
+    "plan.archive": "true",
+    "plan.archive_dir": "docs/plans",
     "review.ai.mcp.image": "sonarsource/sonar-mcp-server",
     "review.ai.mcp.mode": "cloud",
     "review.ai.mcp.url": "",

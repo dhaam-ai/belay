@@ -22,6 +22,8 @@ const (
 	defaultCandidates         = 3
 	defaultIsolator           = IsolatorAuto
 	defaultOutputMode         = OutputAuto
+	defaultArchive            = true
+	defaultArchiveDir         = "docs/plans"
 )
 
 // Default returns belay's built-in configuration.
@@ -77,6 +79,10 @@ func Default() Config {
 		},
 		Output: Output{
 			Mode: defaultOutputMode,
+		},
+		Plan: Plan{
+			Archive:    defaultArchive,
+			ArchiveDir: defaultArchiveDir,
 		},
 	}
 }

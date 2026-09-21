@@ -71,6 +71,12 @@ func TestDefaultFields(t *testing.T) {
 		{"fanout.isolator", c.Fanout.Isolator, IsolatorAuto},
 		{"fanout.select", c.Fanout.Select, SelectFewestIssues},
 		{"output.mode", c.Output.Mode, OutputAuto},
+		// On by default: a finished run's plan is the record of why its
+		// code looks the way it does, and an opt-in nobody finds leaves
+		// every plan in a directory the README calls safe to delete
+		// (ADR-0016).
+		{"plan.archive", c.Plan.Archive, true},
+		{"plan.archive_dir", c.Plan.ArchiveDir, "docs/plans"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

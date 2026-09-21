@@ -224,6 +224,26 @@ type Config struct {
 	Fanout Fanout `yaml:"fanout"`
 	// Output configures how a run delivers its result.
 	Output Output `yaml:"output"`
+	// Plan configures what becomes of a run's plan once the run is over.
+	Plan Plan `yaml:"plan"`
+}
+
+// Plan configures what becomes of a run's plan once the run is over.
+//
+// It follows Output in Config, and so in a rendered belay.yaml, for the
+// reason Output gives: sections are appended in the order they arrived.
+//
+// Both settings are read once, when a run is created, and recorded in the
+// run's manifest (internal/state's ArchivedPlan), so a resumed run files its
+// plan where the run was told it would when it started. ADR-0016 records why
+// archival is on by default and where it happens.
+type Plan struct {
+	// Archive moves a finished run's approved plan out of the run directory
+	// and into the repository.
+	Archive bool `yaml:"archive"`
+	// ArchiveDir is where it goes: a slash-separated directory relative to
+	// the workspace, which Validate keeps inside it.
+	ArchiveDir string `yaml:"archive_dir"`
 }
 
 // Output configures how a run delivers its result.
@@ -851,6 +871,7 @@ func (c Config) Snapshot() Snapshot {
 		c.Budget.snapshot(),
 		c.Fanout.snapshot(),
 		c.Output.snapshot(),
+		c.Plan.snapshot(),
 	} {
 		maps.Copy(s, section)
 	}
@@ -914,6 +935,14 @@ func (b Budget) snapshot() Snapshot {
 func (o Output) snapshot() Snapshot {
 	return Snapshot{
 		"output.mode": string(o.Mode),
+	}
+}
+
+// snapshot returns the plan.* settings for [Config.Snapshot].
+func (p Plan) snapshot() Snapshot {
+	return Snapshot{
+		"plan.archive":     strconv.FormatBool(p.Archive),
+		"plan.archive_dir": p.ArchiveDir,
 	}
 }
 

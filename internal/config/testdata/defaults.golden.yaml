@@ -36,3 +36,6 @@ fanout:
     select: fewest_issues
 output:
     mode: auto
+plan:
+    archive: true
+    archive_dir: docs/plans
