@@ -443,10 +443,21 @@ func pauseOnCancel(o *graph.Options) { o.PauseOnCancel = true }
 //  1. Save the recording, when agent.mode is "record". This happens whatever
 //     the outcome: a run that failed or was stopped still made the calls it
 //     recorded.
-//  2. Push the branch and open the draft pull request --pr asked for. It
+//  2. Move a completed run's plan out of the run directory (archivePlan). It
+//     goes after the recording because the recording exists only in memory
+//     until it is saved, and a crash here must not cost it, while the plan is
+//     whole on disk in at least one place for the whole of its move. It goes
+//     before the pull request because it is quick, local and durable, and a
+//     push that hangs or fails must not hold it up or skip it; the push does
+//     not need it, because a branch run's plan is already in the commit being
+//     pushed. And it goes before the worktree is tidied because in a branch
+//     run it confirms the plan against the worktree promote committed it
+//     from, which step 4 removes: run after that, it would find no plan and
+//     leave the run's copy behind.
+//  3. Push the branch and open the draft pull request --pr asked for. It
 //     goes before the worktree is tidied only because the two are
 //     independent and this is the one a person is waiting on.
-//  3. Tidy a finished branch run's worktree. It goes after the recording
+//  4. Tidy a finished branch run's worktree. It goes after the recording
 //     because saving the recording must not depend on a directory this step
 //     removes, and it reads how the run ended: a paused or failed run's
 //     worktree is where the person finishes, so only a completed run's goes.
@@ -466,6 +477,7 @@ func afterCompletion(ctx context.Context, u *ui, plan *runPlan, view *outcomeVie
 	} else if path != "" {
 		u.say("  recording saved to %s", path)
 	}
+	archivePlan(u, *view)
 	plan.publishRun(ctx, u, view)
 	plan.finishRun(ctx, *view)
 }
