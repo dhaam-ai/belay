@@ -291,3 +291,79 @@ func TestABranchRunsPlanIsInItsCommitAndLeavesTheRunDirectory(t *testing.T) {
 		t.Errorf("the plan was written into the user's checkout (stat error %v)", err)
 	}
 }
+
+// TestDryRunSaysWhatItWouldWriteIntoTheRepository: a run writes into the
+// person's repository at two moments — .belay/.gitignore when it starts,
+// the plan when it finishes — and a dry run is where they find out before
+// anything happens. Each line appears only when it is true: no plan line
+// with plan.archive off, and no .gitignore line once there is one.
+func TestDryRunSaysWhatItWouldWriteIntoTheRepository(t *testing.T) {
+	for _, tc := range []struct {
+		name          string
+		config        string
+		gitignore     bool
+		wantPlan      bool
+		wantGitignore bool
+	}{
+		{name: "the defaults", wantPlan: true, wantGitignore: true},
+		{name: "plan.archive off", config: "version: 1\nplan:\n  archive: false\n", wantGitignore: true},
+		{name: "a .gitignore already there", gitignore: true, wantPlan: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ws := goWorkspace(t)
+			if tc.config != "" {
+				writeConfig(t, ws, tc.config)
+			}
+			if tc.gitignore {
+				if err := os.MkdirAll(filepath.Join(ws, ".belay"), 0o750); err != nil {
+					t.Fatalf("mkdir: %v", err)
+				}
+				if err := os.WriteFile(filepath.Join(ws, ".belay", ".gitignore"), []byte("*\n"), 0o600); err != nil {
+					t.Fatalf("write: %v", err)
+				}
+			}
+
+			out, _, err := runCLI(t, "--dry-run", "run", "--workspace", ws, "add tests")
+			if err != nil {
+				t.Fatalf("belay --dry-run run: %v\n%s", err, out)
+			}
+
+			plan := filepath.Join(ws, "docs", "plans", "<run-id>-add-tests.md")
+			if got := strings.Contains(out, plan); got != tc.wantPlan {
+				t.Errorf("the dry run mentions %s: %v, want %v\n%s", plan, got, tc.wantPlan, out)
+			}
+			gitignore := filepath.Join(ws, ".belay", ".gitignore")
+			if got := strings.Contains(out, gitignore); got != tc.wantGitignore {
+				t.Errorf("the dry run mentions %s: %v, want %v\n%s", gitignore, got, tc.wantGitignore, out)
+			}
+			if _, err := os.Stat(filepath.Join(ws, "docs")); !os.IsNotExist(err) {
+				t.Errorf("docs/ exists after a dry run (stat error %v); a dry run creates nothing", err)
+			}
+		})
+	}
+}
+
+// TestTheStartBannerSaysWhereThePlanWillGo: the lines a run prints before it
+// spends anything name where its plan will end up, in the repository or in
+// the run's commit, so a file appearing in docs/plans is never a surprise.
+func TestTheStartBannerSaysWhereThePlanWillGo(t *testing.T) {
+	ws := goWorkspace(t)
+	var out bytes.Buffer
+	u := &ui{out: &out, err: &out}
+	plan, err := resolve(resolveRequest{workspace: ws, logger: quietLogger()})
+	if err != nil {
+		t.Fatalf("resolve: %v", err)
+	}
+	const runID = "20260101T000000Z-c0ffee000000"
+	layout, err := state.NewLayout(ws, runID)
+	if err != nil {
+		t.Fatalf("NewLayout: %v", err)
+	}
+
+	announceStart(u, plan, layout, "add tests")
+
+	want := "plan:   moved to " + filepath.Join(ws, "docs", "plans", runID+"-add-tests.md") + " when the run finishes"
+	if !strings.Contains(out.String(), want) {
+		t.Errorf("the start banner does not say %q:\n%s", want, out.String())
+	}
+}

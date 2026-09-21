@@ -237,6 +237,8 @@ the route it would take
 what it would create
   /path/to/your/project/.belay/runs/<run-id>
   holding manifest.json, state.json, journal.ndjson and the plan
+  /path/to/your/project/.belay/.gitignore, so git never offers any of that for a commit
+  the plan, moved to /path/to/your/project/docs/plans/<run-id>-add-a-json-flag-to-the-cli-output.md when the run finishes
 
 Nothing was created and nothing was spent. Run the same command without --dry-run to start.
 ```

@@ -4,9 +4,11 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io/fs"
 	"log/slog"
 	"os"
 	"os/signal"
+	"path"
 	"path/filepath"
 	"slices"
 	"strconv"
@@ -19,6 +21,7 @@ import (
 	"github.com/dhaam-ai/belay/internal/config"
 	"github.com/dhaam-ai/belay/internal/detect"
 	"github.com/dhaam-ai/belay/internal/graph"
+	"github.com/dhaam-ai/belay/internal/planarchive"
 	"github.com/dhaam-ai/belay/internal/state"
 	"github.com/dhaam-ai/belay/pkg/belay"
 )
@@ -537,6 +540,9 @@ func announceStart(u *ui, plan *runPlan, layout state.Layout, want string) {
 	u.say("")
 	u.say("run %s", layout.RunID())
 	u.say("  state:  %s", layout.RunDir())
+	if where := plan.planGoesTo(layout.RunID(), want); where != "" {
+		u.say("  plan:   %s", where)
+	}
 	if plan.output.Branched() {
 		u.say("  branch: %s, from %s", plan.output.Branch, shortCommit(plan.output.Base))
 		u.say("  tree:   %s", plan.output.WorkTree)
@@ -915,7 +921,7 @@ func dryRunSections(u *ui, plan *runPlan, want, resuming string) []dryRunSection
 		dryRunSpend(u, plan),
 		dryRunSettings(plan),
 		dryRunRoute(plan),
-		dryRunCreates(plan),
+		dryRunCreates(plan, want, resuming != ""),
 	)
 	for _, w := range plan.warnings {
 		sections = append(sections, dryRunSection{title: "worth knowing", lines: []string{w}})
@@ -974,11 +980,45 @@ func dryRunRoute(plan *runPlan) dryRunSection {
 }
 
 // dryRunCreates is what a real run would write, and where.
-func dryRunCreates(plan *runPlan) dryRunSection {
-	return dryRunSection{title: "what it would create", lines: []string{
+//
+// Two of those writes land in the person's repository rather than in belay's
+// run directory, so each is named when it would happen: .belay/.gitignore,
+// which only the first run in a repository writes, and the plan, which a
+// finished run moves out beside its code. A resume creates neither — the
+// run already exists, and its plan goes where the run said when it started —
+// so neither is listed for one.
+func dryRunCreates(plan *runPlan, want string, resuming bool) dryRunSection {
+	lines := []string{
 		filepath.Join(plan.workspace, ".belay", "runs", "<run-id>"),
 		"holding manifest.json, state.json, journal.ndjson and the plan",
-	}}
+	}
+	if resuming {
+		return dryRunSection{title: "what it would create", lines: lines}
+	}
+	gitignore := filepath.Join(plan.workspace, ".belay", ".gitignore")
+	if _, err := os.Lstat(gitignore); errors.Is(err, fs.ErrNotExist) {
+		lines = append(lines, gitignore+", so git never offers any of that for a commit")
+	}
+	if where := plan.planGoesTo("<run-id>", want); where != "" {
+		lines = append(lines, "the plan, "+where)
+	}
+	return dryRunSection{title: "what it would create", lines: lines}
+}
+
+// planGoesTo says where a new run's plan ends up, or "" when plan.archive is
+// off: moved into the workspace for a run in place, committed with the change
+// for a run on a branch. It reads the settings NewManifest pins when the run
+// is created, cleaned the way it cleans them, so the promise made before the
+// run is the one the run keeps.
+func (p *runPlan) planGoesTo(runID, goal string) string {
+	if !p.config.Plan.Archive {
+		return ""
+	}
+	rel := planarchive.Rel(path.Clean(p.config.Plan.ArchiveDir), runID, goal)
+	if p.output.Branched() {
+		return "committed with the change, at " + rel
+	}
+	return "moved to " + filepath.Join(p.workspace, filepath.FromSlash(rel)) + " when the run finishes"
 }
 
 // budgetCeiling renders the budget in the two units it is capped in.
