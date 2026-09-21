@@ -141,9 +141,14 @@ belay works on any Go, Node, or Python project with tests. It will auto-detect y
 
 ```bash
 cd /path/to/your/project
-# Make sure `git status` shows no uncommitted changes,
-# because belay will write files to disk if you approve the plan.
 ```
+
+In a git repository, belay works on its own branch — `belay/<run-id>`, in its
+own worktree — and commits once after the quality gate passes. Your checkout
+is never edited, so uncommitted work in it is safe; it is also not part of the
+run, which starts from the commit you are on. Outside a git repository belay
+edits the workspace directly. It says which it is doing before it spends
+anything, and `belay --dry-run run` says it without creating anything.
 
 ### 2. Create a belay.yaml
 
@@ -416,7 +421,7 @@ belay is **early but real**. Use it for:
 
 3. **Unix only**: belay's process runner, linter launcher, and workspace isolation use unix-specific system calls. Windows and macOS 11 (Monterey) are not supported. (Contributions welcome.)
 
-4. **Fanout does not work yet**: The `fanout` and `join` nodes exist and are unit-tested, but no run reaches them. No step in belay's graph leads to `fanout`, so setting `fanout.enabled: true` changes nothing a run does. `belay run` also sets up no isolator, which `fanout` needs. The `fanout` node only prepares candidates: it creates one workspace per candidate and runs none of them, so no candidate ever has test results. `join` picks a winner among the candidates whose tests passed and copies nothing back, so promoting the winner would be manual (ADR-0004). Running candidates is planned, and ADR-0019 is reserved for it.
+4. **Fanout does not work yet**: The `fanout` and `join` nodes exist and are unit-tested, but no run reaches them. No step in belay's graph leads to `fanout`, so setting `fanout.enabled: true` changes nothing a run does. `belay run` builds the isolator `fanout` would use — a git worktree per candidate for a branch run, a directory copy otherwise — but nothing reaches it. The `fanout` node only prepares candidates: it creates one workspace per candidate and runs none of them, so no candidate ever has test results. `join` picks a winner among the candidates whose tests passed and routes it to `promote`, which merges that candidate's branch into the run's own (ADR-0012); with `fanout.isolator: dircopy`, or an in-place run, there is no branch to merge and promoting the winner is still manual (ADR-0004). Running candidates is planned, and ADR-0019 is reserved for it.
 
 5. **No published fix rate**: belay has a test harness (`test/fixrate`) that measures "what percentage of runs result in code that passes tests and linting?" but no published number yet. We are working on benchmarks. Do not rely on any claimed success rate.
 
@@ -448,7 +453,7 @@ See `docs/adr/0009-record-replay-cassettes.md` for the cassette format.
 
 ### Roadmap
 
-- [ ] Run fanout candidates (ADR-0019) and promote the winner automatically; `join` already selects one
+- [ ] Run fanout candidates (ADR-0019); `join` already selects one and `promote` already merges it
 - [ ] Windows and macOS 11 support (process isolation)
 - [ ] Codex and Gemini backends (implement `AgentBackend` for each)
 - [ ] Published fix-rate benchmarks
