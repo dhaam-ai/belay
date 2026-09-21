@@ -63,5 +63,9 @@
     "work_tree": "",
     "prefix": "",
     "pull_request": false
+  },
+  "archived_plan": {
+    "dir": "docs/plans",
+    "path": ""
   }
 }

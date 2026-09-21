@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"path"
 	"path/filepath"
 	"regexp"
 	"sort"
@@ -235,6 +236,51 @@ type Manifest struct {
 	// before this field existed decodes as. Set it with SetOutput, which
 	// also records the capability a branch run depends on.
 	Output Output `json:"output"`
+	// ArchivedPlan is where the run files its approved plan once it
+	// completes: the directory NewManifest pins from plan.archive and
+	// plan.archive_dir, and, once the plan is there, the file itself.
+	ArchivedPlan ArchivedPlan `json:"archived_plan"`
+}
+
+// ArchivedPlan is where a run files its approved plan once it completes
+// (ADR-0016): the decision, made once when the run is created, and the
+// record of where the plan went.
+//
+// Both paths are slash-separated and relative to the tree the run's nodes
+// work in: the workspace for a run that edits it in place, or, for a run on
+// a branch, the run's worktree at the run's prefix — which is the same path
+// in the person's own checkout once they take the branch. They are never
+// absolute, because a repository can be moved or cloned and the record
+// should still name the file.
+//
+// It is not a control field, and names no capability (ADR-0011). An older
+// belay that dropped Dir would leave the plan in the run directory, where it
+// already is, and change nothing about the code the run delivers; one that
+// dropped Path would lose only the pointer, and no belay rewrites the
+// manifest of a run that has completed, which is the only kind that has a
+// Path. Neither loss changes what a run does, which is the test for a
+// capability.
+type ArchivedPlan struct {
+	// Dir is where the run files its plan, as plan.archive_dir said when
+	// the run was created, cleaned. Empty when plan.archive was false then,
+	// or when the run was created by a belay that did not archive plans:
+	// either way the run was never told its plan would move, so it does
+	// not.
+	Dir string `json:"dir"`
+	// Path is the archived plan itself, Dir joined with the file's name,
+	// recorded once the plan is there and before the copy in the run's
+	// artifacts is removed. Empty until then. internal/planarchive is the
+	// only writer.
+	Path string `json:"path"`
+}
+
+// archivedPlanFor pins what cfg says about a new run's plan: the directory
+// it will be filed in, cleaned, or nothing when archival is off.
+func archivedPlanFor(cfg config.Plan) ArchivedPlan {
+	if !cfg.Archive {
+		return ArchivedPlan{}
+	}
+	return ArchivedPlan{Dir: path.Clean(cfg.ArchiveDir)}
 }
 
 // OutputMode names one way a run delivers its result. It is deliberately
@@ -328,7 +374,10 @@ func (m *Manifest) SetOutput(o Output) {
 
 // NewManifest returns the manifest for a freshly started run: SchemaVersion
 // current, Requires empty, Status running, Step zero, CreatedAt and
-// UpdatedAt both now, and Budget seeded from cfg.Budget.MaxUSD.
+// UpdatedAt both now, Budget seeded from cfg.Budget.MaxUSD, and
+// ArchivedPlan.Dir pinned from cfg.Plan. Pinning here, rather than in each
+// caller, is what makes every way of creating a run make the same promise
+// about its plan.
 //
 // cfg's Snapshot is passed through RedactSnapshot before being embedded.
 // internal/config's own documentation states that a configuration file
@@ -362,6 +411,7 @@ func NewManifest(now time.Time, runID, workspace, goal string, cfg config.Config
 			Model:   cfg.Agent.Model,
 			Mode:    string(cfg.Agent.Mode),
 		},
+		ArchivedPlan: archivedPlanFor(cfg.Plan),
 	}
 }
 

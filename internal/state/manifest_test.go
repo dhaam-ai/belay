@@ -484,7 +484,7 @@ func TestManifest_JSONKeySetMatchesSpec(t *testing.T) {
 	want := []string{
 		"schema_version", "requires", "run_id", "created_at", "updated_at", "workspace", "goal",
 		"status", "current_node", "step", "config_digest", "config_snapshot", "budget", "agent",
-		"output",
+		"output", "archived_plan",
 	}
 	assertExactJSONKeys(t, m, want)
 	assertExactJSONKeys(t, m.Budget, []string{"limit_usd", "spent_usd", "tokens_in", "tokens_out", "estimated"})
@@ -492,6 +492,53 @@ func TestManifest_JSONKeySetMatchesSpec(t *testing.T) {
 	assertExactJSONKeys(t, m.Output, []string{
 		"mode", "repo", "branch", "base", "base_ref", "work_tree", "prefix", "pull_request",
 	})
+	assertExactJSONKeys(t, m.ArchivedPlan, []string{"dir", "path"})
+}
+
+// TestNewManifestPinsWhereTheRunFilesItsPlan is the decision a run makes once,
+// when it is created, about what becomes of its plan: the directory, or no
+// directory when archival is off. A resumed run files its plan where the run
+// announced it would when it started, whatever belay.yaml says by then, and
+// the promote node of a branch run writes it from this pin, so a re-run of
+// promote after belay.yaml changed cannot put a second copy somewhere else.
+func TestNewManifestPinsWhereTheRunFilesItsPlan(t *testing.T) {
+	tests := []struct {
+		name string
+		plan config.Plan
+		want ArchivedPlan
+	}{
+		{name: "the default", plan: config.Plan{Archive: true, ArchiveDir: "docs/plans"}, want: ArchivedPlan{Dir: "docs/plans"}},
+		{name: "archival off pins nothing", plan: config.Plan{Archive: false, ArchiveDir: "docs/plans"}, want: ArchivedPlan{}},
+		{name: "a trailing slash is cleaned off", plan: config.Plan{Archive: true, ArchiveDir: "docs/plans/"}, want: ArchivedPlan{Dir: "docs/plans"}},
+		{name: "a leading ./ is cleaned off", plan: config.Plan{Archive: true, ArchiveDir: "./notes"}, want: ArchivedPlan{Dir: "notes"}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := config.Default()
+			cfg.Plan = tt.plan
+			m := NewManifest(time.Now(), "run-1", "/work", "goal", cfg)
+			if diff := cmp.Diff(tt.want, m.ArchivedPlan); diff != "" {
+				t.Errorf("ArchivedPlan (-want +got):\n%s", diff)
+			}
+		})
+	}
+}
+
+// A run started by a belay that did not archive plans was never told its
+// plan would move, so it must not start moving now: its manifest has no
+// archived_plan block, which decodes as no directory.
+func TestManifestWrittenBeforeArchivalFilesNothing(t *testing.T) {
+	raw, err := os.ReadFile(filepath.Join("testdata", "manifest-before-output.json")) //nolint:gosec // fixed testdata path
+	if err != nil {
+		t.Fatalf("read fixture: %v", err)
+	}
+	m, err := decodeManifest(raw)
+	if err != nil {
+		t.Fatalf("decodeManifest: %v", err)
+	}
+	if diff := cmp.Diff(ArchivedPlan{}, m.ArchivedPlan); diff != "" {
+		t.Errorf("ArchivedPlan of a manifest written before archival (-want +got):\n%s", diff)
+	}
 }
 
 // TestOutput_Branched is the one question every reader of an Output asks,
