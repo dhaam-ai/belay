@@ -52,30 +52,45 @@ func assertFits(t *testing.T, m Model, width, height int) {
 // one cell too wide wraps, and every line below it lands one row lower than
 // the renderer thinks it is.
 func TestViewFitsEveryTerminalSize(t *testing.T) {
-	for _, plan := range []string{canonical, wide} {
+	for name, plan := range map[string]string{"canonical": canonical, "wide": wide} {
 		opts := review()
 		opts.Plan = []byte(plan)
-		m := New(opts)
-		for width := 1; width <= 200; width++ {
-			for height := 1; height <= 60; height++ {
-				m = send(t, m, tea.WindowSizeMsg{Width: width, Height: height})
-				assertFits(t, m, width, height)
-			}
-		}
-		// And with the step editor open, which is drawn in the step's place,
-		// and with the new-plan box and its explanation, which take the foot
-		// of the page; both follow the window's size.
-		for _, open := range [][]string{{"e"}, {"r"}} {
-			m := keys(t, New(opts), open...)
-			m = typeText(t, m, "some words typed into the box")
-			for width := 1; width <= 200; width += 3 {
+		t.Run(name+" plan", func(t *testing.T) {
+			t.Parallel()
+			m := New(opts)
+			for width := 1; width <= 200; width++ {
 				for height := 1; height <= 60; height++ {
 					m = send(t, m, tea.WindowSizeMsg{Width: width, Height: height})
 					assertFits(t, m, width, height)
 				}
 			}
+		})
+		// And with the step editor open, which is drawn in the step's place,
+		// and with the new-plan box and its explanation, which take the foot
+		// of the page; both follow the window's size. Every size up to
+		// 50x20, where anything that overflows overflows first, and a sample
+		// of the larger ones.
+		for key, what := range map[string]string{"e": "editor", "r": "new-plan box"} {
+			t.Run(name+" plan with the "+what+" open", func(t *testing.T) {
+				t.Parallel()
+				m := typeText(t, keys(t, New(opts), key), "some words typed into the box")
+				for width := 1; width <= 200; width = next(width, 50, 17) {
+					for height := 1; height <= 60; height = next(height, 20, 8) {
+						m = send(t, m, tea.WindowSizeMsg{Width: width, Height: height})
+						assertFits(t, m, width, height)
+					}
+				}
+			})
 		}
 	}
+}
+
+// next steps n by one up to dense, and by stride after it.
+func next(n, dense, stride int) int {
+	if n < dense {
+		return n + 1
+	}
+	return n + stride
 }
 
 // TestSmallTerminalsSayWhatToDo: below 40 by 10 there is no room to read a
