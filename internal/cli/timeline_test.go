@@ -1625,3 +1625,39 @@ func TestTimelineAGatePauseAndItsResumeAreOneVisit(t *testing.T) {
 		}
 	})
 }
+
+// TestTimelineDoesNotNumberAHistoryItCannotGroup: the numbers in "fix #2/3"
+// are the visits journal.Visits counts, which are the numbers a person types
+// into `belay fork --visit`. A journal whose executions do not pair up has no
+// visits journal.Visits will vouch for, so the timeline still shows every row
+// it can read but numbers none of them, and claims no loop — the way it
+// already declines to claim a status for such a journal.
+func TestTimelineDoesNotNumberAHistoryItCannotGroup(t *testing.T) {
+	t.Parallel()
+
+	b := newTimelineBuilder().run(journal.EventRunStarted).
+		node(timelineNodeSpec{node: "test", status: journal.StatusOK, durationMS: 1000, next: "fix"}).
+		// fix's node_finished is missing: a second node_started opens over
+		// the first, which no belay writes.
+		openNode("fix", 1).
+		node(timelineNodeSpec{node: "test", status: journal.StatusOK, durationMS: 1000, next: "review"})
+	if _, err := journal.Visits(b.records); !errors.Is(err, journal.ErrCorruptJournal) {
+		t.Fatalf("fixture: journal.Visits() error = %v, want ErrCorruptJournal", err)
+	}
+
+	tl := BuildTimeline(timelineDemoSelection(), nil, timelineResult(b.records, false))
+
+	if len(tl.Entries) != 2 {
+		t.Fatalf("timeline has %d rows, want the 2 it can read", len(tl.Entries))
+	}
+	for _, e := range tl.Entries {
+		if e.Iteration != 0 || e.Iterations != 0 {
+			t.Errorf("entry %d is %s #%d/%d, want it unnumbered: no visit count can be trusted here",
+				e.Index, e.Node, e.Iteration, e.Iterations)
+		}
+	}
+	if len(tl.Loops) != 0 || tl.Totals.LoopFirstIndex != 0 {
+		t.Errorf("Loops = %v, loop span from %d; a history belay cannot group has no loop it can claim",
+			tl.Loops, tl.Totals.LoopFirstIndex)
+	}
+}

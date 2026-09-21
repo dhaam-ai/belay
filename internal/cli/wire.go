@@ -154,6 +154,10 @@ func (p *runPlan) options(store *state.Store) graph.Options {
 		Reviewer: p.reviewer,
 		Isolator: p.isolator(store),
 		VCS:      p.vcs(),
+		// Before each node the dispatcher snapshots the blackboard; this puts
+		// a fingerprint of the workspace beside it, so a fork of the run can
+		// tell whether the files have changed since the visit it re-runs.
+		Fingerprint: surveyWorkspace,
 	}
 }
 
@@ -204,6 +208,18 @@ func (p *runPlan) isolator(store *state.Store) belay.Isolator {
 		return nil
 	}
 	return iso
+}
+
+// surveyWorkspace is graph.Options.Fingerprint for every run belay starts or
+// resumes: dircopy's survey of the tree a copy of the workspace would hold,
+// with a copy's default skip list, so belay's own writes under .belay — the
+// run's journal among them — never read as a change to the person's files.
+func surveyWorkspace(ctx context.Context, dir string) (string, error) {
+	survey, err := dircopy.SurveyTree(ctx, dir, dircopy.DefaultSkip())
+	if err != nil {
+		return "", err
+	}
+	return survey.Digest, nil
 }
 
 // gateName describes the quality gate this plan would run, in words.

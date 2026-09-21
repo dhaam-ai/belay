@@ -143,7 +143,10 @@ func TestDurability_CrashBetweenPatchAndJournal_IsNotDoubleApplied(t *testing.T)
 	}
 	// The re-run observed the state its crashed attempt had already written:
 	// re-running is safe precisely because it is re-computing from durable
-	// truth, not from a blank slate.
+	// truth, not from a blank slate. It sees that attempt's patch only
+	// because this disk holds no blackboard snapshot, as a crash recorded by
+	// a belay that took none would leave it; a run this belay records hands
+	// the re-run the snapshot taken before its first attempt (state.Snapshot).
 	if code.seenCode[0].SessionID != "sess-1" || len(code.seenCode[0].ChangedFiles) != 2 {
 		t.Errorf("re-run observed Code = %+v, want the crashed attempt's already-durable patch", code.seenCode[0])
 	}
@@ -292,6 +295,17 @@ func TestDurability_WriteOrderingFailureAfterTheFirstWriteNeverSkipsANode(t *tes
 			Patch: state.Patch{Code: &state.Code{SessionID: "should-never-land-without-its-journal-record"}}},
 	}}}
 	d := h.dispatcher(plan)
+
+	// The dispatcher snapshots the blackboard into snapshots/ after the
+	// node_started and before the node runs (state.Snapshot). That is a
+	// durable write of its own, and with the run directory read-only it
+	// would be the one to fail, before the node ran — leaving the ordering
+	// this test exists to check untested. The directory is created first,
+	// and stays writable, so the fault lands where it always has: on the
+	// first write after the node returns.
+	if err := os.MkdirAll(h.layout.SnapshotsDir(), 0o750); err != nil {
+		t.Fatalf("MkdirAll(snapshots) error = %v", err)
+	}
 
 	// #nosec G302 -- this chmods a directory, not a data file: it needs the
 	// execute bit to stay traversable, and the whole point of this test is

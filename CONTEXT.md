@@ -62,6 +62,21 @@ loop's count of repairs (`state.Fix.Attempts`, "fix attempt 2 of 3") is a
 different number.
 _Avoid_: retry (a retry sounds like a new request; an attempt re-runs the same visit)
 
+**Visit**:
+One pass of a run through a node, from the execution that begins it to the last
+execution that takes it up again. A gate that paused for a person and ran again when
+they resumed, or an attempt a crash cut short and its re-run, is one visit; the test
+node's next round of the fix loop is a second. `belay timeline` numbers visits
+("test #2/3"), and `belay fork --visit` will take the same numbers.
+_Avoid_: execution (one run of a node; a visit can hold several)
+
+**Snapshot**:
+A write-once copy of the blackboard as it stood before a node execution, kept under
+`snapshots/` in the run directory. A node re-run after a crash is given it instead of
+`state.json`, and a fork will start from the snapshot of the visit it re-runs.
+_Avoid_: checkpoint, backup, config snapshot (the manifest's record of the settings a
+run started with)
+
 **Fork**:
 A new run, with its own ID, that re-runs one node of an existing run from the
 blackboard as it stood before that node, and never writes to the source run. The

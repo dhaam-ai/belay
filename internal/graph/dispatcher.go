@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io/fs"
 	"log/slog"
 	"strings"
 	"time"
@@ -165,6 +166,39 @@ type Options struct {
 	// their help promises that Ctrl-C leaves a run `belay resume` picks up.
 	PauseOnCancel bool
 
+	// Fingerprint digests the workspace as it stands, and is recorded in the
+	// snapshot the dispatcher takes before a node execution (state.Snapshot).
+	// A fork compares it with the tree it is about to re-run in, to tell
+	// whether the files have changed since the visit it re-runs.
+	//
+	// It is called with the run's workspace directory once per snapshot, so
+	// at most once per node execution. A failure is logged and recorded as an
+	// empty digest, which a reader treats as unknown: the run itself never
+	// depends on the digest, so nothing about it is worth stopping a run for.
+	// Nil records no digest. It is a function rather than an import because
+	// the fingerprint that fits belongs to the isolator (dircopy.SurveyTree
+	// skips what a copy skips), and dircopy builds only on unix.
+	Fingerprint func(ctx context.Context, dir string) (string, error)
+
+	// PauseAfter, when above zero, pauses the run once this call has run that
+	// many nodes, before the next one starts, so Resume continues it from
+	// there. It is how a fork runs exactly one node: PauseAfter 1.
+	//
+	// It counts the node executions this call performs (Outcome.Steps), never
+	// the run's step count: a fork carries its source run's steps on, and a
+	// limit measured against them would stop a fork before it ran anything.
+	// It only ever stops a run that was going on to another node — after an
+	// execution whose Result the dispatcher accepted with StatusOK and a Next
+	// other than End. A node that fails, pauses, aborts or ends the run ends
+	// the call exactly as it would without the limit, and so does one that is
+	// interrupted, timed out or stopped by the budget.
+	//
+	// The pause is the one the caller asked for, so it exits ExitOK, like the
+	// approval gate's, and not ExitAborted like the dispatcher's own limits.
+	// Zero, the default, sets no limit; a negative value is refused by
+	// NewDispatcher.
+	PauseAfter int
+
 	// Adapters, passed through to every RunContext. Any may be nil when the
 	// configuration selects none; a node that needs a nil adapter is
 	// responsible for returning a clear error.
@@ -222,6 +256,29 @@ type Options struct {
 // run-level record written while a node_started is still open, so a terminal
 // node_finished is always appended before the run_completed, run_failed,
 // run_paused or run_aborted that ends the run.
+//
+// # Before the node runs: snapshot the blackboard
+//
+// Re-running a node after a crash is only safe if the re-run is given the
+// blackboard its crashed attempt was given. Patch first, journal second means
+// state.json may already hold that attempt's patch, and a node that computes
+// its patch from what it reads — fix counting its repairs — would count the
+// crashed attempt as well as its own. So before every execution at attempt 1
+// the dispatcher saves the blackboard it is about to hand the node as a
+// write-once snapshot, keyed on the execution's node_started Seq, and a re-run
+// at a later attempt is handed the snapshot of the attempt it repeats instead
+// of state.json (see blackboardFor, attemptOneSeq, and state.Snapshot, which
+// argues the design).
+//
+// A crash in an execution recorded by a belay that took no snapshots leaves
+// none to read. The re-run then takes one from state.json, which is what
+// every belay before snapshots did, and may count that attempt twice.
+//
+// The snapshot is written after the node_started and before the node runs.
+// The first makes its key durable before anything depends on it; the second
+// means a missing snapshot proves no attempt of the execution has run the
+// node, so state.json can still be trusted to hold the blackboard from before
+// it. A node whose snapshot cannot be saved is not run at all (see notRun).
 //
 // # Cancellation: end the run, or pause it
 //
@@ -292,6 +349,8 @@ type Dispatcher struct {
 	redact   func(string) string
 
 	pauseOnCancel bool
+	fingerprint   func(ctx context.Context, dir string) (string, error)
+	pauseAfter    int
 
 	agent    belay.AgentBackend
 	runner   belay.TestRunner
@@ -314,6 +373,10 @@ func NewDispatcher(opts Options) (*Dispatcher, error) {
 	if opts.Registry.Len() == 0 {
 		return nil, fmt.Errorf("%w: Registry has no nodes registered", ErrInvalidOptions)
 	}
+	if opts.PauseAfter < 0 {
+		return nil, fmt.Errorf("%w: PauseAfter is %d; it counts node executions, so it cannot be negative",
+			ErrInvalidOptions, opts.PauseAfter)
+	}
 
 	d := &Dispatcher{
 		store:    opts.Store,
@@ -324,6 +387,8 @@ func NewDispatcher(opts Options) (*Dispatcher, error) {
 		redact:   opts.Redact,
 
 		pauseOnCancel: opts.PauseOnCancel,
+		fingerprint:   opts.Fingerprint,
+		pauseAfter:    opts.PauseAfter,
 
 		agent:    opts.Agent,
 		runner:   opts.Runner,
@@ -427,7 +492,31 @@ func (d *Dispatcher) dispatch(ctx context.Context, resuming bool) (Outcome, erro
 		return out, err
 	}
 
-	return d.loop(ctx, jrnl, &man, ledger, start)
+	// A re-run at a later attempt is given the snapshot of the execution it
+	// repeats, found from the records as the crash left them, like start.
+	var repeats uint64
+	if start.Attempt > 1 {
+		repeats = attemptOneSeq(read.Records, start.Node)
+	}
+	return d.loop(ctx, jrnl, &man, ledger, start, repeats)
+}
+
+// attemptOneSeq returns the Seq of the node_started that began the execution
+// a re-run of node at a later attempt repeats: the last attempt-1
+// node_started for node in records. The attempts of one execution are
+// consecutive — a crash or a Ctrl-C re-runs the node at the next attempt
+// before any other node runs — so the last attempt 1 is theirs. For a gate
+// taken up again after a person acted, that is the execution after the
+// resume, not the start of the gate's visit.
+//
+// It returns 0 when records hold none, which no journal belay writes does.
+func attemptOneSeq(records []journal.Record, node string) uint64 {
+	for i := len(records) - 1; i >= 0; i-- {
+		if r := records[i]; r.Event == journal.EventNodeStarted && r.Node == node && r.Attempt == 1 {
+			return r.Seq
+		}
+	}
+	return 0
 }
 
 // heal repairs a journal whose final record shows the previous process died
@@ -698,9 +787,14 @@ func (d *Dispatcher) checkStartState(
 
 // loop executes nodes until the run ends. It is the body described by the
 // ordering contract on Dispatcher.
+//
+// repeats is the Seq of the attempt-1 node_started the first execution
+// repeats when it is a re-run at a later attempt (see attemptOneSeq), and is
+// otherwise unused: only the first execution of a dispatch can be a re-run,
+// since every node after it starts at attempt 1.
 func (d *Dispatcher) loop(
 	ctx context.Context, jrnl *journal.Journal, man *state.Manifest,
-	ledger *budget.Ledger, start journal.Result,
+	ledger *budget.Ledger, start journal.Result, repeats uint64,
 ) (Outcome, error) {
 	current, attempt, steps := start.Node, start.Attempt, 0
 
@@ -768,6 +862,24 @@ func (d *Dispatcher) loop(
 		// dispatcher logs after the node returns must not depend on what
 		// the node did to it.
 		logger := rc.Logger
+
+		// The blackboard the node is given: its own snapshot at attempt 1,
+		// and at a later attempt the snapshot of the attempt it repeats,
+		// never state.json, which may hold that attempt's patch.
+		key := started.Seq
+		if attempt > 1 {
+			if repeats == 0 {
+				logger.Warn("belay/graph: the journal does not show the attempt this re-run repeats; " +
+					"it is given state.json, which may already hold that attempt's patch")
+			} else {
+				key = repeats
+			}
+		}
+		view, err := d.blackboardFor(ctx, rc, key)
+		if err != nil {
+			return d.notRun(jrnl, ledger, current, attempt, steps, err)
+		}
+		rc.State = view
 		logger.Info("belay/graph: node started")
 
 		exec := d.execute(ctx, node, rc)
@@ -782,6 +894,19 @@ func (d *Dispatcher) loop(
 		}
 
 		current, attempt = exec.res.Next, 1
+
+		// Only here, where settle has accepted a StatusOK Result that goes on
+		// to another node: every other outcome has already returned, so the
+		// limit can never hide one (see Options.PauseAfter).
+		if d.pauseAfter > 0 && steps >= d.pauseAfter {
+			nodes := "nodes"
+			if steps == 1 {
+				nodes = "node"
+			}
+			return d.endRun(jrnl, man, ledger, journal.EventRunPaused, state.RunStatusPaused, ExitOK, current, steps,
+				fmt.Sprintf("paused before %q, as asked, after running %d %s; use `belay resume` to continue",
+					current, steps, nodes), nil)
+		}
 	}
 }
 
@@ -823,6 +948,86 @@ func (d *Dispatcher) runContext(
 		Output: man.Output,
 		VCS:    d.vcs,
 	}
+}
+
+// blackboardFor returns the blackboard the execution rc describes must be
+// given, and makes sure the snapshot it comes from is on disk before the node
+// runs (state.Snapshot).
+//
+// seq names the snapshot: the Seq of the node_started of the execution at
+// attempt 1. When that snapshot exists, an earlier attempt of the execution
+// took it, and its blackboard is the truth — state.json may already carry
+// the patch of the attempt that crashed. When it does not, no attempt has run
+// the node yet, because the snapshot is always written before the node runs:
+// state.json still holds the blackboard from before the execution, and it is
+// saved as the snapshot now.
+//
+// It is called after the execution's node_started is durable, so a snapshot
+// is never keyed on a Seq the journal could give out again, and before the
+// node runs, which is the other half of the invariant above.
+func (d *Dispatcher) blackboardFor(ctx context.Context, rc *RunContext, seq uint64) (state.State, error) {
+	path, err := rc.Layout.SnapshotPath(seq, rc.NodeName)
+	if err != nil {
+		return state.State{}, err
+	}
+	snap, err := state.LoadSnapshot(path)
+	switch {
+	case err == nil:
+		return snap.State, nil
+	case !errors.Is(err, fs.ErrNotExist):
+		return state.State{}, err
+	}
+
+	if _, err := d.store.SaveSnapshotOnce(state.Snapshot{
+		RunID: rc.RunID, Node: rc.NodeName, Seq: seq, Step: rc.Step,
+		TakenAt: d.now().UTC(), WorkspaceDigest: d.workspaceDigest(ctx, rc),
+		State: rc.State,
+	}); err != nil {
+		return state.State{}, err
+	}
+	return rc.State, nil
+}
+
+// workspaceDigest fingerprints rc's workspace for a snapshot, or returns ""
+// when there is no Options.Fingerprint or it fails. See Options.Fingerprint
+// for why a failure is only logged.
+func (d *Dispatcher) workspaceDigest(ctx context.Context, rc *RunContext) string {
+	if d.fingerprint == nil {
+		return ""
+	}
+	digest, err := d.fingerprint(ctx, rc.Workspace)
+	if err != nil {
+		rc.Logger.Warn("belay/graph: could not fingerprint the workspace; this snapshot records no digest",
+			slog.String("error", err.Error()))
+		return ""
+	}
+	return digest
+}
+
+// notRun ends this dispatch without running node, whose snapshot could not be
+// taken (see blackboardFor), and closes its attempt as one to run again.
+//
+// A node run without its snapshot is one a crash could not be recovered from
+// correctly, so it is not run at all. The attempt is closed with the record
+// heal writes for one a crash left open (interruptedAttempt), which Resume
+// re-runs at the next attempt — but charged nothing, because nothing ran.
+// Leaving it open for heal to close would work too, and would charge it the
+// costliest step the run has paid for (interruptedCharge), for a node that
+// never started: a run whose disk keeps refusing the snapshot would spend its
+// ceiling on nothing, one resume at a time.
+//
+// The manifest is left as it was, as it is for the loop's other failures to
+// persist. If even the closing record cannot be written, the attempt stays
+// open and heal closes it later.
+func (d *Dispatcher) notRun(
+	jrnl *journal.Journal, ledger *budget.Ledger, node string, attempt, steps int, cause error,
+) (Outcome, error) {
+	err := fmt.Errorf("graph: could not save the blackboard snapshot %q needs before it runs: %w", node, cause)
+	note := d.note(err.Error()) + "; the node did not run, and resuming runs it again"
+	if _, jerr := jrnl.Append(interruptedAttempt(node, attempt, 0, belay.Usage{}, note)); jerr != nil {
+		err = errors.Join(err, fmt.Errorf("graph: journal node_finished for %q: %w", node, jerr))
+	}
+	return Outcome{ExitCode: ExitFailed, Node: node, Steps: steps, Usage: ledger.Total(), Note: note}, err
 }
 
 // nodeOutcome is one node execution as the dispatcher observed it, before any
