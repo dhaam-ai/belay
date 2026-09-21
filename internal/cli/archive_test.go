@@ -184,7 +184,7 @@ func TestAPlanThatCannotMoveStaysAndBelaySaysWhy(t *testing.T) {
 	if _, err := os.Stat(source); err != nil {
 		t.Errorf("the run's plan is gone although it could not be moved: %v", err)
 	}
-	for _, want := range []string{"plan stays", source, dest} {
+	for _, want := range []string{"plan stays", source, dest, "belay plan --archive " + store.Layout().RunID()} {
 		if !strings.Contains(stderr, want) {
 			t.Errorf("stderr does not mention %q:\n%s", want, stderr)
 		}
