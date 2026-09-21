@@ -141,8 +141,9 @@ func TestDigestChangesWhenAnyFieldChanges(t *testing.T) {
 		{"budget.on_exceed", func(c *Config) { c.Budget.OnExceed = OnExceedWarn }},
 		{"fanout.enabled", func(c *Config) { c.Fanout.Enabled = true }},
 		{"fanout.candidates", func(c *Config) { c.Fanout.Candidates = 4 }},
-		{"fanout.isolator", func(c *Config) { c.Fanout.Isolator = "worktree" }},
+		{"fanout.isolator", func(c *Config) { c.Fanout.Isolator = IsolatorWorktree }},
 		{"fanout.select", func(c *Config) { c.Fanout.Select = SelectFastest }},
+		{"output.mode", func(c *Config) { c.Output.Mode = OutputBranch }},
 	}
 
 	base := Default().Digest()

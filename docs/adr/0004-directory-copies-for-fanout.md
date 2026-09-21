@@ -1,7 +1,11 @@
 # ADR-0004: Plain Directory Copies for Fanout Isolation, Behind an Isolator Interface
 
 ## Status
-Accepted
+Superseded by [ADR-0012](0012-git-native-run-output.md) for git targets
+
+> **Note (2026-09-20).** ADR-0012 reverses this decision for targets that are git working trees: a fanout candidate there is a git worktree on a branch of its own, and the winner is delivered by merging that branch. What forced it was not the disk cost this ADR accepted but the manual merge it accepted alongside it. Once a run's own result goes onto a branch and is committed, a candidate in a directory copy has no branch and no commit, so there is nothing to merge and nothing to deliver — the isolation and the promotion stopped being separable choices.
+>
+> This ADR's other half still stands, and dircopy is still shipped. A target that is not a git working tree cannot have a worktree, and belay is not only for git repositories: `fanout.isolator: auto` picks `dircopy` for exactly those, and `dircopy` remains selectable everywhere. What ADR-0012 corrects is the "nearly free" claim below: a worktree shares the object database, so it is cheap in *history*, but it still writes a full checkout of the tree.
 
 ## Context
 When fanout spawns N candidates, each must work in isolation so they don't interfere with each other's file mutations (writes to go.mod, package.json, source files, etc.). How do we isolate?

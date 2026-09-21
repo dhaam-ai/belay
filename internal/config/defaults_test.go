@@ -68,8 +68,9 @@ func TestDefaultFields(t *testing.T) {
 		{"budget.on_exceed", c.Budget.OnExceed, OnExceedAbort},
 		{"fanout.enabled", c.Fanout.Enabled, false},
 		{"fanout.candidates", c.Fanout.Candidates, 3},
-		{"fanout.isolator", c.Fanout.Isolator, "dircopy"},
+		{"fanout.isolator", c.Fanout.Isolator, IsolatorAuto},
 		{"fanout.select", c.Fanout.Select, SelectFewestIssues},
+		{"output.mode", c.Output.Mode, OutputAuto},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

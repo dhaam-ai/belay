@@ -332,6 +332,83 @@ The run has ended, and `belay resume` will not continue it. Change belay.yaml or
 - Fix the YAML syntax or values and retry
 - Common mistakes: wrong agent.backend name, fail_on not in [info, minor, major, critical, blocker], budget.max_usd as a string instead of a number
 
+## A Run Paused at `promote`
+
+**Symptom**: The run stops with `belay paused ... and is waiting for you.`, `where: promote`, and a note naming files that conflict between a fanout candidate's branch and the run's own.
+
+**Cause**: belay merges a fanout winner into the run's branch with a real merge, and two lines of work changed the same lines. Only a person can say what to keep, so belay pauses rather than guessing or failing — a failed run cannot be resumed, and this one has already been paid for.
+
+**Diagnosis**:
+1. The note names the conflicting files, the candidate's branch and the run's worktree
+2. `belay timeline <run-id>` shows the same note with the rest of the run
+
+**Remedy**:
+- `cd` to the run's worktree (the note names it), run `git merge <candidate-branch>`, resolve the conflicts and commit
+- Then `belay resume <run-id>`. promote asks the repository what is already merged, finds your merge, and finishes
+- If you stop part way — conflicts resolved, nothing committed — resuming pauses again and says so. `git status`, `git commit`, then resume
+
+## A Run Paused Because Its Worktree Has Uncommitted Changes
+
+**Symptom**: A branch run pauses at `promote` with a note saying the branch "has changes belay did not commit".
+
+**Cause**: Something changed files in the run's worktree that belay did not make, usually a merge finished part way by hand. belay will not sweep them into its own commit.
+
+**Remedy**: `cd` to the run's worktree, `git status` to see what is uncommitted, `git commit` what belongs, then `belay resume <run-id>`.
+
+## `belay resume` Says the Run's Worktree Is Gone
+
+**Symptom**: `belay resume` refuses with `this run works in its own git worktree at ..., and that worktree is gone.`
+
+**Cause**: The directory was deleted, or the whole `.belay/runs/<run-id>` directory was removed. Everything the run committed is still on its branch; only the tree it was working in is missing.
+
+**Remedy**:
+- Recreate it with the command the refusal prints: `git -C <repo> worktree add <path> belay/<run-id>`, then resume
+- Or take what you need from the branch and start a fresh run: `git log -p <base>..belay/<run-id>`
+- If the worktree is there but on another branch, put it back with `git -C <worktree> switch belay/<run-id>`
+
+## belay Is Editing the Checkout Instead of Working on a Branch
+
+**Symptom**: `belay run` says `belay is editing this workspace directly: ...` and your files change during the run.
+
+**Cause**: `output.mode: auto` chose in-place editing. The reason is printed with it, and there are four: the directory is not inside a git repository, the repository has no commits yet, it has submodules, or git is older than 2.38.
+
+**Diagnosis**: `belay --dry-run run "your goal"` prints the same reason under "where its result would go", without creating or spending anything.
+
+**Remedy**:
+- No commits: make one. `git add -A && git commit -m "initial"`
+- git too old: `git --version`, then upgrade with `brew install git` or from https://git-scm.com/downloads. belay needs 2.38 for `git merge-tree --write-tree`, which is how it tells whether a merge conflicts without touching a working tree
+- Submodules: not supported for branch output. A new worktree does not populate them, so the run's tests would fail for a reason unrelated to the change
+- Not a git repository: `git init` and make a commit, or accept in-place editing
+- Set `output.mode: "branch"` to make belay refuse rather than fall back
+
+## `belay run --pr` Could Not Open a Pull Request
+
+**Symptom**: The run finishes and reports its branch, and stderr says belay could not open the pull request. The exit status is still 0.
+
+**Cause**: The change is committed on the branch either way, so this never fails the run. gh may not be signed in, the remote may not be a GitHub repository, or the push may have been rejected.
+
+**Diagnosis**:
+1. `gh auth status`
+2. `git remote -v` — belay pushes to `branch.<name>.remote`, then `remote.pushDefault`, then the only remote, then `origin`
+3. belay refuses `--pr` before the run starts when gh is missing or there is no remote, so a failure here happened at the push or at gh
+
+**Remedy**: The closing report prints the two commands to finish by hand: `git push <remote> belay/<run-id>` and `gh pr create --draft --head belay/<run-id>`.
+
+## Leftover `belay/*` Branches or Worktrees
+
+**Symptom**: `git branch --list 'belay/*'` or `git worktree list` shows branches and worktrees from runs that are over.
+
+**Cause**: They are kept on purpose, and sometimes by accident. A branch is a run's result and is never deleted by belay. A worktree is removed only when its run completed: a paused or failed run's is where you finish, so it stays. A process killed between creating the branch and writing the run's manifest leaves a branch no run names.
+
+**Diagnosis**:
+- `belay runs` lists the runs that exist. A `belay/<run-id>` branch whose id is not listed is an orphan
+- `git worktree list` shows the worktrees; belay's are under `.belay/runs/<run-id>/worktree`
+
+**Remedy**:
+- Remove one worktree: `git worktree remove <path>`. Never `git worktree prune`, which also drops your own stale entries, such as worktrees on a disk that is not mounted
+- Remove a branch once you are sure it holds nothing you want: `git log <base>..belay/<run-id>` first, then `git branch -D belay/<run-id>`
+- Remove a whole finished run: `git worktree remove .belay/runs/<run-id>/worktree`, then `rm -rf .belay/runs/<run-id>`
+
 <!-- slice:output -->
 
 <!-- slice:plan -->

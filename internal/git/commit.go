@@ -24,7 +24,13 @@ var (
 	// ErrDirtyTarget reports that Integrate was asked to merge into a
 	// working tree with uncommitted changes in it. Merging would mix them
 	// into the merge commit, and a conflict would leave them unrecoverable.
-	ErrDirtyTarget = errors.New("git: the working tree has uncommitted changes")
+	//
+	// It wraps vcs.ErrDirtyTarget because the node that has to act on it
+	// cannot import this package: this one builds only on unix, and the
+	// graph that hands a node its repository must stay free of build tags.
+	// The node pauses the run on it rather than ending one a person is one
+	// `git commit` away from finishing; see vcs.ErrDirtyTarget.
+	ErrDirtyTarget = fmt.Errorf("%w: git: the working tree has uncommitted changes", vcs.ErrDirtyTarget)
 
 	// ErrMergeInProgress reports a merge left half-done in the working tree
 	// that is not the one belay was making, or one whose result has been

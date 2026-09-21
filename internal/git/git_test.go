@@ -482,6 +482,12 @@ func hardenedCalls(t *testing.T, f *fixture, dir string) []hardenedCall {
 			_, err := r.Integrate(t.Context(), dir, "hardened-merge", vcs.Message{Subject: "belay: hardening merge"})
 			return err
 		}},
+		{name: "Remote", call: func(r *Repo) error {
+			f.git(dir, "remote", "add", "origin", f.bareRepo("hardened-remote"))
+			_, err := r.Remote(t.Context(), "main")
+			return err
+		}},
+		{name: "Push", call: func(r *Repo) error { return r.Push(t.Context(), "origin", "main") }},
 	}
 }
 

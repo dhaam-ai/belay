@@ -514,7 +514,7 @@ func TestCreateRunLaysDownTheRunItWasAskedFor(t *testing.T) {
 	}
 	const runID = "20260905T120000Z-abcdef123456"
 
-	store, err := createRun(plan, runSpec{Workspace: ws, RunID: runID, Goal: "add tests"})
+	store, err := createRun(t.Context(), plan, runSpec{Workspace: ws, RunID: runID, Goal: "add tests"})
 	if err != nil {
 		t.Fatalf("createRun: %v", err)
 	}
@@ -587,7 +587,7 @@ func TestCreateRunWritesTheManifestLast(t *testing.T) {
 				t.Fatalf("put a directory at %s: %v", obstacle, err)
 			}
 
-			if _, err := createRun(plan, spec); err == nil {
+			if _, err := createRun(t.Context(), plan, spec); err == nil {
 				t.Fatalf("createRun succeeded with a directory at %s", obstacle)
 			}
 
@@ -611,7 +611,7 @@ func TestCreateRunWritesTheManifestLast(t *testing.T) {
 			if err := os.Remove(obstacle); err != nil {
 				t.Fatalf("remove %s: %v", obstacle, err)
 			}
-			store, err := createRun(plan, spec)
+			store, err := createRun(t.Context(), plan, spec)
 			if err != nil {
 				t.Fatalf("createRun again, with nothing in the way: %v", err)
 			}

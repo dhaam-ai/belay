@@ -10,6 +10,31 @@ that only `pkg/belay` carries a compatibility promise. Everything under
 
 ### Added
 
+- **A run works on its own branch and never edits your checkout.** In a git
+  repository, `belay run` now creates `belay/<run-id>` at the commit you are
+  on, checks it out in its own worktree under `.belay/runs/<run-id>/`, and
+  works there. It commits once, after the quality gate passes, under your own
+  git identity with a `Belay-Run: <run-id>` trailer. Your checkout keeps its
+  branch, its commit and its uncommitted work, and the run's result is a
+  branch you can read with `git log -p`, take with `git switch`, or delete.
+  Outside a git repository, or with `output.mode: "in_place"`, belay edits
+  the workspace directly, as it always did. The new `output.mode` setting
+  chooses, and `auto` — the default — picks a branch whenever the workspace
+  can take one and says why when it cannot. `belay resume` finishes a run the
+  way it started, whatever `belay.yaml` says by then. ADR-0012 records the
+  decision.
+- **`belay run --pr` opens a draft pull request.** When the run finishes,
+  belay pushes its branch and opens a draft pull request through `gh`,
+  GitHub's own command line. It checks before the run starts that it could:
+  in-place output has no branch to propose, `gh` may not be installed, the
+  repository may have no remote, and the end of a run is the worst moment to
+  find out. A pull request that already exists for the branch is reported
+  rather than opened again, and one that cannot be opened never fails a run
+  that finished — the closing report names the two commands to finish by hand.
+- **Fanout candidates can be git worktrees.** `fanout.isolator` accepts
+  `worktree`, which puts each candidate on a branch of its own so a winner
+  can be merged rather than copied back by hand, and `auto`, which follows
+  the output mode. `dircopy` stays for targets that are not git repositories.
 - **`belay plan` reads the plan a run is waiting on, and can ask for a new
   one.** `belay plan` prints the plan of the run belay picked, where the file
   is, and what to do with it. `belay plan --regenerate "fewer steps, and leave
@@ -39,6 +64,13 @@ that only `pkg/belay` carries a compatibility promise. Everything under
 
 ### Changed
 
+- **`fanout.isolator` defaults to `auto`, and is a closed set.** It was free
+  text checked only for emptiness, so `worktrees` or `dircopy ` loaded fine
+  and failed later, when a run had already been created — while
+  docs/config.md claimed `dircopy` was the only accepted value. It now
+  accepts `auto`, `worktree` or `dircopy` and rejects anything else by name.
+  The default changes from `dircopy` to `auto`, which keeps it in step with
+  `output.mode`.
 - **belay v0.1.x can no longer resume a run this version has saved.** belay
   ignores fields it does not know in a run's state.json and manifest.json,
   and saves the run without them. Once runs carry settings that change what

@@ -577,8 +577,53 @@ func NewLayout(workspaceDir, runID string) (Layout, error) {
 //
 // It is stored rather than derived. Reconstructing it by walking up from
 // RunDir couples every caller to the ".belay/runs/<id>" shape, and a caller
-// that gets the depth wrong points an agent at the wrong tree.
+// that gets the depth wrong points an agent at the wrong tree. Since
+// WithWorkTree, that reconstruction is not merely fragile but wrong: a branch
+// run's workspace is its own git worktree, which sits inside RunDir rather
+// than three parents above it.
 func (l Layout) WorkspaceDir() string { return l.workspace }
+
+// WorkTreeDir returns where a branch run's own git worktree is created:
+// <run>/worktree, inside the run directory.
+//
+// It lives under the run rather than beside the repository because it is the
+// run's, and because deleting a run directory should leave nothing of that
+// run behind. A zero Layout returns "", the same answer every other path
+// method gives it, rather than a path relative to whatever directory belay
+// happens to be running in.
+func (l Layout) WorkTreeDir() string {
+	if l.root == "" {
+		return ""
+	}
+	return filepath.Join(l.root, "worktree")
+}
+
+// WithWorkTree returns l with dir as the workspace its nodes work in, leaving
+// every other path — the manifest, the journal, the artifacts — where it was.
+//
+// This is what makes a branch run work on its own tree. WorkspaceDir is the
+// root a node hands an agent, so redirecting it here redirects every node at
+// once, and nothing else in belay has to learn that a run can work somewhere
+// other than the directory it was started in.
+//
+// It takes a directory rather than deriving WorkTreeDir because a run started
+// in a subdirectory of a repository works on that subdirectory inside the
+// worktree, which is the caller's to compose from the run's recorded prefix.
+// dir must be absolute for the reason NewLayout's workspace must be: a
+// relative path resolves against belay's own working directory, and an agent
+// with write access would then be pointed at the wrong tree. A zero Layout is
+// refused outright, as check describes.
+func (l Layout) WithWorkTree(dir string) (Layout, error) {
+	if err := l.check(); err != nil {
+		return Layout{}, err
+	}
+	if !filepath.IsAbs(dir) {
+		return Layout{}, fmt.Errorf("%w: work tree %q is not an absolute path",
+			ErrInvalidPathSegment, dir)
+	}
+	l.workspace = dir
+	return l, nil
+}
 
 // RunID returns the run's identifier, the last segment of RunDir.
 func (l Layout) RunID() string {

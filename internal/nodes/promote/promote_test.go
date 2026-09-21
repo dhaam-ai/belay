@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"os"
@@ -859,5 +860,52 @@ func TestPromoteRefusesANilRunContext(t *testing.T) {
 	}
 	if res.Status != journal.StatusFailed {
 		t.Errorf("Status = %v, want %v", res.Status, journal.StatusFailed)
+	}
+}
+
+// An unfinished merge in the run's worktree is a pause, not an error.
+//
+// A person handed a conflict merges it by hand in the run's worktree, and
+// can stop half way: conflicts resolved, nothing committed. Promote's next
+// attempt asks the repository to commit or to merge, and the repository
+// refuses a working tree with uncommitted changes it did not make. Reporting
+// that as an error ends the run, and a run that has ended cannot be resumed
+// — so a person who was one `git commit` from finishing would have lost the
+// whole run. It is a verdict: pause, change nothing, and say what to run.
+func TestPromoteDirtyWorkTreePausesAndTouchesNothing(t *testing.T) {
+	dirty := fmt.Errorf("%w: %s has 2 uncommitted change(s), starting with a.go",
+		vcs.ErrDirtyTarget, "the run worktree")
+
+	tests := []struct {
+		name   string
+		inject func(*fixture)
+	}{
+		{"committing the run's change", func(f *fixture) { f.repo.failures["Commit"] = dirty }},
+		{"merging the winner", func(f *fixture) { f.repo.failures["Integrate"] = dirty }},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			f := newRun(t, t.TempDir(), "a.go").withCandidates(t, "c1", "c1")
+			tt.inject(f)
+
+			res, _, err := f.run(t)
+			if err != nil {
+				t.Fatalf("Run() error = %v, want a paused Result: an unfinished merge is a verdict", err)
+			}
+			if res.Status != journal.StatusPaused {
+				t.Errorf("Status = %v, want %v", res.Status, journal.StatusPaused)
+			}
+			if diff := cmp.Diff(state.Patch{}, res.Patch); diff != "" {
+				t.Errorf("Patch mismatch (-want +got):\n%s", diff)
+			}
+			if calls := f.iso.DestroyCalls(); len(calls) != 0 {
+				t.Errorf("Destroy was called on %v; a paused promote must leave every candidate in place", calls)
+			}
+			for _, want := range []string{f.worktree, "git status", "git commit", "belay resume " + runID} {
+				if !strings.Contains(res.Note, want) {
+					t.Errorf("Note %q does not mention %q", res.Note, want)
+				}
+			}
+		})
 	}
 }

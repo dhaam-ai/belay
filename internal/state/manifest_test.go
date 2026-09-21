@@ -813,3 +813,68 @@ func TestNewLayoutRequiresAnAbsoluteWorkspace(t *testing.T) {
 		t.Errorf("RunID() = %q, want %q", got, "run-1")
 	}
 }
+
+// A branch run's nodes must work in the run's own git worktree, not in the
+// user's checkout. Layout is the only thing that knows where a node writes,
+// so that redirection is one method here rather than a second path every
+// caller would have to remember to prefer.
+//
+// WorkTreeDir is where the run's worktree is created, under the run
+// directory; WithWorkTree is the redirection itself, and takes a directory
+// rather than deriving one, because a run started in a subdirectory works on
+// that subdirectory inside the worktree. RunDir must not move: the run's
+// manifest, journal and artifacts stay where every reader already looks for
+// them, including a reader that cannot see the worktree at all.
+func TestLayoutWithWorkTree(t *testing.T) {
+	t.Parallel()
+
+	base, err := NewLayout("/repos/app", "run-1")
+	if err != nil {
+		t.Fatalf("NewLayout: %v", err)
+	}
+	wantWorkTree := filepath.Join("/repos/app", ".belay", "runs", "run-1", "worktree")
+	if got := base.WorkTreeDir(); got != wantWorkTree {
+		t.Errorf("WorkTreeDir() = %q, want %q", got, wantWorkTree)
+	}
+
+	redirected, err := base.WithWorkTree(wantWorkTree)
+	if err != nil {
+		t.Fatalf("WithWorkTree: %v", err)
+	}
+	if got := redirected.WorkspaceDir(); got != wantWorkTree {
+		t.Errorf("WorkspaceDir() = %q, want the work tree %q", got, wantWorkTree)
+	}
+	if got := redirected.RunDir(); got != base.RunDir() {
+		t.Errorf("RunDir() = %q, want it unchanged at %q", got, base.RunDir())
+	}
+	if got := redirected.ManifestPath(); got != base.ManifestPath() {
+		t.Errorf("ManifestPath() = %q, want it unchanged at %q", got, base.ManifestPath())
+	}
+	if got := redirected.WorkTreeDir(); got != wantWorkTree {
+		t.Errorf("WorkTreeDir() = %q, want it unchanged at %q", got, wantWorkTree)
+	}
+
+	// A run started in a subdirectory works on that subdirectory inside the
+	// worktree, so WithWorkTree takes any absolute directory, not only
+	// WorkTreeDir.
+	sub := filepath.Join(wantWorkTree, "services", "api")
+	inSub, err := base.WithWorkTree(sub)
+	if err != nil {
+		t.Fatalf("WithWorkTree(subdirectory): %v", err)
+	}
+	if got := inSub.WorkspaceDir(); got != sub {
+		t.Errorf("WorkspaceDir() = %q, want %q", got, sub)
+	}
+
+	for _, dir := range []string{"", ".", "relative/tree", "./tree"} {
+		if _, err := base.WithWorkTree(dir); !errors.Is(err, ErrInvalidPathSegment) {
+			t.Errorf("WithWorkTree(%q) = %v, want ErrInvalidPathSegment", dir, err)
+		}
+	}
+	if _, err := (Layout{}).WithWorkTree(wantWorkTree); !errors.Is(err, ErrInvalidPathSegment) {
+		t.Errorf("zero Layout WithWorkTree = %v, want ErrInvalidPathSegment", err)
+	}
+	if got := (Layout{}).WorkTreeDir(); got != "" {
+		t.Errorf("zero Layout WorkTreeDir() = %q, want %q", got, "")
+	}
+}

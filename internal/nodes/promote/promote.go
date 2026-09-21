@@ -299,6 +299,9 @@ func checkOutput(rc *graph.RunContext) error {
 func promoteRun(ctx context.Context, rc *graph.RunContext) (graph.Result, error) {
 	tip, err := rc.VCS.Commit(ctx, rc.Output.WorkTree, workMessage(rc, ""))
 	if err != nil {
+		if res, ok := unfinished(rc, err); ok {
+			return res, nil
+		}
 		return failed(), fmt.Errorf("promote: commit the run's change in %s: %w", rc.Output.WorkTree, err)
 	}
 	promotion, err := record(ctx, rc, tip, "")
@@ -335,10 +338,16 @@ func promoteWinner(ctx context.Context, rc *graph.RunContext) (graph.Result, err
 			return failed(), err
 		}
 		if _, err := rc.VCS.Commit(ctx, winner.Dir, workMessage(rc, winner.ID)); err != nil {
+			if res, ok := unfinished(rc, err); ok {
+				return res, nil
+			}
 			return failed(), fmt.Errorf("promote: commit candidate %s's work in %s: %w", winner.ID, winner.Dir, err)
 		}
 		merge, err := rc.VCS.Integrate(ctx, rc.Output.WorkTree, branch, mergeMessage(rc, winner.ID))
 		if err != nil {
+			if res, ok := unfinished(rc, err); ok {
+				return res, nil
+			}
 			return failed(), fmt.Errorf("promote: merge %s into %s: %w", branch, rc.Output.Branch, err)
 		}
 		if len(merge.Conflicts) > 0 {
@@ -507,6 +516,33 @@ func conflicted(rc *graph.RunContext, winner, branch string, files []string) gra
 		Note: fmt.Sprintf("candidate %s conflicts with %s in %s: in %s, run `git merge %s`, resolve the conflicts and commit, then `belay resume %s`",
 			winner, rc.Output.Branch, fileList(sorted), rc.Output.WorkTree, branch, rc.RunID),
 	}
+}
+
+// unfinished turns a repository's refusal of a working tree that already has
+// uncommitted changes into a pause, and reports whether err was one.
+//
+// It is the other half of conflicted. A conflict pauses and tells a person to
+// merge by hand in the run's worktree; stopping part-way through that merge
+// is the ordinary shape of being interrupted, and the repository then refuses
+// to commit or merge over changes it did not make (vcs.ErrDirtyTarget). An
+// error there would end the run, and an ended run cannot be resumed, so the
+// person one `git commit` from finishing would lose everything the run spent.
+// Pausing costs nothing and `belay resume` finishes the moment they commit.
+//
+// Every other error is still an error: promote reached no verdict, which is
+// what ADR-0002 means by one.
+func unfinished(rc *graph.RunContext, err error) (graph.Result, bool) {
+	if !errors.Is(err, vcs.ErrDirtyTarget) {
+		return graph.Result{}, false
+	}
+	logger(rc).Warn("promote: the run's worktree has uncommitted changes; pausing for a person to finish",
+		slog.String("branch", rc.Output.Branch), slog.String("worktree", rc.Output.WorkTree),
+		slog.Any("error", err))
+	return graph.Result{
+		Status: journal.StatusPaused,
+		Note: fmt.Sprintf("%s has changes belay did not commit, so promoting would sweep them in: in %s, run `git status`, finish with `git commit`, then `belay resume %s`",
+			rc.Output.Branch, rc.Output.WorkTree, rc.RunID),
+	}, true
 }
 
 // workMessage is the message of a commit that records work: the run's own

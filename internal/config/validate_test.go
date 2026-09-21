@@ -29,6 +29,8 @@ var enumMutators = []enumMutator{
 	{"review.ai.mcp.mode", func(c *Config, v string) { c.Review.AI.MCP.Mode = MCPMode(v) }},
 	{"budget.on_exceed", func(c *Config, v string) { c.Budget.OnExceed = OnExceed(v) }},
 	{"fanout.select", func(c *Config, v string) { c.Fanout.Select = SelectStrategy(v) }},
+	{"fanout.isolator", func(c *Config, v string) { c.Fanout.Isolator = IsolatorName(v) }},
+	{"output.mode", func(c *Config, v string) { c.Output.Mode = OutputMode(v) }},
 }
 
 // TestEveryEnumIsCovered fails if a closed-set field is added to the schema
@@ -301,9 +303,13 @@ func TestValidateRules(t *testing.T) {
 			want:   "budget.max_tokens: -1 is not valid (want zero or more)", wantErr: true,
 		},
 		{
+			// fanout.isolator was free text checked only for emptiness, which
+			// let "dircopy " or "worktrees" through to a run that then had no
+			// isolator by that name. It is a closed set now, and the message
+			// lists what belay actually ships.
 			name:   "empty isolator",
 			mutate: func(c *Config) { c.Fanout.Isolator = "" },
-			want:   `fanout.isolator: "" is not valid (want the name of a workspace isolator)`, wantErr: true,
+			want:   `fanout.isolator: "" is not valid (want one of: auto, worktree, dircopy)`, wantErr: true,
 		},
 		{
 			name: "fanout with too few candidates",

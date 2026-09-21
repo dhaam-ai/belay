@@ -26,8 +26,9 @@ func quietLogger() *slog.Logger {
 
 // goWorkspace writes the smallest tree belay recognises as a testable,
 // lintable Go project: a go.mod and nothing else. It is deliberately not a
-// git repository — belay never shells out to git, and a plan must resolve
-// without one.
+// git repository: belay resolves a plan for a directory that is not one, and
+// falls back to editing it in place. gitWorkspace is its git-backed sibling,
+// for the tests that are about branch output.
 func goWorkspace(t *testing.T) string {
 	t.Helper()
 	dir := t.TempDir()
