@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io/fs"
 	"log/slog"
 	"strings"
 	"time"
@@ -165,6 +166,20 @@ type Options struct {
 	// their help promises that Ctrl-C leaves a run `belay resume` picks up.
 	PauseOnCancel bool
 
+	// Fingerprint digests the workspace as it stands, and is recorded in the
+	// snapshot the dispatcher takes before a node execution (state.Snapshot).
+	// A fork compares it with the tree it is about to re-run in, to tell
+	// whether the files have changed since the visit it re-runs.
+	//
+	// It is called with the run's workspace directory once per snapshot, so
+	// at most once per node execution. A failure is logged and recorded as an
+	// empty digest, which a reader treats as unknown: the run itself never
+	// depends on the digest, so nothing about it is worth stopping a run for.
+	// Nil records no digest. It is a function rather than an import because
+	// the fingerprint that fits belongs to the isolator (dircopy.SurveyTree
+	// skips what a copy skips), and dircopy builds only on unix.
+	Fingerprint func(ctx context.Context, dir string) (string, error)
+
 	// Adapters, passed through to every RunContext. Any may be nil when the
 	// configuration selects none; a node that needs a nil adapter is
 	// responsible for returning a clear error.
@@ -222,6 +237,23 @@ type Options struct {
 // run-level record written while a node_started is still open, so a terminal
 // node_finished is always appended before the run_completed, run_failed,
 // run_paused or run_aborted that ends the run.
+//
+// # Before the node runs: snapshot the blackboard
+//
+// Re-running a node after a crash is only safe if the re-run is given the
+// blackboard its crashed attempt was given. Patch first, journal second means
+// state.json may already hold that attempt's patch, and a node that computes
+// its patch from what it reads — fix counting its repairs — would count the
+// crashed attempt as well as its own. So before every execution at attempt 1
+// the dispatcher saves the blackboard it is about to hand the node as a
+// write-once snapshot, keyed on the execution's node_started Seq (see
+// blackboardFor and state.Snapshot, which argues the design).
+//
+// The snapshot is written after the node_started and before the node runs.
+// The first makes its key durable before anything depends on it; the second
+// means a missing snapshot proves no attempt of the execution has run the
+// node, so state.json can still be trusted to hold the blackboard from before
+// it. A node whose snapshot cannot be saved is not run at all (see notRun).
 //
 // # Cancellation: end the run, or pause it
 //
@@ -292,6 +324,7 @@ type Dispatcher struct {
 	redact   func(string) string
 
 	pauseOnCancel bool
+	fingerprint   func(ctx context.Context, dir string) (string, error)
 
 	agent    belay.AgentBackend
 	runner   belay.TestRunner
@@ -324,6 +357,7 @@ func NewDispatcher(opts Options) (*Dispatcher, error) {
 		redact:   opts.Redact,
 
 		pauseOnCancel: opts.PauseOnCancel,
+		fingerprint:   opts.Fingerprint,
 
 		agent:    opts.Agent,
 		runner:   opts.Runner,
@@ -768,6 +802,14 @@ func (d *Dispatcher) loop(
 		// dispatcher logs after the node returns must not depend on what
 		// the node did to it.
 		logger := rc.Logger
+
+		if attempt == 1 {
+			view, err := d.blackboardFor(ctx, rc, started.Seq)
+			if err != nil {
+				return d.notRun(jrnl, ledger, current, attempt, steps, err)
+			}
+			rc.State = view
+		}
 		logger.Info("belay/graph: node started")
 
 		exec := d.execute(ctx, node, rc)
@@ -823,6 +865,86 @@ func (d *Dispatcher) runContext(
 		Output: man.Output,
 		VCS:    d.vcs,
 	}
+}
+
+// blackboardFor returns the blackboard the execution rc describes must be
+// given, and makes sure the snapshot it comes from is on disk before the node
+// runs (state.Snapshot).
+//
+// seq names the snapshot: the Seq of the node_started of the execution at
+// attempt 1. When that snapshot exists, an earlier attempt of the execution
+// took it, and its blackboard is the truth — state.json may already carry
+// the patch of the attempt that crashed. When it does not, no attempt has run
+// the node yet, because the snapshot is always written before the node runs:
+// state.json still holds the blackboard from before the execution, and it is
+// saved as the snapshot now.
+//
+// It is called after the execution's node_started is durable, so a snapshot
+// is never keyed on a Seq the journal could give out again, and before the
+// node runs, which is the other half of the invariant above.
+func (d *Dispatcher) blackboardFor(ctx context.Context, rc *RunContext, seq uint64) (state.State, error) {
+	path, err := rc.Layout.SnapshotPath(seq, rc.NodeName)
+	if err != nil {
+		return state.State{}, err
+	}
+	snap, err := state.LoadSnapshot(path)
+	switch {
+	case err == nil:
+		return snap.State, nil
+	case !errors.Is(err, fs.ErrNotExist):
+		return state.State{}, err
+	}
+
+	if _, err := d.store.SaveSnapshotOnce(state.Snapshot{
+		RunID: rc.RunID, Node: rc.NodeName, Seq: seq, Step: rc.Step,
+		TakenAt: d.now().UTC(), WorkspaceDigest: d.workspaceDigest(ctx, rc),
+		State: rc.State,
+	}); err != nil {
+		return state.State{}, err
+	}
+	return rc.State, nil
+}
+
+// workspaceDigest fingerprints rc's workspace for a snapshot, or returns ""
+// when there is no Options.Fingerprint or it fails. See Options.Fingerprint
+// for why a failure is only logged.
+func (d *Dispatcher) workspaceDigest(ctx context.Context, rc *RunContext) string {
+	if d.fingerprint == nil {
+		return ""
+	}
+	digest, err := d.fingerprint(ctx, rc.Workspace)
+	if err != nil {
+		rc.Logger.Warn("belay/graph: could not fingerprint the workspace; this snapshot records no digest",
+			slog.String("error", err.Error()))
+		return ""
+	}
+	return digest
+}
+
+// notRun ends this dispatch without running node, whose snapshot could not be
+// taken (see blackboardFor), and closes its attempt as one to run again.
+//
+// A node run without its snapshot is one a crash could not be recovered from
+// correctly, so it is not run at all. The attempt is closed with the record
+// heal writes for one a crash left open (interruptedAttempt), which Resume
+// re-runs at the next attempt — but charged nothing, because nothing ran.
+// Leaving it open for heal to close would work too, and would charge it the
+// costliest step the run has paid for (interruptedCharge), for a node that
+// never started: a run whose disk keeps refusing the snapshot would spend its
+// ceiling on nothing, one resume at a time.
+//
+// The manifest is left as it was, as it is for the loop's other failures to
+// persist. If even the closing record cannot be written, the attempt stays
+// open and heal closes it later.
+func (d *Dispatcher) notRun(
+	jrnl *journal.Journal, ledger *budget.Ledger, node string, attempt, steps int, cause error,
+) (Outcome, error) {
+	err := fmt.Errorf("graph: could not save the blackboard snapshot %q needs before it runs: %w", node, cause)
+	note := d.note(err.Error()) + "; the node did not run, and resuming runs it again"
+	if _, jerr := jrnl.Append(interruptedAttempt(node, attempt, 0, belay.Usage{}, note)); jerr != nil {
+		err = errors.Join(err, fmt.Errorf("graph: journal node_finished for %q: %w", node, jerr))
+	}
+	return Outcome{ExitCode: ExitFailed, Node: node, Steps: steps, Usage: ledger.Total(), Note: note}, err
 }
 
 // nodeOutcome is one node execution as the dispatcher observed it, before any

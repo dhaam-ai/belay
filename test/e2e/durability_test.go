@@ -293,6 +293,17 @@ func TestDurability_WriteOrderingFailureAfterTheFirstWriteNeverSkipsANode(t *tes
 	}}}
 	d := h.dispatcher(plan)
 
+	// The dispatcher snapshots the blackboard into snapshots/ after the
+	// node_started and before the node runs (state.Snapshot). That is a
+	// durable write of its own, and with the run directory read-only it
+	// would be the one to fail, before the node ran — leaving the ordering
+	// this test exists to check untested. The directory is created first,
+	// and stays writable, so the fault lands where it always has: on the
+	// first write after the node returns.
+	if err := os.MkdirAll(h.layout.SnapshotsDir(), 0o750); err != nil {
+		t.Fatalf("MkdirAll(snapshots) error = %v", err)
+	}
+
 	// #nosec G302 -- this chmods a directory, not a data file: it needs the
 	// execute bit to stay traversable, and the whole point of this test is
 	// removing exactly the write bit that atomicWriteFile's temp-file
