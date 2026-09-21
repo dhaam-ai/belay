@@ -19,6 +19,7 @@ import (
 	"github.com/dhaam-ai/belay/internal/isolate/worktree"
 	"github.com/dhaam-ai/belay/internal/journal"
 	"github.com/dhaam-ai/belay/internal/nodes"
+	"github.com/dhaam-ai/belay/internal/planarchive"
 	"github.com/dhaam-ai/belay/internal/state"
 	"github.com/dhaam-ai/belay/pkg/belay"
 	"github.com/dhaam-ai/belay/pkg/belay/belaytest"
@@ -152,8 +153,19 @@ func TestBranchRunCommitsToItsOwnBranchAndLeavesTheCheckoutAlone(t *testing.T) {
 		t.Errorf("%s has %s commits since the base, want exactly 1:\n%s",
 			branch, got, branchGit(t, repoDir, "log", "--oneline", baseCommit+".."+branch))
 	}
-	if got := branchGit(t, repoDir, "show", "--name-only", "--format=", branch); got != "src/add.go\nsrc/app.go" {
-		t.Errorf("%s's commit changed %q, want src/add.go and src/app.go", branch, got)
+	// The one commit carries the change and the plan it was written from:
+	// promote writes the approved plan into the worktree, at the path the
+	// run's manifest pinned, before it commits (ADR-0016).
+	plan := planarchive.Rel("docs/plans", branchRunID, "add an Add helper")
+	if got, want := branchGit(t, repoDir, "show", "--name-only", "--format=", branch), plan+"\nsrc/add.go\nsrc/app.go"; got != want {
+		t.Errorf("%s's commit changed %q, want %q", branch, got, want)
+	}
+	approved, err := os.ReadFile(filepath.Join(h.layout.ArtifactsDir(), "plan.md")) //nolint:gosec // the run directory is under this test's own t.TempDir()
+	if err != nil {
+		t.Fatalf("read the run's approved plan: %v", err)
+	}
+	if got := branchGit(t, repoDir, "show", branch+":"+plan); got != strings.TrimSpace(string(approved)) {
+		t.Errorf("the plan in %s's commit is not the run's approved plan:\n%s", branch, got)
 	}
 	// Every file the agent reported was found where the nodes were working.
 	// The write node checks each reported path against the filesystem it was
@@ -167,8 +179,8 @@ func TestBranchRunCommitsToItsOwnBranchAndLeavesTheCheckoutAlone(t *testing.T) {
 	}
 
 	// The state the timeline and `belay runs` read agrees with the repository.
-	if got := h.state().Promotion; got.Branch != branch || got.Files != 2 {
-		t.Errorf("state.Promotion = %+v, want %s with 2 changed files", got, branch)
+	if got := h.state().Promotion; got.Branch != branch || got.Files != 3 {
+		t.Errorf("state.Promotion = %+v, want %s with 3 changed files: the change and its plan", got, branch)
 	}
 
 	// THE ASSERTION THIS SLICE EXISTS FOR.
