@@ -958,3 +958,115 @@ func TestAConflictFinishesWhatTheSaveWasFor(t *testing.T) {
 		})
 	}
 }
+
+// headings is a plan whose steps are sub-headings rather than a numbered
+// list: a perfectly good plan that plandoc will not guess the steps of.
+const headings = `## Summary
+
+Two steps, written as headings.
+
+## Steps
+
+### Step 1
+
+Add the flag.
+
+### Step 2
+
+Test it.
+`
+
+// TestReadOnlyShowsThePlanAndSaysWhyNothingCanChange: a plan the person
+// can read but not change — a run that is not waiting at its plan — says
+// why on the page, answers every key that would change something with
+// that reason, and never saves or decides anything.
+func TestReadOnlyShowsThePlanAndSaysWhyNothingCanChange(t *testing.T) {
+	var s saves
+	opts := withSaves(&s)
+	opts.Mode = ReadOnly
+	opts.ReadOnlyReason = "Run 20260921T101500Z-1f2e3d4c5b6a is running its tests, so its plan can be read here but not changed."
+	m := open(t, opts, 80, 24)
+	if !strings.Contains(flat(m), "can be read here but not changed") {
+		t.Errorf("the page does not say why the plan cannot be changed:\n%s", screenText(m))
+	}
+	if strings.Contains(flat(m), "e edit") || strings.Contains(flat(m), "c approve") {
+		t.Errorf("a read-only page offers keys that change things:\n%s", screenText(m))
+	}
+	for _, k := range []string{"e", "a", "d", "K", "J", "u", "s", "c", "r"} {
+		after, quit := quits(t, m, k)
+		if quit || after.Decision() != (Decision{Action: ActionLeave}) {
+			t.Errorf("%s in a read-only viewer: left = %v, decided %+v", k, quit, after.Decision())
+		}
+		if !strings.Contains(flat(after), "can be read here but not changed") {
+			t.Errorf("%s did not say why:\n%s", k, screenText(after))
+		}
+		if strings.Contains(flat(after), "Editing step") || strings.Contains(flat(after), "enter asks for it") {
+			t.Errorf("%s opened something in a read-only viewer:\n%s", k, screenText(after))
+		}
+	}
+	if len(s.plans) != 0 {
+		t.Errorf("a read-only viewer saved the plan %d time(s)", len(s.plans))
+	}
+	if _, quit := quits(t, m, "q"); !quit {
+		t.Error("q did not leave a read-only viewer")
+	}
+}
+
+// TestAPlanWithoutAStepListCanStillBeApproved: plandoc refuses to guess
+// the steps of a plan written without a numbered list, so the step keys
+// explain that instead of editing — but the plan is still a plan: it can be
+// read, approved, and replaced with a new one.
+func TestAPlanWithoutAStepListCanStillBeApproved(t *testing.T) {
+	opts := review()
+	opts.Plan = []byte(headings)
+	m := open(t, opts, 80, 24)
+	if !strings.Contains(flat(m), "### Step 2") || !strings.Contains(flat(m), "Test it.") {
+		t.Errorf("the plan is not shown as it is:\n%s", screenText(m))
+	}
+	for _, k := range []string{"e", "a", "d", "K", "J"} {
+		after := keys(t, m, k)
+		if !strings.Contains(flat(after), "numbered list") || strings.Contains(flat(after), "plandoc:") {
+			t.Errorf("%s did not explain in words why the steps cannot be edited:\n%s", k, screenText(after))
+		}
+	}
+	approved, quit := quits(t, keys(t, m, "c"), "y")
+	if !quit || approved.Decision().Action != ActionApprove {
+		t.Errorf("a plan without a step list could not be approved (left = %v, %+v)", quit, approved.Decision())
+	}
+	asked, quit := quits(t, typeText(t, keys(t, m, "r"), "use a numbered list"), "enter")
+	if !quit || asked.Decision().Action != ActionRegenerate {
+		t.Errorf("a plan without a step list could not be replaced (left = %v, %+v)", quit, asked.Decision())
+	}
+
+	// A plan that is not UTF-8 is not edited either, and says why.
+	opts.Plan = []byte("## Steps\n\n1. Caf\xe9.\n")
+	if got := flat(keys(t, open(t, opts, 80, 24), "e")); !strings.Contains(got, "not valid UTF-8") {
+		t.Errorf("editing a plan that is not UTF-8 was not refused in words:\n%s", got)
+	}
+}
+
+// TestAPlanWithNoStepsScrollsLineByLine: with no steps to choose between,
+// j and k scroll the page instead, so a long plan can be read to its end.
+func TestAPlanWithNoStepsScrollsLineByLine(t *testing.T) {
+	var b strings.Builder
+	b.WriteString("## Summary\n\n")
+	for i := 1; i <= 40; i++ {
+		fmt.Fprintf(&b, "Line %d of a plan written without a numbered list.\n", i)
+	}
+	opts := review()
+	opts.Plan = []byte(b.String())
+	m := open(t, opts, 80, 16)
+	if strings.Contains(flat(m), "Line 40 ") {
+		t.Fatalf("the whole plan fits, so this test proves nothing:\n%s", screenText(m))
+	}
+	for range 40 {
+		m = keys(t, m, "j")
+	}
+	if !strings.Contains(flat(m), "Line 40 ") {
+		t.Errorf("j never scrolled to the end of the plan:\n%s", screenText(m))
+	}
+	m = keys(t, m, "home")
+	if !strings.Contains(flat(m), "## Summary") {
+		t.Errorf("home did not go back to the top:\n%s", screenText(m))
+	}
+}

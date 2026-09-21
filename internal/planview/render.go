@@ -362,6 +362,9 @@ func (m Model) screenBlocks() []block {
 			hints("enter asks for it", "esc goes back"))
 	}
 	var out []block
+	if m.opts.Mode == ReadOnly && m.opts.ReadOnlyReason != "" {
+		out = append(out, block{lines: m.sentences(m.opts.ReadOnlyReason), drop: 2})
+	}
 	keys := m.keyLines()
 	for i, l := range keys {
 		b := block{lines: []string{l}}
@@ -387,7 +390,12 @@ func (m Model) keyLines() []string {
 			hints("ctrl+s keeps the edit", "esc throws it away"),
 		}
 	}
-	if m.width < fullWidth {
+	switch {
+	case m.opts.Mode == ReadOnly:
+		return []string{hints("j k scroll", "q leave", "? all keys")}
+	case m.stepsErr != nil:
+		return []string{hints("c approve", "r new plan", "j k scroll", "q leave", "? all keys")}
+	case m.width < fullWidth:
 		return []string{hints("c approve", "r new plan", "q leave", "? all keys")}
 	}
 	return []string{

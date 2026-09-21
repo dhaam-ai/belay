@@ -48,6 +48,8 @@ type Options struct {
 	Plan []byte
 	// Mode says whether the person may change anything.
 	Mode Mode
+	// ReadOnlyReason says why the person may not, in ReadOnly mode.
+	ReadOnlyReason string
 	// Save writes plan to the plan file. The viewer never writes a file
 	// itself: this is the only way anything it does reaches the disk.
 	Save func(plan []byte, overwrite bool) error
@@ -208,16 +210,36 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 // read answers a key pressed while the person is reading the plan.
 func (m *Model) read(msg tea.KeyPressMsg) {
-	switch msg.String() {
+	k := msg.String()
+	switch k {
 	case "down", "j":
-		m.selectStep(m.selected + 1)
+		m.moveDown(+1)
+		return
 	case "up", "k":
-		m.selectStep(m.selected - 1)
+		m.moveDown(-1)
+		return
+	case "pgdown", "space":
+		m.scroll(m.bodyHeight())
+		return
+	case "pgup":
+		m.scroll(-m.bodyHeight())
+		return
 	case "home", "g":
 		m.selectStep(0)
 		m.offset = 0
+		return
 	case "end", "G":
 		m.selectStep(m.doc.Len() - 1)
+		m.scroll(len(m.body()))
+		return
+	case "q", "ctrl+c":
+		m.leave()
+		return
+	}
+	if !m.mayChange(k) {
+		return
+	}
+	switch k {
 	case "e", "enter":
 		m.openEditor()
 	case "a":
@@ -232,13 +254,66 @@ func (m *Model) read(msg tea.KeyPressMsg) {
 		m.undoChange()
 	case "s":
 		m.saveFor(nil)
-	case "q", "ctrl+c":
-		m.leave()
 	case "c":
 		m.askToApprove()
 	case "r":
 		m.openAsking()
 	}
+}
+
+// changeKeys are the keys that change the plan or decide what happens to
+// the run, and stepKeys the ones among them that act on a single step.
+var (
+	changeKeys = map[string]bool{
+		"e": true, "enter": true, "a": true, "d": true, "K": true, "shift+up": true,
+		"J": true, "shift+down": true, "u": true, "s": true, "c": true, "r": true,
+	}
+	stepKeys = map[string]bool{
+		"e": true, "enter": true, "a": true, "d": true, "K": true, "shift+up": true, "J": true, "shift+down": true,
+	}
+)
+
+// mayChange reports whether key k may act, and when it may not, says why:
+// nothing can change in a read-only viewer, and the steps of a plan
+// plandoc could not read cannot be edited one by one.
+func (m *Model) mayChange(k string) bool {
+	switch {
+	case !changeKeys[k]:
+		return false
+	case m.opts.Mode == ReadOnly:
+		m.message = m.opts.ReadOnlyReason
+		return false
+	case stepKeys[k] && m.stepsErr != nil:
+		m.message = m.stepsRefusal()
+		return false
+	}
+	return true
+}
+
+// stepsRefusal says why the steps of this plan cannot be edited here, and
+// what can still be done with it.
+func (m Model) stepsRefusal() string {
+	if errors.Is(m.stepsErr, plandoc.ErrNotUTF8) {
+		return "This plan is not valid UTF-8 text, so belay will not edit it here: a change would damage the rest of it. " +
+			"Fix it in " + m.opts.Path + ", or ask for a new plan with r."
+	}
+	return "belay cannot tell this plan's steps apart, so it cannot edit them here: they are not a numbered list " +
+		"under a \"## Steps\" heading. You can still approve the plan with c, or ask for a new one with r."
+}
+
+// moveDown moves the selection by delta steps, or, in a plan with no steps
+// to choose between, scrolls the page by delta lines.
+func (m *Model) moveDown(delta int) {
+	if m.doc.Len() == 0 {
+		m.scroll(delta)
+		return
+	}
+	m.selectStep(m.selected + delta)
+}
+
+// scroll moves the page by n lines, leaving the selection where it is.
+func (m *Model) scroll(n int) {
+	m.offset = max(0, min(m.offset+n, len(m.body())-m.bodyHeight()))
 }
 
 // openAsking opens the box for what a new plan should do differently.
