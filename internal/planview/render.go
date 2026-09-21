@@ -251,9 +251,34 @@ func (m Model) screenLines() []string {
 			out = append(out, "")
 			continue
 		}
-		out = append(out, m.gutter(lines[i])+lines[i].text)
+		text := m.gutter(lines[i]) + lines[i].text
+		if !m.editorOpen() && lines[i].step == m.selected && m.doc.Len() > 0 {
+			text = m.emph(text)
+		}
+		out = append(out, text)
 	}
 	return append(out, m.footer()...)
+}
+
+// emph emphasises s, in bold, when colour is allowed. The viewer emphasises
+// two things only, as belay does everywhere (ADR-0010): the step the person
+// is on, and what the run has spent. Neither carries meaning by emphasis
+// alone — the cursor glyph marks the step, and the spend is in words — so a
+// terminal without it loses nothing.
+func (m Model) emph(s string) string {
+	if !m.opts.Color || s == "" {
+		return s
+	}
+	return "\x1b[1m" + s + "\x1b[22m"
+}
+
+// cost is the spend, laid out and emphasised.
+func (m Model) cost() []string {
+	lines := m.sentences(m.spent())
+	for i, l := range lines {
+		lines[i] = m.emph(l)
+	}
+	return lines
 }
 
 // gutter is what is drawn beside a line of the plan: the cursor beside the
@@ -374,7 +399,7 @@ func (m Model) screenBlocks() []block {
 	case approving:
 		out := []block{
 			{lines: m.sentences("Approve this plan and continue the run? belay writes the code next.")},
-			{lines: m.sentences(m.spent())},
+			{lines: m.cost()},
 		}
 		if m.dirty() {
 			out = append(out, block{lines: m.sentences("Your edits are saved first."), drop: 2})
@@ -384,7 +409,7 @@ func (m Model) screenBlocks() []block {
 		out := []block{
 			{lines: m.sentences("Say what the new plan should do differently. belay runs the plan step again with " +
 				"your words, and stops here again with the new plan."), drop: 4},
-			{lines: m.sentences(m.spent()), drop: 2},
+			{lines: m.cost(), drop: 2},
 		}
 		if m.dirty() {
 			out = append(out, block{lines: m.sentences("Your edits are saved first, and kept with the plan they replace."), drop: 3})

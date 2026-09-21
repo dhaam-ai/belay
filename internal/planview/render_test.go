@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	tea "charm.land/bubbletea/v2"
+	"github.com/charmbracelet/colorprofile"
 	"github.com/charmbracelet/x/ansi"
 )
 
@@ -55,6 +56,9 @@ func TestViewFitsEveryTerminalSize(t *testing.T) {
 	for name, plan := range map[string]string{"canonical": canonical, "wide": wide} {
 		opts := review()
 		opts.Plan = []byte(plan)
+		// The wide plan is drawn with emphasis on, so both kinds of page
+		// are measured; emphasis must never count toward a line's width.
+		opts.Color = name == "wide"
 		t.Run(name+" plan", func(t *testing.T) {
 			t.Parallel()
 			m := New(opts)
@@ -182,4 +186,64 @@ func withPlan(plan string) Options {
 	opts := review()
 	opts.Plan = []byte(plan)
 	return opts
+}
+
+// rawLine returns the line of the view, escape sequences and all, whose
+// text contains want.
+func rawLine(m Model, want string) string {
+	for _, l := range strings.Split(m.View().Content, "\n") {
+		if strings.Contains(ansi.Strip(l), want) {
+			return l
+		}
+	}
+	return ""
+}
+
+// TestMeaningSurvivesWithoutColour: with colour allowed, the selected step
+// and the cost are emphasised, in bold, as belay emphasises the step it is
+// on and the spend everywhere else (ADR-0010). Without it — NO_COLOR set,
+// --no-color, TERM=dumb — the viewer sends no styling at all, and nothing
+// is lost: the selection is the cursor glyph, and unsaved edits are the
+// word "edited".
+func TestMeaningSurvivesWithoutColour(t *testing.T) {
+	opts := review()
+	opts.Spend = Spend{SpentUSD: 0.42, LimitUSD: 5}
+	plain := open(t, opts, 80, 24)
+	if strings.Contains(plain.View().Content, "\x1b") {
+		t.Errorf("without colour the view still carries escape sequences:\n%q", plain.View().Content)
+	}
+	if line := selectedLine(plain); !strings.Contains(line, "1. Add a dryRun field") {
+		t.Errorf("without colour the selection is not marked: %q", line)
+	}
+	edited := typeText(t, keys(t, plain, "e"), " Now.")
+	edited = keys(t, edited, "ctrl+s", "c")
+	if got := edited.View().Content; strings.Contains(got, "\x1b") || !strings.Contains(got, "edited") {
+		t.Errorf("without colour: escape sequences, or no word for the unsaved edit:\n%q", got)
+	}
+
+	opts.Color = true
+	colour := open(t, opts, 80, 24)
+	if line := rawLine(colour, "1. Add a dryRun field"); !strings.Contains(line, "\x1b[1m") {
+		t.Errorf("with colour the selected step is not emphasised: %q", line)
+	}
+	if line := rawLine(colour, "2. Bind --dry-run"); strings.Contains(line, "\x1b[") {
+		t.Errorf("with colour a step that is not selected is emphasised too: %q", line)
+	}
+	if line := rawLine(keys(t, colour, "c"), "$0.42 of $5.00"); !strings.Contains(line, "\x1b[1m") {
+		t.Errorf("with colour the cost is not emphasised: %q", line)
+	}
+}
+
+// TestTheColourDecisionReachesTheRenderer: the viewer gives bubbletea a
+// colour profile rather than letting it detect one, and the profile follows
+// belay's own decision. colorprofile's detection reads NO_COLOR as a
+// boolean, so NO_COLOR=yes would leave colour on there, against
+// no-color.org.
+func TestTheColourDecisionReachesTheRenderer(t *testing.T) {
+	if got := profile(false); got != colorprofile.ASCII {
+		t.Errorf("profile(false) = %v, want ASCII: no colour at all", got)
+	}
+	if got := profile(true); got != colorprofile.ANSI {
+		t.Errorf("profile(true) = %v, want ANSI", got)
+	}
 }

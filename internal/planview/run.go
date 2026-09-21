@@ -39,8 +39,8 @@ func IsTerminal(f *os.File) bool {
 // It also always hands it a colour profile, rather than letting the library
 // detect one. The library's detection reads NO_COLOR as a boolean, so
 // NO_COLOR=yes leaves colour on, which no-color.org says it must not, and it
-// runs `tmux info` as a subprocess inside tmux. The profile is ASCII: no
-// colour reaches the terminal.
+// runs `tmux info` as a subprocess inside tmux. The profile follows
+// Options.Color, belay's own decision (see profile).
 //
 // Every way the viewer stops is bubbletea's graceful quit. The library has
 // a second way, for a cancelled context or a SIGINT, and in v2.0.9 that one
@@ -61,7 +61,7 @@ func Run(ctx context.Context, in, out *os.File, opts Options) (Decision, error) 
 	program := tea.NewProgram(New(opts),
 		tea.WithInput(in),
 		tea.WithOutput(out),
-		tea.WithColorProfile(colorprofile.ASCII),
+		tea.WithColorProfile(profile(opts.Color)),
 		tea.WithFilter(quitOnInterrupt),
 	)
 	stop := context.AfterFunc(ctx, program.Quit)
@@ -87,4 +87,15 @@ func quitOnInterrupt(_ tea.Model, msg tea.Msg) tea.Msg {
 		return tea.QuitMsg{}
 	}
 	return msg
+}
+
+// profile is the colour profile the program is given: ASCII, which lets no
+// colour through, unless colour is allowed. The viewer's only emphasis is
+// bold, which both profiles carry; the profile is there so that nothing a
+// library draws in colour reaches a terminal belay was told to keep plain.
+func profile(color bool) colorprofile.Profile {
+	if color {
+		return colorprofile.ANSI
+	}
+	return colorprofile.ASCII
 }

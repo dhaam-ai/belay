@@ -59,6 +59,8 @@ type Options struct {
 	Blocker string
 	// Spend is what the run has spent, and may spend.
 	Spend Spend
+	// Color allows emphasis.
+	Color bool
 }
 
 // Spend is what a run has spent, and the most it may.
