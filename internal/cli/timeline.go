@@ -91,11 +91,15 @@ type TimelineEntry struct {
 	Index int
 	// Node is the graph node that ran.
 	Node string
-	// Iteration is which visit to Node this is, 1-based. Together with
+	// Iteration is which visit to Node this is, 1-based, as journal.Visits
+	// counts them: the number `belay fork --visit` takes. Together with
 	// Iterations it turns a repeated node into "test #2/3" rather than
-	// leaving the reader to notice the repetition themselves.
+	// leaving the reader to notice the repetition themselves. It is 0 when
+	// the journal is too damaged for journal.Visits to group (see
+	// numberVisits).
 	Iteration int
-	// Iterations is the total number of visits to Node across the whole run.
+	// Iterations is the total number of visits to Node across the whole run,
+	// or 0 alongside an Iteration of 0.
 	Iterations int
 	// Attempt is the journal's attempt counter for this visit. It is greater
 	// than 1 only when an earlier attempt at this same visit was cut short
@@ -156,8 +160,8 @@ type TimelineLoop struct {
 	Node string
 	// Executions is how many times the run visited it — visits, not journal
 	// records. A gate that paused for a person and ran again when they
-	// resumed the run was visited once (see resumesTheSameVisit), so a run
-	// that never looped reports no loop at all.
+	// resumed the run was visited once (see numberVisits), so a run that
+	// never looped reports no loop at all.
 	Executions int
 }
 
@@ -294,12 +298,11 @@ func BuildTimeline(sel TimelineSelection, manifest *state.Manifest, res journal.
 	// journal.Stats already sums per-node durations and is documented to
 	// degrade rather than fail on a damaged history, so total agent time comes
 	// from it verbatim. Loops do not: Stats counts records, and a visit to a
-	// node can span two of them (see resumesTheSameVisit).
+	// node can span two of them (see numberVisits).
 	for _, s := range journal.Stats(res.Records) {
 		tl.Totals.AgentDuration += s.TotalDuration
 	}
 
-	visits := make(map[string]int)
 	var (
 		open     *journal.Record
 		pausedAt time.Time
@@ -317,13 +320,9 @@ func BuildTimeline(sel TimelineSelection, manifest *state.Manifest, res journal.
 				started = open.Time
 			}
 			open = nil
-			if !resumesTheSameVisit(tl.Entries, rec.Node) {
-				visits[rec.Node]++
-			}
 			tl.Entries = append(tl.Entries, TimelineEntry{
 				Index:      len(tl.Entries) + 1,
 				Node:       rec.Node,
-				Iteration:  visits[rec.Node],
 				Attempt:    rec.Attempt,
 				Outcome:    timelineOutcome(rec.Status),
 				StartedAt:  started,
@@ -363,33 +362,18 @@ func BuildTimeline(sel TimelineSelection, manifest *state.Manifest, res journal.
 	// belongs in the order, with the honest admission that its duration and
 	// cost were never recorded.
 	if open != nil {
-		if !resumesTheSameVisit(tl.Entries, open.Node) {
-			visits[open.Node]++
-		}
 		tl.Interrupted = true
 		tl.InterruptedNode = open.Node
 		tl.Entries = append(tl.Entries, TimelineEntry{
 			Index:     len(tl.Entries) + 1,
 			Node:      open.Node,
-			Iteration: visits[open.Node],
 			Attempt:   open.Attempt,
 			Outcome:   TimelineInterrupted,
 			StartedAt: open.Time,
 		})
 	}
 
-	for i := range tl.Entries {
-		tl.Entries[i].Iterations = visits[tl.Entries[i].Node]
-	}
-	// Named in the order the run first reached them, so the summary reads in
-	// the same direction as the table.
-	named := make(map[string]bool, len(visits))
-	for _, e := range tl.Entries {
-		if visits[e.Node] > 1 && !named[e.Node] {
-			named[e.Node] = true
-			tl.Loops = append(tl.Loops, TimelineLoop{Node: e.Node, Executions: visits[e.Node]})
-		}
-	}
+	tl.numberVisits(res.Records)
 	tl.Totals.Nodes = len(tl.Entries)
 
 	if n := len(res.Records); n > 0 {
@@ -405,30 +389,55 @@ func BuildTimeline(sel TimelineSelection, manifest *state.Manifest, res journal.
 	return tl
 }
 
-// resumesTheSameVisit reports whether the next execution of node continues the
-// visit the last entry began, rather than being a second visit to it.
+// numberVisits fills in each entry's Iteration and Iterations, and the run's
+// Loops, from journal.Visits.
 //
-// A node_finished that names its own node as what comes next has not finished
-// its visit: it is the approve gate pausing for a person, or an attempt a
-// Ctrl-C or a crash cut short (journal.Record.Interrupted). Either way the
-// execution that follows is the same visit taken up again — the graph did not
-// route anywhere and come back. Counting two would report every run with
-// graph.approval on as having looped at the gate, and would open the
+// The numbers are visits, not rows: the approve gate pausing for a person and
+// running again when they resume, or an attempt a Ctrl-C or a crash cut short
+// and its re-run, is two rows and one visit. Counting two would report every
+// run with graph.approval on as having looped at the gate, and would open the
 // loop-cost span there, charging the fix loop for the plan, the code and the
-// write that came between.
+// write that came between. journal.Visits owns that rule, so "fix #2" here is
+// the visit `belay fork --visit 2` re-runs, and the snapshot a fork starts
+// from was keyed by the same grouping.
 //
-// A node that genuinely routes to itself is a loop, and is not this: its
-// record is a StatusOK verdict with a Next, which is the graph deciding to go
-// round again.
-func resumesTheSameVisit(entries []TimelineEntry, node string) bool {
-	if len(entries) == 0 {
-		return false
+// Every entry is one execution, in order, so each visit accounts for the next
+// Visit.Executions entries. A history journal.Visits refuses — executions that
+// do not pair up — gets no numbers and no loops at all, rather than numbers
+// no fork would accept: the timeline still shows every row it can read, the
+// way it declines to claim a status for such a journal (see applyRunState).
+func (t *Timeline) numberVisits(records []journal.Record) {
+	visits, err := journal.Visits(records)
+	if err != nil {
+		return
 	}
-	prev := entries[len(entries)-1]
-	if prev.Node != node || prev.Next != node {
-		return false
+	executions := 0
+	for _, v := range visits {
+		executions += v.Executions
 	}
-	return prev.Outcome == TimelinePaused || prev.Outcome == TimelineStopped
+	if executions != len(t.Entries) {
+		// Unreachable for a history journal.Visits accepts, where every
+		// execution is exactly one entry; numbering a mismatch would put a
+		// visit's number on another visit's row.
+		return
+	}
+
+	total := make(map[string]int)
+	for _, v := range visits {
+		total[v.Node] = max(total[v.Node], v.Ordinal)
+	}
+	i := 0
+	for _, v := range visits {
+		for range v.Executions {
+			t.Entries[i].Iteration, t.Entries[i].Iterations = v.Ordinal, total[v.Node]
+			i++
+		}
+		// Named in the order the run first reached them, so the summary reads
+		// in the same direction as the table.
+		if v.Ordinal == 1 && total[v.Node] > 1 {
+			t.Loops = append(t.Loops, TimelineLoop{Node: v.Node, Executions: total[v.Node]})
+		}
+	}
 }
 
 // applyLoopCost measures the stretch of the run spent looping: from the first
