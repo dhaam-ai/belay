@@ -180,6 +180,25 @@ type Options struct {
 	// skips what a copy skips), and dircopy builds only on unix.
 	Fingerprint func(ctx context.Context, dir string) (string, error)
 
+	// PauseAfter, when above zero, pauses the run once this call has run that
+	// many nodes, before the next one starts, so Resume continues it from
+	// there. It is how a fork runs exactly one node: PauseAfter 1.
+	//
+	// It counts the node executions this call performs (Outcome.Steps), never
+	// the run's step count: a fork carries its source run's steps on, and a
+	// limit measured against them would stop a fork before it ran anything.
+	// It only ever stops a run that was going on to another node — after an
+	// execution whose Result the dispatcher accepted with StatusOK and a Next
+	// other than End. A node that fails, pauses, aborts or ends the run ends
+	// the call exactly as it would without the limit, and so does one that is
+	// interrupted, timed out or stopped by the budget.
+	//
+	// The pause is the one the caller asked for, so it exits ExitOK, like the
+	// approval gate's, and not ExitAborted like the dispatcher's own limits.
+	// Zero, the default, sets no limit; a negative value is refused by
+	// NewDispatcher.
+	PauseAfter int
+
 	// Adapters, passed through to every RunContext. Any may be nil when the
 	// configuration selects none; a node that needs a nil adapter is
 	// responsible for returning a clear error.
@@ -331,6 +350,7 @@ type Dispatcher struct {
 
 	pauseOnCancel bool
 	fingerprint   func(ctx context.Context, dir string) (string, error)
+	pauseAfter    int
 
 	agent    belay.AgentBackend
 	runner   belay.TestRunner
@@ -353,6 +373,10 @@ func NewDispatcher(opts Options) (*Dispatcher, error) {
 	if opts.Registry.Len() == 0 {
 		return nil, fmt.Errorf("%w: Registry has no nodes registered", ErrInvalidOptions)
 	}
+	if opts.PauseAfter < 0 {
+		return nil, fmt.Errorf("%w: PauseAfter is %d; it counts node executions, so it cannot be negative",
+			ErrInvalidOptions, opts.PauseAfter)
+	}
 
 	d := &Dispatcher{
 		store:    opts.Store,
@@ -364,6 +388,7 @@ func NewDispatcher(opts Options) (*Dispatcher, error) {
 
 		pauseOnCancel: opts.PauseOnCancel,
 		fingerprint:   opts.Fingerprint,
+		pauseAfter:    opts.PauseAfter,
 
 		agent:    opts.Agent,
 		runner:   opts.Runner,
@@ -869,6 +894,19 @@ func (d *Dispatcher) loop(
 		}
 
 		current, attempt = exec.res.Next, 1
+
+		// Only here, where settle has accepted a StatusOK Result that goes on
+		// to another node: every other outcome has already returned, so the
+		// limit can never hide one (see Options.PauseAfter).
+		if d.pauseAfter > 0 && steps >= d.pauseAfter {
+			nodes := "nodes"
+			if steps == 1 {
+				nodes = "node"
+			}
+			return d.endRun(jrnl, man, ledger, journal.EventRunPaused, state.RunStatusPaused, ExitOK, current, steps,
+				fmt.Sprintf("paused before %q, as asked, after running %d %s; use `belay resume` to continue",
+					current, steps, nodes), nil)
+		}
 	}
 }
 
