@@ -27,6 +27,12 @@
 // journal is once again a clean sequence of complete lines ready for the
 // next Append.
 //
+// The byte-level half of this — the O_APPEND write and fsync, the scan that
+// tells a torn final line from mid-file corruption, and the heal — lives in
+// internal/ndjson, so the goal queue's log shares one implementation of it
+// rather than growing a second. What a line means, what order the records
+// must come in and what counts as a valid history stay here.
+//
 // # Concurrency
 //
 // A *Journal serializes its own Append calls with a mutex, so many
@@ -44,21 +50,22 @@
 package journal
 
 import (
-	"bufio"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"os"
-	"path/filepath"
 	"sync"
 	"time"
+
+	"github.com/dhaam-ai/belay/internal/ndjson"
 )
 
 // maxLineBytes bounds how large a single journal line may be before Read
 // gives up on it. It is generous enough for a long Record.Note while still
 // making a runaway or corrupted line fail fast instead of exhausting memory.
-const maxLineBytes = 8 * 1024 * 1024
+// The bound is ndjson's, since ndjson is what reads the lines.
+const maxLineBytes = ndjson.MaxLineBytes
 
 // FirstNode is the entry point of belay's node graph. ResolveStart returns
 // it, at attempt 1, whenever a journal carries no history to resume from.
@@ -114,7 +121,7 @@ func Open(path string) (*Journal, error) {
 		if err := rewriteClean(path, existing.Records); err != nil {
 			return nil, fmt.Errorf("journal: open %s: %w", path, err)
 		}
-	} else if err := ensureTrailingNewline(path); err != nil {
+	} else if err := ndjson.EnsureTrailingNewline(path); err != nil {
 		return nil, fmt.Errorf("journal: open %s: %w", path, err)
 	}
 
@@ -136,85 +143,20 @@ func Open(path string) (*Journal, error) {
 
 // rewriteClean atomically replaces the file at path with exactly records,
 // each marshaled on its own newline-terminated line, discarding anything
-// else (a torn final line). It writes a temporary file in the same
-// directory and renames it into place, so a second crash during recovery
+// else (a torn final line). ndjson.RewriteClean does the replacing, through
+// a temporary file renamed into place, so a second crash during recovery
 // itself still leaves path either fully in its old (torn) state or fully in
 // its new (clean) state — never something in between.
 func rewriteClean(path string, records []Record) error {
-	dir := filepath.Dir(path)
-	tmp, err := os.CreateTemp(dir, filepath.Base(path)+".recover-*")
-	if err != nil {
-		return fmt.Errorf("create recovery file: %w", err)
-	}
-	tmpPath := tmp.Name()
-	defer func() { _ = os.Remove(tmpPath) }() // no-op once the rename below succeeds
-
+	lines := make([][]byte, 0, len(records))
 	for _, rec := range records {
 		data, err := json.Marshal(rec)
 		if err != nil {
-			_ = tmp.Close()
 			return fmt.Errorf("re-encode seq %d during recovery: %w", rec.Seq, err)
 		}
-		data = append(data, '\n')
-		if _, err := tmp.Write(data); err != nil {
-			_ = tmp.Close()
-			return fmt.Errorf("write seq %d during recovery: %w", rec.Seq, err)
-		}
+		lines = append(lines, data)
 	}
-	if err := tmp.Sync(); err != nil {
-		_ = tmp.Close()
-		return fmt.Errorf("sync recovery file: %w", err)
-	}
-	if err := tmp.Close(); err != nil {
-		return fmt.Errorf("close recovery file: %w", err)
-	}
-	if err := os.Rename(tmpPath, path); err != nil {
-		return fmt.Errorf("install recovered journal: %w", err)
-	}
-	return nil
-}
-
-// ensureTrailingNewline appends a single newline to path if the file is
-// non-empty and does not already end in one.
-//
-// This closes the one gap Read tolerates without flagging Incomplete: a
-// final record whose content is fully valid JSON but whose trailing
-// delimiter byte itself was the one cut off by a crash. Read correctly
-// counts that record as durable (its content is intact), but the file on
-// disk needs its delimiter completed before another line can be appended
-// after it without the two merging into one unparseable line.
-func ensureTrailingNewline(path string) error {
-	// #nosec G304 -- path is the run journal Open was called with; see the
-	// same justification on the O_APPEND open in Open.
-	f, err := os.OpenFile(path, os.O_RDWR, 0o600)
-	if errors.Is(err, os.ErrNotExist) {
-		return nil
-	}
-	if err != nil {
-		return fmt.Errorf("check trailing newline of %s: %w", path, err)
-	}
-	defer func() { _ = f.Close() }()
-
-	size, err := f.Seek(0, io.SeekEnd)
-	if err != nil {
-		return fmt.Errorf("check trailing newline of %s: %w", path, err)
-	}
-	if size == 0 {
-		return nil
-	}
-
-	last := make([]byte, 1)
-	if _, err := f.ReadAt(last, size-1); err != nil {
-		return fmt.Errorf("check trailing newline of %s: %w", path, err)
-	}
-	if last[0] == '\n' {
-		return nil
-	}
-
-	if _, err := f.Write([]byte{'\n'}); err != nil {
-		return fmt.Errorf("complete trailing newline of %s: %w", path, err)
-	}
-	return f.Sync()
+	return ndjson.RewriteClean(path, lines)
 }
 
 // Path returns the path the journal was opened with.
@@ -270,15 +212,11 @@ func (j *Journal) Append(rec Record) (Record, error) {
 	if err != nil {
 		return Record{}, fmt.Errorf("journal: append: encode seq %d: %w", rec.Seq, err)
 	}
-	data = append(data, '\n')
 
 	j.lastSeq = rec.Seq
 
-	if _, err := j.f.Write(data); err != nil {
-		return Record{}, fmt.Errorf("journal: append: write seq %d: %w", rec.Seq, err)
-	}
-	if err := j.f.Sync(); err != nil {
-		return Record{}, fmt.Errorf("journal: append: sync seq %d: %w", rec.Seq, err)
+	if err := ndjson.AppendLine(j.f, data); err != nil {
+		return Record{}, fmt.Errorf("journal: append: seq %d: %w", rec.Seq, err)
 	}
 	return rec, nil
 }
@@ -315,44 +253,36 @@ type ReadResult struct {
 // Read is streaming: it holds at most one line's bytes in memory at a time
 // (bounded by maxLineBytes) and never copies a line it does not need to, so
 // reading a very large journal costs O(1) scratch memory beyond the records
-// it returns.
+// it returns. ndjson.Scan does the streaming and the telling apart of a torn
+// tail from corruption; Read supplies what a valid line is.
 func Read(r io.Reader) (ReadResult, error) {
-	sc := bufio.NewScanner(r)
-	sc.Buffer(make([]byte, 0, 64*1024), maxLineBytes)
+	var result ReadResult
 
-	var (
-		result     ReadResult
-		line       int
-		pendingErr error // set when the immediately preceding line failed to parse
-	)
-
-	for sc.Scan() {
-		line++
-		if pendingErr != nil {
-			// Another line exists after the one that failed to parse, so
-			// that failure was not a torn final write — it is corruption.
-			return result, &MalformedRecordError{Line: line - 1, Err: pendingErr}
-		}
-
+	incomplete, err := ndjson.Scan(r, func(line []byte) error {
 		// parseLine decodes fully into rec (json.Unmarshal copies whatever
 		// it keeps, e.g. every string field, into rec's own storage), so it
-		// is safe to hand it sc.Bytes() directly without copying: nothing
-		// retains a reference to the scanner's internal buffer past this
-		// call, which the scanner is free to overwrite on the next Scan.
-		rec, err := parseLine(sc.Bytes())
+		// is safe to hand it the scanner's bytes directly without copying:
+		// nothing retains a reference to the scanner's internal buffer past
+		// this call, which the scanner is free to overwrite on the next line.
+		rec, err := parseLine(line)
 		if err != nil {
-			pendingErr = err
-			continue
+			return err
 		}
 		result.Records = append(result.Records, rec)
-	}
-	if err := sc.Err(); err != nil {
+		return nil
+	})
+	if err != nil {
+		// A line that failed to parse with another line after it was not a
+		// torn final write — it is corruption, reported in the journal's own
+		// terms.
+		var broken *ndjson.LineError
+		if errors.As(err, &broken) {
+			return result, &MalformedRecordError{Line: broken.Line, Err: broken.Err}
+		}
 		return result, fmt.Errorf("journal: read: %w", err)
 	}
 
-	if pendingErr != nil {
-		result.Incomplete = true
-	}
+	result.Incomplete = incomplete
 	return result, nil
 }
 
