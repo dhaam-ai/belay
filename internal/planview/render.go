@@ -333,6 +333,12 @@ func (m Model) screenBlocks() []block {
 			{lines: m.sentences("Your edits are not saved yet.")},
 			hints("y save and leave", "n leave without saving", "esc stay"),
 		}
+	case conflict:
+		return []block{
+			{lines: m.sentences("The plan file has changed since belay opened it; it was edited somewhere else, " +
+				"perhaps. Saving now would overwrite that change.")},
+			hints("r read it again", "o overwrite it with what you see", "esc go back"),
+		}
 	case approving:
 		out := []block{
 			{lines: m.sentences("Approve this plan and continue the run? belay writes the code next.")},

@@ -20,6 +20,10 @@ import (
 	"github.com/dhaam-ai/belay/internal/plandoc"
 )
 
+// ErrChangedOnDisk is what Options.Save returns when the plan file no
+// longer holds what the viewer last read from it or wrote to it.
+var ErrChangedOnDisk = errors.New("planview: the plan file changed since the viewer read it")
+
 // Mode says what a person may do in the viewer.
 type Mode int
 
@@ -47,6 +51,8 @@ type Options struct {
 	// Save writes plan to the plan file. The viewer never writes a file
 	// itself: this is the only way anything it does reaches the disk.
 	Save func(plan []byte, overwrite bool) error
+	// Reload reads the plan file again.
+	Reload func() ([]byte, error)
 	// Blocker is why the run cannot continue from here.
 	Blocker string
 	// Spend is what the run has spent, and may spend.
@@ -100,6 +106,9 @@ const (
 	approving
 	// asking is the box for what a new plan should do differently.
 	asking
+	// conflict is the question asked when a save finds the plan file
+	// changed on disk.
+	conflict
 )
 
 // Model is the viewer's state. It is a bubbletea model: every change to it
@@ -138,6 +147,9 @@ type Model struct {
 	message string
 	// back is the screen the leaving question returns to on esc.
 	back screen
+	// pending is what a save that met a conflict was for: the decision the
+	// viewer closes with once the person overwrites, or nil for a save.
+	pending *Decision
 
 	decision Decision
 	// closing is set once the person has decided, and the viewer is to
@@ -182,6 +194,8 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.answerLeaving(key)
 	case m.screen == approving:
 		m.answerApproving(key)
+	case m.screen == conflict:
+		m.answerConflict(key)
 	default:
 		m.message = ""
 		m.read(key)
@@ -217,7 +231,7 @@ func (m *Model) read(msg tea.KeyPressMsg) {
 	case "u":
 		m.undoChange()
 	case "s":
-		m.save()
+		m.saveFor(nil)
 	case "q", "ctrl+c":
 		m.leave()
 	case "c":
@@ -275,12 +289,8 @@ func (m *Model) submitAsking() {
 		m.message = "Say what the new plan should do differently; belay gives your words to the agent as you typed them."
 		return
 	}
-	if m.dirty() && !m.save() {
-		m.closeEditor()
-		return
-	}
-	m.decision = Decision{Action: ActionRegenerate, Guidance: guidance}
-	m.closing = true
+	m.closeEditor()
+	m.saveFor(&Decision{Action: ActionRegenerate, Guidance: guidance})
 }
 
 // askToApprove asks the person to confirm the approval, showing what the
@@ -310,11 +320,7 @@ func (m *Model) answerApproving(key tea.KeyPressMsg) {
 	switch key.String() {
 	case "y":
 		m.screen = reading
-		if m.dirty() && !m.save() {
-			return
-		}
-		m.decision = Decision{Action: ActionApprove}
-		m.closing = true
+		m.saveFor(&Decision{Action: ActionApprove})
 	case "n", "esc":
 		m.screen = reading
 	case "ctrl+c":
@@ -381,10 +387,7 @@ func (m *Model) answerLeaving(key tea.KeyPressMsg) {
 				return // refused; the reason is on the screen
 			}
 		}
-		if m.dirty() && !m.save() {
-			return
-		}
-		m.closing = true
+		m.saveFor(&Decision{Action: ActionLeave})
 	case "n", "ctrl+c":
 		m.closing = true
 	case "esc":
@@ -515,6 +518,7 @@ func (m *Model) undoChange() {
 	}
 	m.doc = m.undo[len(m.undo)-1]
 	m.undo = m.undo[:len(m.undo)-1]
+	m.stepsErr = nil // only a document plandoc read is ever kept for undo
 	m.plan = m.doc.Bytes()
 	m.selectStep(m.selected)
 	m.message = "Undone."
@@ -523,24 +527,95 @@ func (m *Model) undoChange() {
 // dirty reports whether there are edits nobody has saved.
 func (m Model) dirty() bool { return !bytes.Equal(m.plan, m.disk) }
 
-// save writes the plan through Options.Save, says what happened, and
-// reports whether the file now holds the plan.
-func (m *Model) save() bool {
+// saveFor saves the plan when it has edits nobody saved, and then closes
+// the viewer with decision, when there is one. A save that finds the file
+// changed on disk asks the person what to do, and finishes the decision
+// only if they choose to overwrite.
+func (m *Model) saveFor(decision *Decision) {
 	if !m.dirty() {
-		m.message = "There is nothing to save: the plan file already holds what you see."
-		return true
+		if decision == nil {
+			m.message = "There is nothing to save: the plan file already holds what you see."
+		}
+		m.finish(decision)
+		return
 	}
 	if m.opts.Save == nil {
 		m.message = "belay cannot save this plan from here."
-		return false
+		return
 	}
-	if err := m.opts.Save(m.plan, false); err != nil {
+	err := m.opts.Save(m.plan, false)
+	switch {
+	case errors.Is(err, ErrChangedOnDisk):
+		m.pending = decision
+		m.screen = conflict
+		return
+	case err != nil:
 		m.message = "belay could not save the plan: " + err.Error()
-		return false
+		return
 	}
+	m.saved()
+	m.finish(decision)
+}
+
+// saved records that the file now holds the plan.
+func (m *Model) saved() {
 	m.disk = m.plan
 	m.message = "belay saved the plan to " + m.opts.Path + "."
-	return true
+}
+
+// finish closes the viewer with decision, when there is one.
+func (m *Model) finish(decision *Decision) {
+	if decision == nil {
+		return
+	}
+	m.decision = *decision
+	m.closing = true
+}
+
+// answerConflict answers the question asked when a save found the plan
+// file changed on disk: o overwrites it and carries on with what the save
+// was for, r reads it again, and esc goes back with the edits unsaved.
+func (m *Model) answerConflict(key tea.KeyPressMsg) {
+	pending := m.pending
+	switch key.String() {
+	case "o":
+		m.screen, m.pending = reading, nil
+		if err := m.opts.Save(m.plan, true); err != nil {
+			m.message = "belay could not save the plan: " + err.Error()
+			return
+		}
+		m.saved()
+		m.finish(pending)
+	case "r":
+		m.screen, m.pending = reading, nil
+		m.reload()
+	case "esc":
+		m.screen, m.pending = reading, nil
+	case "ctrl+c":
+		m.screen, m.pending = reading, nil
+		m.leave()
+	}
+}
+
+// reload reads the plan file again, keeping the viewer's edits for undo so
+// that reading the file is never the way they are lost.
+func (m *Model) reload() {
+	if m.opts.Reload == nil {
+		m.message = "belay cannot read the plan file again from here."
+		return
+	}
+	data, err := m.opts.Reload()
+	if err != nil {
+		m.message = "belay could not read the plan file again: " + err.Error()
+		return
+	}
+	if m.stepsErr == nil {
+		m.undo = append(m.undo, m.doc)
+	}
+	m.plan, m.disk = data, data
+	m.doc, m.stepsErr = plandoc.Parse(data)
+	m.selectStep(m.selected)
+	m.message = "belay read the plan file again; u brings back your edits."
 }
 
 // refusal says, for a person, why plandoc would not make a change.

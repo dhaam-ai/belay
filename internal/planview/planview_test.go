@@ -851,3 +851,110 @@ func TestTheNewPlanBoxUsesTheTerminalsOwnCursor(t *testing.T) {
 		t.Errorf("the cursor is at column %d, want %d, the end of the words", c.X, want)
 	}
 }
+
+// changedOnDisk is a plan somebody saved into the file from their editor
+// while the viewer had it open.
+const changedOnDisk = "## Steps\n\n1. What the person wrote in their editor.\n"
+
+// conflicted returns a viewer with one unsaved edit whose first save finds
+// the file changed on disk, and reloads changedOnDisk.
+func conflicted(t *testing.T, s *saves) Model {
+	t.Helper()
+	s.errs = []error{ErrChangedOnDisk}
+	opts := withSaves(s)
+	opts.Reload = func() ([]byte, error) { return []byte(changedOnDisk), nil }
+	m := keys(t, open(t, opts, 80, 24), "e")
+	m = typeText(t, m, " Now.")
+	return keys(t, m, "ctrl+s")
+}
+
+// TestASaveThatFindsTheFileChangedAsksWhatToDo: the person may have edited
+// plan.md in their own editor while the viewer was open. Saving over that
+// silently would throw their other edit away, so the viewer says what
+// happened and offers the two ways out: read the file again (u then brings
+// the viewer's edits back), or overwrite it with what is on the screen.
+func TestASaveThatFindsTheFileChangedAsksWhatToDo(t *testing.T) {
+	var s saves
+	m := keys(t, conflicted(t, &s), "s")
+	for _, want := range []string{"changed", "since belay opened it", "r read it again", "o overwrite", "esc go back"} {
+		if !strings.Contains(flat(m), want) {
+			t.Errorf("the conflict does not say %q:\n%s", want, screenText(m))
+		}
+	}
+
+	overwritten := keys(t, m, "o")
+	if len(s.overwrites) != 2 || !s.overwrites[1] {
+		t.Fatalf("o did not save with overwrite (overwrites: %v)", s.overwrites)
+	}
+	if strings.Contains(flat(overwritten), "edited") {
+		t.Errorf("after overwriting, the plan is still marked edited:\n%s", screenText(overwritten))
+	}
+
+	reloaded := keys(t, m, "r")
+	if !strings.Contains(flat(reloaded), "What the person wrote in their editor.") {
+		t.Errorf("r did not show the file as it is now:\n%s", screenText(reloaded))
+	}
+	if strings.Contains(flat(reloaded), "edited") {
+		t.Errorf("the plan just read from disk is marked edited:\n%s", screenText(reloaded))
+	}
+	if !strings.Contains(flat(reloaded), "u brings back your edits") {
+		t.Errorf("r did not say how to get the edits back:\n%s", screenText(reloaded))
+	}
+	undone := keys(t, reloaded, "u")
+	if !strings.Contains(flat(undone), "Add a dryRun field to runOptions. Now.") || !strings.Contains(flat(undone), "edited") {
+		t.Errorf("u after reading the file again did not bring the edits back:\n%s", screenText(undone))
+	}
+
+	before := len(s.plans)
+	stayed := keys(t, m, "esc")
+	if !strings.Contains(flat(stayed), "edited") || len(s.plans) != before {
+		t.Errorf("esc changed something (saves: %d, then %d):\n%s", before, len(s.plans), screenText(stayed))
+	}
+}
+
+// TestAConflictFinishesWhatTheSaveWasFor: a save made on the way to
+// approving, leaving or asking for a new plan carries on with it once the
+// person overwrites; reading the file again stops, so they can look at the
+// plan they are now approving.
+func TestAConflictFinishesWhatTheSaveWasFor(t *testing.T) {
+	tests := []struct {
+		name  string
+		start func(t *testing.T, m Model) Model
+		want  Decision
+	}{
+		{
+			name:  "approving",
+			start: func(t *testing.T, m Model) Model { return keys(t, m, "c", "y") },
+			want:  Decision{Action: ActionApprove},
+		},
+		{
+			name:  "leaving",
+			start: func(t *testing.T, m Model) Model { return keys(t, m, "q", "y") },
+			want:  Decision{Action: ActionLeave},
+		},
+		{
+			name: "asking for a new plan",
+			start: func(t *testing.T, m Model) Model {
+				return keys(t, typeText(t, keys(t, m, "r"), "shorter"), "enter")
+			},
+			want: Decision{Action: ActionRegenerate, Guidance: "shorter"},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var s saves
+			m := tt.start(t, conflicted(t, &s))
+			if !strings.Contains(flat(m), "o overwrite") {
+				t.Fatalf("the conflict was not reported:\n%s", screenText(m))
+			}
+			done, quit := quits(t, m, "o")
+			if !quit || done.Decision() != tt.want {
+				t.Errorf("o: left = %v, decided %+v; want to leave with %+v", quit, done.Decision(), tt.want)
+			}
+			stopped, quit := quits(t, m, "r")
+			if quit || stopped.Decision() != (Decision{Action: ActionLeave}) {
+				t.Errorf("r: left = %v, decided %+v; want to stay and decide nothing", quit, stopped.Decision())
+			}
+		})
+	}
+}
