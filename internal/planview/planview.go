@@ -61,6 +61,10 @@ type Options struct {
 	Spend Spend
 	// Color allows emphasis.
 	Color bool
+	// ASCII draws with ASCII characters only.
+	ASCII bool
+	// Locale names the setting that makes the locale what it is.
+	Locale string
 }
 
 // Spend is what a run has spent, and the most it may.
@@ -166,6 +170,9 @@ var _ tea.Model = Model{}
 // New returns a viewer showing what opts describes.
 func New(opts Options) Model {
 	m := Model{opts: opts, glyphs: unicodeGlyphs, plan: opts.Plan, disk: opts.Plan}
+	if opts.ASCII {
+		m.glyphs = asciiGlyphs
+	}
 	m.doc, m.stepsErr = plandoc.Parse(opts.Plan)
 	return m
 }
@@ -486,6 +493,13 @@ func (m *Model) openEditor() {
 	if len(steps) == 0 {
 		return
 	}
+	if m.glyphs.ascii && !isASCII(steps[m.selected].Text) {
+		// The editor draws the step's own bytes, which this terminal would
+		// show as something else, and saves what it shows.
+		m.message = fmt.Sprintf("This terminal cannot show every letter of step %d, so belay will not open it here. "+
+			"Edit it in the plan file instead: %s", m.selected+1, m.opts.Path)
+		return
+	}
 	m.screen = editing
 	m.editAt = m.selected
 	m.adding = false
@@ -710,4 +724,14 @@ func (m Model) refusal(err error) string {
 	default:
 		return "belay could not make that change: " + err.Error()
 	}
+}
+
+// isASCII reports whether s is nothing but ASCII.
+func isASCII(s string) bool {
+	for i := 0; i < len(s); i++ {
+		if s[i] >= 0x80 {
+			return false
+		}
+	}
+	return true
 }

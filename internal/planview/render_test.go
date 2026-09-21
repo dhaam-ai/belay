@@ -247,3 +247,55 @@ func TestTheColourDecisionReachesTheRenderer(t *testing.T) {
 		t.Errorf("profile(true) = %v, want ANSI", got)
 	}
 }
+
+// assertASCII fails for any byte of the view at or above 0x80. In a
+// terminal whose locale is not UTF-8 such a byte is not part of a letter:
+// Latin-1 reads 0x80 to 0x9F as C1 controls, so the continuation byte of a
+// UTF-8 arrow can start a control sequence.
+func assertASCII(t *testing.T, what string, m Model) {
+	t.Helper()
+	content := m.View().Content
+	for i := 0; i < len(content); i++ {
+		if content[i] >= 0x80 {
+			t.Errorf("%s: byte %#x at %d is not ASCII:\n%s", what, content[i], i, content)
+			return
+		}
+	}
+}
+
+// TestASCIIOutsideUTF8Locales: when the terminal's locale is not UTF-8,
+// the viewer draws its chrome with ASCII, shows letters it cannot draw as
+// ?, says so and why, and will not open a step it cannot show in the
+// editor.
+func TestASCIIOutsideUTF8Locales(t *testing.T) {
+	opts := review()
+	opts.ASCII = true
+	opts.Locale = "LANG=C"
+	opts.Spend = Spend{SpentUSD: 0.42, LimitUSD: 5}
+	m := open(t, opts, 80, 24)
+	assertASCII(t, "reading", m)
+	if got := flat(m); !strings.Contains(got, "LANG=C") || !strings.Contains(got, "not UTF-8") {
+		t.Errorf("the page does not say the locale is not UTF-8, naming it:\n%s", screenText(m))
+	}
+	if !strings.Contains(screenText(m), "> 1. Add a dryRun field") {
+		t.Errorf("the selection is not marked with an ASCII cursor:\n%s", screenText(m))
+	}
+	assertASCII(t, "editing", typeText(t, keys(t, m, "e"), " typed"))
+	assertASCII(t, "approving", keys(t, m, "c"))
+	assertASCII(t, "asking", typeText(t, keys(t, m, "r"), "fewer"))
+	assertASCII(t, "leaving", keys(t, typeText(t, keys(t, m, "e"), " x"), "ctrl+s", "q"))
+
+	opts.Plan = []byte(wide)
+	m = open(t, opts, 80, 24)
+	assertASCII(t, "a plan in other scripts", m)
+	if !strings.Contains(screenText(m), "Add tests ??? for the flag") {
+		t.Errorf("letters the terminal cannot draw are not shown as ?:\n%s", screenText(m))
+	}
+	m = keys(t, m, "e")
+	assertASCII(t, "editing a step in another script", m)
+	if strings.Contains(flat(m), "Editing step") || !strings.Contains(flat(m), "cannot show") {
+		t.Errorf("a step the terminal cannot show was opened in the editor, or not refused in words:\n%s", screenText(m))
+	}
+	m = keys(t, m, "j", "e")
+	assertASCII(t, "editing the next step", m)
+}

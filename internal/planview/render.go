@@ -29,17 +29,25 @@ const headerHeight = 3
 // take, so that a long one cannot push the plan off a small screen.
 const maxMessageLines = 3
 
-// glyphs are the characters the viewer draws its own chrome with.
+// glyphs are the characters the viewer draws its own chrome with, and
+// whether everything it draws must be ASCII.
 type glyphs struct {
 	cursor string // beside the selected step
 	rule   string // repeated to draw a horizontal line
 	sep    string // between two key hints
 	more   string // where text was cut short
 	bar    string // down the left of the editor
+	ascii  bool   // nothing but ASCII may reach the terminal
 }
 
 // unicodeGlyphs are for a terminal whose locale is UTF-8.
 var unicodeGlyphs = glyphs{cursor: "›", rule: "─", sep: " · ", more: "…", bar: "│"}
+
+// asciiGlyphs are for a terminal whose locale is not UTF-8. There, any byte
+// from 0x80 up is not part of a letter: a Latin-1 terminal reads 0x80 to
+// 0x9F as C1 controls, so the continuation byte of a UTF-8 arrow can start a
+// control sequence. Nothing but ASCII is drawn.
+var asciiGlyphs = glyphs{cursor: ">", rule: "-", sep: " | ", more: "...", bar: "|", ascii: true}
 
 // line is one line of the plan as the viewer lays it out: its text, already
 // made safe to print and cut to fit, and the step it belongs to.
@@ -67,18 +75,28 @@ const tabWidth = 4
 // it was written about. A C0 control or DEL becomes its Unicode control
 // picture (ESC is ␛), a C1 control its code in angle brackets, and a tab
 // spaces.
+//
+// Outside a UTF-8 locale the stand-ins are ASCII — caret notation, ^[ for
+// ESC — and every letter beyond ASCII is drawn as ?, for the reason
+// asciiGlyphs gives.
 func (g glyphs) clean(s string) string {
 	var b strings.Builder
 	for _, r := range s {
 		switch {
 		case r == '\t':
 			b.WriteString(strings.Repeat(" ", tabWidth))
+		case r < 0x20 && g.ascii:
+			b.WriteString("^" + string(r+'@'))
 		case r < 0x20:
 			b.WriteRune(0x2400 + r)
+		case r == 0x7f && g.ascii:
+			b.WriteString("^?")
 		case r == 0x7f:
 			b.WriteRune(0x2421)
 		case r >= 0x80 && r < 0xa0:
 			fmt.Fprintf(&b, "<%02X>", r)
+		case r >= 0x80 && g.ascii:
+			b.WriteByte('?')
 		default:
 			b.WriteRune(r)
 		}
@@ -419,6 +437,9 @@ func (m Model) screenBlocks() []block {
 			hints("enter asks for it", "esc goes back"))
 	}
 	var out []block
+	if m.glyphs.ascii {
+		out = append(out, block{lines: m.sentences(m.localeNotice()), drop: 2})
+	}
 	if m.opts.Mode == ReadOnly && m.opts.ReadOnlyReason != "" {
 		out = append(out, block{lines: m.sentences(m.opts.ReadOnlyReason), drop: 2})
 	}
@@ -495,4 +516,14 @@ func (m Model) spent() string {
 		return "Spent so far: " + amount + estimated + ", with no dollar ceiling set."
 	}
 	return fmt.Sprintf("Spent so far: %s of $%.2f%s.", amount, s.LimitUSD, estimated)
+}
+
+// localeNotice says why the viewer is drawing in ASCII, naming the setting
+// that made the locale what it is, so the person knows what to change.
+func (m Model) localeNotice() string {
+	locale := "This terminal's locale"
+	if m.opts.Locale != "" {
+		locale += " (" + m.opts.Locale + ")"
+	}
+	return locale + " is not UTF-8, so belay shows letters outside ASCII as ?, and they cannot be typed here."
 }
