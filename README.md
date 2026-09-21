@@ -323,6 +323,7 @@ Everything belay records about a run lives in `.belay/runs/<run-id>`:
 - `manifest.json` — what the run is and where it stands: its goal, status and current step, the settings it started with, and what it has spent
 - `state.json` — what the steps have produced so far, which every step reads: the plan, the files changed, the latest test and review results, how many repairs were made
 - `journal.ndjson` — an append-only record of every step's start and finish, from which `belay resume` works out where to pick up
+- `snapshots/` — a copy of what each step was given, taken before it ran, so a step run again after a crash or a Ctrl-C starts from the same place
 - `artifacts/` — the plan the agent generated (`artifacts/plan.md`), the agent's summary of the code it wrote, the diff each write step recorded, and the test and quality-gate reports
 - `nodes/` — for each step that called the agent, the prompt it sent and the reply it got
 
