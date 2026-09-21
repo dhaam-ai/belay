@@ -52,7 +52,7 @@ func branchGit(t *testing.T, dir string, args ...string) string {
 	t.Helper()
 	ctx, cancel := context.WithTimeout(t.Context(), time.Minute)
 	defer cancel()
-	cmd := exec.CommandContext(ctx, "git", args...)
+	cmd := exec.CommandContext(ctx, "git", args...) //nolint:gosec // every argument comes from a test literal
 	cmd.Dir = dir
 	cmd.Env = append(os.Environ(),
 		"GIT_AUTHOR_NAME=Belay Test", "GIT_AUTHOR_EMAIL=belay-test@example.invalid",
@@ -181,7 +181,7 @@ func TestBranchRunCommitsToItsOwnBranchAndLeavesTheCheckoutAlone(t *testing.T) {
 	if got := branchGit(t, repoDir, "status", "--porcelain", "--", ":(exclude).belay"); got != "" {
 		t.Errorf("the user's checkout is no longer clean:\n%s", got)
 	}
-	body, err := os.ReadFile(filepath.Join(repoDir, "src", "app.go"))
+	body, err := os.ReadFile(filepath.Join(repoDir, "src", "app.go")) //nolint:gosec // repoDir is this test's own t.TempDir()
 	if err != nil {
 		t.Fatalf("read the checkout's src/app.go: %v", err)
 	}
