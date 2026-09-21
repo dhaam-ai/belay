@@ -102,13 +102,8 @@ func continueRun(cmd *cobra.Command, runID string) error {
 	if err != nil {
 		return &ExitError{Code: graph.ExitFailed, Message: "belay: " + err.Error(), Err: err}
 	}
-	store := state.NewStore(layout)
-	if err := plan.resumePreflight(cmd.Context(), store); err != nil {
-		return &ExitError{Code: graph.ExitFailed, Message: "belay: " + err.Error(), Err: err}
-	}
-	// The preflight is what settles the output, so the store the dispatcher
-	// gets is built after it, from the pin rather than from belay.yaml.
-	if store, err = plan.workStore(layout); err != nil {
+	store, err := plan.openRun(cmd.Context(), layout)
+	if err != nil {
 		return &ExitError{Code: graph.ExitFailed, Message: "belay: " + err.Error(), Err: err}
 	}
 

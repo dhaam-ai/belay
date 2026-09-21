@@ -163,8 +163,8 @@ func regeneratePlan(cmd *cobra.Command, runID, guidance string) error {
 	if err != nil {
 		return &ExitError{Code: graph.ExitFailed, Message: "belay: " + err.Error(), Err: err}
 	}
-	store := state.NewStore(layout)
-	if err := runPlan.resumePreflight(cmd.Context(), store); err != nil {
+	store, err := runPlan.openRun(cmd.Context(), layout)
+	if err != nil {
 		return &ExitError{Code: graph.ExitFailed, Message: "belay: " + err.Error(), Err: err}
 	}
 

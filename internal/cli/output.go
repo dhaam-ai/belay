@@ -291,3 +291,20 @@ func shortCommit(id string) string {
 	}
 	return id[:width]
 }
+
+// openRun readies a chosen run for dispatch: it runs resumePreflight, which
+// settles the run's output from its pin rather than from belay.yaml, and
+// returns the Store the dispatcher must use -- redirected to the run's own
+// worktree when the run delivers on a branch.
+//
+// Every command that continues a run goes through here, so that none of them
+// can dispatch a branch run against the user's checkout. belay plan
+// --regenerate once built its own store and did exactly that.
+func (p *runPlan) openRun(ctx context.Context, layout state.Layout) (*state.Store, error) {
+	if err := p.resumePreflight(ctx, state.NewStore(layout)); err != nil {
+		return nil, err
+	}
+	// The preflight is what settles the output, so the store the dispatcher
+	// gets is built after it, from the pin rather than from belay.yaml.
+	return p.workStore(layout)
+}

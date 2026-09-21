@@ -894,3 +894,37 @@ func modTime(t *testing.T, path string) time.Time {
 	}
 	return info.ModTime()
 }
+
+// TestOpenRunWorksInTheRunsWorktree pins the one path every command that
+// continues a run takes. belay plan --regenerate once built its own store and
+// dispatched a branch run with the user's checkout as its working directory,
+// because it skipped the redirect belay resume applied.
+func TestOpenRunWorksInTheRunsWorktree(t *testing.T) {
+	dir := gitWorkspace(t)
+	plan, err := resolve(resolveRequest{workspace: dir, logger: quietLogger(), context: t.Context()})
+	if err != nil {
+		t.Fatalf("resolve: %v", err)
+	}
+	const runID = "20260101T000000Z-c0ffee000001"
+	if _, err := createRun(t.Context(), plan, runSpec{Workspace: dir, RunID: runID, Goal: "add a --json flag"}); err != nil {
+		t.Fatalf("createRun: %v", err)
+	}
+	layout, err := state.NewLayout(dir, runID)
+	if err != nil {
+		t.Fatalf("NewLayout: %v", err)
+	}
+	resumed, err := resolve(resolveRequest{workspace: dir, logger: quietLogger(), context: t.Context()})
+	if err != nil {
+		t.Fatalf("resolve: %v", err)
+	}
+	store, err := resumed.openRun(t.Context(), layout)
+	if err != nil {
+		t.Fatalf("openRun: %v", err)
+	}
+	if got, want := store.Layout().WorkspaceDir(), layout.WorkTreeDir(); got != want {
+		t.Errorf("a continued branch run works in %q, want the run worktree %q: its nodes would read and write the user's checkout", got, want)
+	}
+	if got := store.Layout().RunDir(); got != layout.RunDir() {
+		t.Errorf("the run directory moved to %q, want %q", got, layout.RunDir())
+	}
+}
