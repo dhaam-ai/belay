@@ -76,6 +76,9 @@ func TestRunContextCarriesEverythingANodeIsAllowedToSee(t *testing.T) {
 		BaseRef: "main", WorkTree: filepath.Join(layout.RunDir(), "worktree"), Prefix: "sub/",
 		PullRequest: true,
 	})
+	// Not the directory belay.yaml says, for the same reason: where a run
+	// files its plan comes from what the manifest pinned when it started.
+	man.ArchivedPlan.Dir = "notes/plans"
 	st := state.NewState("ship it")
 	st.Fix.Attempts = 2
 	// Spend something, so a Budget that was never filled in cannot pass as
@@ -109,6 +112,7 @@ func TestRunContextCarriesEverythingANodeIsAllowedToSee(t *testing.T) {
 		// result the way it was started, whatever belay.yaml says when it
 		// is resumed.
 		{"Output", rc.Output, man.Output},
+		{"ArchiveDir", rc.ArchiveDir, "notes/plans"},
 		{"VCS", rc.VCS, repo},
 	} {
 		if !reflect.DeepEqual(tc.got, tc.want) {

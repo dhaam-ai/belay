@@ -943,10 +943,11 @@ func (d *Dispatcher) runContext(
 			slog.String("node", node), slog.Int("step", step), slog.Int("attempt", attempt)),
 		Agent: d.agent, Runner: d.runner, Linter: d.linter,
 		Reviewer: d.reviewer, Isolator: d.isolator,
-		// A run-long value, so it comes from man, which was written when
+		// Run-long values, so they come from man, which was written when
 		// the run was created, never from d.cfg.
-		Output: man.Output,
-		VCS:    d.vcs,
+		Output:     man.Output,
+		ArchiveDir: man.ArchivedPlan.Dir,
+		VCS:        d.vcs,
 	}
 }
 
