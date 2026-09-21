@@ -734,7 +734,12 @@ func (i *Isolator) release(id string) {
 }
 
 // resolveSource validates src and returns it absolute and symlink-resolved.
-func (i *Isolator) resolveSource(src string) (string, error) {
+func (i *Isolator) resolveSource(src string) (string, error) { return resolveTree(src) }
+
+// resolveTree validates src and returns it absolute and symlink-resolved. It
+// is how both Create and SurveyTree find the tree they walk, so the two walk
+// the same one.
+func resolveTree(src string) (string, error) {
 	if strings.TrimSpace(src) == "" {
 		return "", &SourceError{Path: src, Reason: "source must not be empty"}
 	}
