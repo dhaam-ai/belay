@@ -9,6 +9,7 @@ import (
 	"unicode/utf8"
 
 	tea "charm.land/bubbletea/v2"
+	uv "github.com/charmbracelet/ultraviolet"
 	"github.com/charmbracelet/x/ansi"
 
 	"github.com/dhaam-ai/belay/internal/plandoc"
@@ -1068,5 +1069,50 @@ func TestAPlanWithNoStepsScrollsLineByLine(t *testing.T) {
 	m = keys(t, m, "home")
 	if !strings.Contains(flat(m), "## Summary") {
 		t.Errorf("home did not go back to the top:\n%s", screenText(m))
+	}
+}
+
+// TestTextThatIsNotUTF8IsRefusedOutLoud: in a terminal whose locale is not
+// UTF-8, a key like é arrives as a byte the input decoder cannot read, and
+// the editor would drop it without a word; pasted text that is not UTF-8
+// would lose its letters the same way. The viewer takes neither, and says
+// why, naming the locale, so the person is not left wondering where their
+// typing went.
+func TestTextThatIsNotUTF8IsRefusedOutLoud(t *testing.T) {
+	opts := review()
+	opts.Locale = "LANG=en_US.ISO8859-1"
+	tests := []struct {
+		name string
+		msg  tea.Msg
+		want string
+	}{
+		// What the decoder hands on for byte 0xE9 (é in Latin-1).
+		{name: "a key the decoder could not read", msg: uv.UnknownEvent(byte(0xe9)), want: "LANG=en_US.ISO8859-1"},
+		{name: "a key that arrived as a replacement character", msg: tea.KeyPressMsg{Code: utf8.RuneError, Text: "\uFFFD"}, want: "UTF-8"},
+		{name: "a paste that is not UTF-8", msg: tea.PasteMsg{Content: "caf\xe9"}, want: "not valid UTF-8"},
+	}
+	for _, tt := range tests {
+		for _, box := range []string{"e", "r"} {
+			t.Run(tt.name+" in "+box, func(t *testing.T) {
+				m := send(t, keys(t, open(t, opts, 80, 24), box), tt.msg)
+				if !strings.Contains(flat(m), tt.want) {
+					t.Errorf("the refusal does not say %q:\n%s", tt.want, screenText(m))
+				}
+				if strings.Contains(flat(m), "caf") || strings.Contains(flat(m), "\uFFFD") {
+					t.Errorf("the text was taken anyway:\n%s", screenText(m))
+				}
+			})
+		}
+	}
+
+	// A paste that is text goes in as typed, and an escape sequence the
+	// decoder did not recognise is not a key anybody typed.
+	m := send(t, keys(t, open(t, opts, 80, 24), "e"), tea.PasteMsg{Content: " Pasted."})
+	if !strings.Contains(flat(m), "runOptions. Pasted.") {
+		t.Errorf("a paste of ordinary text was not taken:\n%s", screenText(m))
+	}
+	m = send(t, keys(t, open(t, opts, 80, 24), "e"), uv.UnknownEvent("\x1b[?999;1$y"))
+	if strings.Contains(flat(m), "UTF-8") {
+		t.Errorf("an unrecognised escape sequence was reported as a key:\n%s", screenText(m))
 	}
 }

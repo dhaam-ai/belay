@@ -12,9 +12,11 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"unicode/utf8"
 
 	"charm.land/bubbles/v2/textarea"
 	tea "charm.land/bubbletea/v2"
+	uv "github.com/charmbracelet/ultraviolet"
 
 	"github.com/dhaam-ai/belay/internal/nodes/approve"
 	"github.com/dhaam-ai/belay/internal/plandoc"
@@ -358,6 +360,10 @@ func (m Model) ask(msg tea.Msg) (Model, tea.Cmd) {
 			return m, nil
 		}
 	}
+	if why := m.unreadable(msg); why != "" {
+		m.message = why
+		return m, nil
+	}
 	var cmd tea.Cmd
 	m.editor, cmd = m.editor.Update(msg)
 	m.follow()
@@ -435,6 +441,10 @@ func (m Model) edit(msg tea.Msg) (Model, tea.Cmd) {
 			m.leave()
 			return m, nil
 		}
+	}
+	if why := m.unreadable(msg); why != "" {
+		m.message = why
+		return m, nil
 	}
 	var cmd tea.Cmd
 	m.editor, cmd = m.editor.Update(msg)
@@ -734,4 +744,53 @@ func isASCII(s string) bool {
 		}
 	}
 	return true
+}
+
+// unreadable says why msg must not reach the editor, or returns "" when it
+// may: text that did not arrive as UTF-8.
+//
+// The editor would not refuse it, it would lose it: it drops the
+// replacement character a bad byte decodes to, so a key like é typed in a
+// Latin-1 terminal, or a pasted "café" that is not UTF-8, would vanish or
+// arrive without its letters, and nobody would be told. Such a key does not
+// reach the editor as a key at all: bubbletea's decoder hands on an
+// ultraviolet UnknownEvent holding the byte it could not read, which is
+// told apart here from the unknown escape sequences it also reports that
+// way.
+func (m Model) unreadable(msg tea.Msg) string {
+	locale := ""
+	if m.opts.Locale != "" {
+		locale = " This terminal's locale is " + m.opts.Locale + "."
+	}
+	switch msg := msg.(type) {
+	case uv.UnknownEvent:
+		if unreadableByte(string(msg)) {
+			return "belay could not read that key as UTF-8 text, so it was not typed." + locale
+		}
+	case tea.KeyPressMsg:
+		if !isText(msg.Text) {
+			return "belay could not read that key as UTF-8 text, so it was not typed." + locale
+		}
+	case tea.PasteMsg:
+		if !isText(msg.Content) {
+			return "belay did not paste that: it is not valid UTF-8 text, and parts of it would have been lost." + locale
+		}
+	}
+	return ""
+}
+
+// isText reports whether s is valid UTF-8 with no replacement characters.
+func isText(s string) bool {
+	return utf8.ValidString(s) && !strings.ContainsRune(s, utf8.RuneError)
+}
+
+// unreadableByte reports whether an UnknownEvent holds the one byte of a
+// key the decoder could not read as UTF-8: a byte from 0x80 up, which the
+// decoder hands on either raw or as the rune of the same value.
+func unreadableByte(s string) bool {
+	if len(s) == 1 {
+		return s[0] >= 0x80
+	}
+	r, size := utf8.DecodeRuneInString(s)
+	return size == len(s) && r >= 0x80 && r <= 0xff
 }
