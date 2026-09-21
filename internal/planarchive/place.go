@@ -45,7 +45,11 @@ func tempPath(dest string) string {
 }
 
 // Place makes root/rel hold data, and reports whether this call put it
-// there. It is the one way this package writes into a repository.
+// there. It is the one way belay writes a file into a person's repository
+// outside a node's own work: the promote node places a branch run's plan in
+// the worktree it is about to commit, File places an in-place run's plan in
+// the workspace, and `belay run` places the .belay/.gitignore that keeps
+// run state out of commits.
 //
 // It never replaces anything. A file already holding exactly data is taken
 // as the work of an earlier attempt that did not finish, and Place reports

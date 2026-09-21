@@ -199,6 +199,11 @@ func createRun(ctx context.Context, plan *runPlan, spec runSpec) (*state.Store, 
 	if err := os.MkdirAll(layout.ArtifactsDir(), 0o750); err != nil {
 		return nil, fmt.Errorf("cannot create the run directory %s: %w", layout.RunDir(), err)
 	}
+	// The first run in a repository is what creates .belay, so it is also
+	// what keeps .belay out of commits.
+	if err := ignoreRunState(spec.Workspace); err != nil {
+		return nil, err
+	}
 
 	if err := state.SaveState(layout.StatePath(), state.NewState(spec.Goal)); err != nil {
 		return nil, fmt.Errorf("cannot write %s: %w", layout.StatePath(), err)
