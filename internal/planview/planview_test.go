@@ -1151,3 +1151,41 @@ func TestTheEditorSaysWhatItCannotHold(t *testing.T) {
 		t.Errorf("an ordinary step was said to hold tabs or control characters:\n%s", got)
 	}
 }
+
+// TestEveryKeyIsListedUnderQuestionMark: the foot of the page has room for
+// a few keys, so ? shows them all, with what each does in words. Anything
+// that closes it goes back to the plan, and nothing there changes the plan.
+func TestEveryKeyIsListedUnderQuestionMark(t *testing.T) {
+	var s saves
+	m := keys(t, open(t, withSaves(&s), 80, 24), "?")
+	got := flat(m)
+	for _, want := range []string{
+		"j", "choose", "e", "edit", "a", "add", "d", "delete", "K", "move", "u", "undo",
+		"s", "save", "c", "approve", "r", "new plan", "q", "leave", "ctrl+z", "?",
+	} {
+		if !strings.Contains(got, want) {
+			t.Errorf("the keys screen does not mention %q:\n%s", want, screenText(m))
+		}
+	}
+	for _, k := range []string{"esc", "?", "q"} {
+		back := keys(t, m, k)
+		if !strings.Contains(flat(back), "1. Add a dryRun field") || strings.Contains(flat(back), "ctrl+z") {
+			t.Errorf("%s did not go back to the plan:\n%s", k, screenText(back))
+		}
+	}
+	if keys(t, m, "d", "e", "a"); len(s.plans) != 0 {
+		t.Error("a key pressed on the keys screen changed the plan")
+	}
+}
+
+// TestCtrlZSuspendsTheViewer: ctrl+z puts belay in the background as any
+// other program does, rather than being swallowed by raw mode.
+func TestCtrlZSuspendsTheViewer(t *testing.T) {
+	_, cmd := open(t, review(), 80, 24).Update(press("ctrl+z"))
+	if cmd == nil {
+		t.Fatal("ctrl+z did nothing")
+	}
+	if _, ok := cmd().(tea.SuspendMsg); !ok {
+		t.Errorf("ctrl+z produced %#v, want a suspend", cmd())
+	}
+}

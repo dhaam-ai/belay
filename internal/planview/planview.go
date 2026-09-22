@@ -119,6 +119,8 @@ const (
 	// conflict is the question asked when a save finds the plan file
 	// changed on disk.
 	conflict
+	// keyList is the list of every key and what it does.
+	keyList
 )
 
 // Model is the viewer's state. It is a bubbletea model: every change to it
@@ -201,6 +203,14 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	}
 	var cmd tea.Cmd
 	switch key, isKey := msg.(tea.KeyPressMsg); {
+	case isKey && key.String() == "ctrl+z" && m.screen != editing && m.screen != asking:
+		// Suspending belongs to the shell, not to the viewer: without this
+		// raw mode would swallow it.
+		return m, tea.Suspend
+	case m.screen == keyList:
+		if isKey {
+			m.answerKeys(key)
+		}
 	case m.screen == editing:
 		m, cmd = m.edit(msg)
 	case m.screen == asking:
@@ -248,6 +258,9 @@ func (m *Model) read(msg tea.KeyPressMsg) {
 		return
 	case "q", "ctrl+c":
 		m.leave()
+		return
+	case "?":
+		m.screen = keyList
 		return
 	}
 	if !m.mayChange(k) {
@@ -798,4 +811,16 @@ func unreadableByte(s string) bool {
 	}
 	r, size := utf8.DecodeRuneInString(s)
 	return size == len(s) && r >= 0x80 && r <= 0xff
+}
+
+// answerKeys answers a key pressed on the list of keys: esc, ? and q go
+// back to the plan, ctrl+c leaves, and nothing else does anything.
+func (m *Model) answerKeys(key tea.KeyPressMsg) {
+	switch key.String() {
+	case "esc", "?", "q":
+		m.screen = reading
+	case "ctrl+c":
+		m.screen = reading
+		m.leave()
+	}
 }

@@ -403,6 +403,15 @@ func (m Model) screenBlocks() []block {
 		return block{lines: []string{fit(strings.Join(h, m.glyphs.sep), m.width, m.glyphs.more)}}
 	}
 	switch m.screen {
+	case keyList:
+		var lines []string
+		for _, k := range keyHelp {
+			if k.change && m.opts.Mode == ReadOnly {
+				continue
+			}
+			lines = append(lines, fit(fmt.Sprintf("%-12s %s", k.key, k.does), m.width, m.glyphs.more))
+		}
+		return append([]block{{lines: lines}}, hints("esc goes back"))
 	case leaving:
 		return []block{
 			{lines: m.sentences("Your edits are not saved yet.")},
@@ -530,4 +539,28 @@ func (m Model) localeNotice() string {
 		locale += " (" + m.opts.Locale + ")"
 	}
 	return locale + " is not UTF-8, so belay shows letters outside ASCII as ?, and they cannot be typed here."
+}
+
+// keyHelp is every key the viewer answers to, and what it does, as the ?
+// screen lists them. change marks the ones a read-only viewer does not
+// offer.
+var keyHelp = []struct {
+	key    string
+	does   string
+	change bool
+}{
+	{key: "j k, arrows", does: "choose a step, or scroll a plan that has none"},
+	{key: "pgup pgdown", does: "scroll a page at a time"},
+	{key: "home end", does: "go to the first or the last step"},
+	{key: "e, enter", does: "edit the selected step (ctrl+s keeps it, esc throws it away)", change: true},
+	{key: "a", does: "add a step after the selected one", change: true},
+	{key: "d", does: "delete the selected step", change: true},
+	{key: "K J", does: "move the selected step up or down", change: true},
+	{key: "u", does: "undo the last change", change: true},
+	{key: "s", does: "save the plan to its file", change: true},
+	{key: "c", does: "approve the plan and continue the run", change: true},
+	{key: "r", does: "ask the agent for a new plan", change: true},
+	{key: "q, ctrl+c", does: "leave, and keep the run waiting at its plan"},
+	{key: "ctrl+z", does: "put belay in the background"},
+	{key: "?", does: "show or hide this list"},
 }
