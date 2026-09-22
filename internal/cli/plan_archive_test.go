@@ -256,3 +256,45 @@ func TestPlanArchiveConvergesAfterACrashBeforeThePointer(t *testing.T) {
 		t.Errorf("the run's copy of the plan is still there (stat error %v)", err)
 	}
 }
+
+// TestPlanArchiveUnderDryRunMovesNothing: --archive writes into the
+// repository, and --dry-run promises belay writes nothing at all. It says
+// where the plan would go and leaves both copies where they are.
+func TestPlanArchiveUnderDryRunMovesNothing(t *testing.T) {
+	ws := goWorkspace(t)
+	if err := os.MkdirAll(filepath.Join(ws, "docs", "plans"), 0o750); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	reached := false
+	var blocker string
+	_, _, store, err := finishInPlace(t, ws, blocksThePlan{reached: &reached, dest: &blocker, ws: ws})
+	if err != nil {
+		t.Fatalf("finish the run: %v", err)
+	}
+	if err := os.Remove(blocker); err != nil {
+		t.Fatalf("clear the way: %v", err)
+	}
+	runID := store.Layout().RunID()
+
+	stdout, _, err := runCLI(t, "--dry-run", "--workspace", ws, "plan", "--archive", runID)
+	if err != nil {
+		t.Fatalf("belay --dry-run plan --archive: %v", err)
+	}
+
+	if !strings.Contains(stdout, planarchive.Rel("docs/plans", runID, "add tests")) {
+		t.Errorf("the dry run does not say where the plan would go:\n%s", stdout)
+	}
+	if _, err := os.Stat(blocker); !os.IsNotExist(err) {
+		t.Errorf("the plan was moved under --dry-run (stat error %v)", err)
+	}
+	if _, err := os.Stat(filepath.Join(store.Layout().ArtifactsDir(), "plan.md")); err != nil {
+		t.Errorf("the run's copy of the plan is gone after a dry run: %v", err)
+	}
+	man, err := store.LoadManifest()
+	if err != nil {
+		t.Fatalf("LoadManifest: %v", err)
+	}
+	if man.ArchivedPlan.Path != "" {
+		t.Errorf("a dry run recorded archived_plan.path = %q", man.ArchivedPlan.Path)
+	}
+}
