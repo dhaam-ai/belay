@@ -207,3 +207,52 @@ func finishOnABranch(t *testing.T) (dir, runID string) {
 	}
 	return dir, runID
 }
+
+// TestPlanArchiveConvergesAfterACrashBeforeThePointer is the crash the move
+// is built around, through the command a person runs: the plan was already
+// in docs/plans, byte for byte, when belay was killed before the manifest
+// recorded it. `belay plan --archive` adopts that copy rather than filing a
+// second one beside it, records it, and removes the run's copy.
+func TestPlanArchiveConvergesAfterACrashBeforeThePointer(t *testing.T) {
+	ws := goWorkspace(t)
+	if err := os.MkdirAll(filepath.Join(ws, "docs", "plans"), 0o750); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	reached := false
+	var placed string
+	_, _, store, err := finishInPlace(t, ws, blocksThePlan{reached: &reached, dest: &placed, ws: ws})
+	if err != nil {
+		t.Fatalf("finish the run: %v", err)
+	}
+	// What a move killed after placing the plan leaves: the plan in the
+	// repository, the pointer not yet recorded, the run's copy still there.
+	if err := os.WriteFile(placed, []byte(archivedBody), 0o600); err != nil {
+		t.Fatalf("stand in for the placed plan: %v", err)
+	}
+
+	if _, _, err := runCLI(t, "--workspace", ws, "plan", "--archive", store.Layout().RunID()); err != nil {
+		t.Fatalf("belay plan --archive: %v", err)
+	}
+
+	entries, err := os.ReadDir(filepath.Dir(placed))
+	if err != nil {
+		t.Fatalf("read docs/plans: %v", err)
+	}
+	if len(entries) != 1 || entries[0].Name() != filepath.Base(placed) {
+		names := make([]string, 0, len(entries))
+		for _, e := range entries {
+			names = append(names, e.Name())
+		}
+		t.Errorf("docs/plans holds %v, want exactly %s", names, filepath.Base(placed))
+	}
+	man, err := store.LoadManifest()
+	if err != nil {
+		t.Fatalf("LoadManifest: %v", err)
+	}
+	if want := planarchive.Rel("docs/plans", store.Layout().RunID(), "add tests"); man.ArchivedPlan.Path != want {
+		t.Errorf("manifest archived_plan.path = %q, want %q", man.ArchivedPlan.Path, want)
+	}
+	if _, err := os.Stat(filepath.Join(store.Layout().ArtifactsDir(), "plan.md")); !os.IsNotExist(err) {
+		t.Errorf("the run's copy of the plan is still there (stat error %v)", err)
+	}
+}
