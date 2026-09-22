@@ -9,6 +9,7 @@ import (
 	"slices"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/spf13/cobra"
 
@@ -323,5 +324,149 @@ func TestTheViewerSavesThroughTheGatesOwnPathAndRule(t *testing.T) {
 	}
 	if got := readFile(t, file.path); got != string(edited) {
 		t.Errorf("overwriting left %q", got)
+	}
+}
+
+// pausedAtTheGateForReal drives a run until the gate stops it, with no
+// terminal anywhere, so that its journal says what the gate did.
+func pausedAtTheGateForReal(t *testing.T, plans ...string) (*runPlan, *state.Store) {
+	t.Helper()
+	var quiet bytes.Buffer
+	u := &ui{out: &quiet, err: &quiet}
+	p, store, _ := pausedRun(t, u, plans...)
+	if err := driveRun(cmdWithContext(), u, p, store, false); err != nil {
+		t.Fatalf("driving the run to its gate: %v", err)
+	}
+	return p, store
+}
+
+// TestPlanOpensTheViewerOnARunWaitingAtItsPlan: `belay plan` at a terminal
+// is the way in to the viewer, and it shows the plan of the run it picked,
+// in the mode that lets the person change it.
+func TestPlanOpensTheViewerOnARunWaitingAtItsPlan(t *testing.T) {
+	_, store := pausedAtTheGateForReal(t, firstPlan)
+	reviewer := &scriptedReviewer{answers: []planview.Decision{{Action: planview.ActionLeave}}}
+	var out bytes.Buffer
+	u := reviewUI(&out, reviewer)
+	cmd := cmdWithContext()
+	cmd.Flags().String("workspace", store.Layout().WorkspaceDir(), "")
+
+	if err := showPlan(cmd, u, store.Layout().RunID()); err != nil {
+		t.Fatalf("belay plan: %v", err)
+	}
+	if len(reviewer.opens) != 1 {
+		t.Fatalf("the viewer was opened %d time(s), want once", len(reviewer.opens))
+	}
+	opened := reviewer.opens[0]
+	if opened.Mode != planview.Review {
+		t.Errorf("the viewer opened in mode %v, want the one that can change the plan", opened.Mode)
+	}
+	if string(opened.Plan) != firstPlan {
+		t.Errorf("the viewer was given %q, want the plan on disk", opened.Plan)
+	}
+	if want := filepath.Join(store.Layout().ArtifactsDir(), plan.ArtifactName); opened.Path != want {
+		t.Errorf("the viewer was told the plan is at %q, want %q", opened.Path, want)
+	}
+	got := out.String()
+	for _, want := range []string{"belay resume " + store.Layout().RunID(), "belay plan " + store.Layout().RunID()} {
+		if !strings.Contains(got, want) {
+			t.Errorf("leaving the viewer does not say how to come back (%q):\n%s", want, got)
+		}
+	}
+}
+
+// TestPlanShowsARunThatIsNotWaitingReadOnly: a run that is not stopped at
+// its plan can still be read, but nothing in it may be changed, and the
+// viewer is told to say why.
+func TestPlanShowsARunThatIsNotWaitingReadOnly(t *testing.T) {
+	store := pausedAtTheGate(t, regenPlanBody)
+	ws := store.Layout().WorkspaceDir()
+	seedManifest(t, ws, store.Layout().RunID(), state.RunStatusRunning, graph.NodeTest, "add tests", time.Now().UTC())
+
+	reviewer := &scriptedReviewer{answers: []planview.Decision{{Action: planview.ActionLeave}}}
+	var out bytes.Buffer
+	u := reviewUI(&out, reviewer)
+	cmd := cmdWithContext()
+	cmd.Flags().String("workspace", ws, "")
+
+	if err := showPlan(cmd, u, store.Layout().RunID()); err != nil {
+		t.Fatalf("belay plan: %v", err)
+	}
+	if len(reviewer.opens) != 1 {
+		t.Fatalf("the viewer was opened %d time(s), want once", len(reviewer.opens))
+	}
+	opened := reviewer.opens[0]
+	if opened.Mode != planview.ReadOnly {
+		t.Errorf("the viewer opened in mode %v, want read-only", opened.Mode)
+	}
+	if !strings.Contains(opened.ReadOnlyReason, "test") {
+		t.Errorf("the reason does not say where the run is: %q", opened.ReadOnlyReason)
+	}
+}
+
+// TestPlanWithoutATerminalPrintsThePlanAsItAlwaysHas: the headless form is
+// untouched, and it is what a run without a terminal still gets.
+func TestPlanWithoutATerminalPrintsThePlanAsItAlwaysHas(t *testing.T) {
+	_, store := pausedAtTheGateForReal(t, firstPlan)
+	var out bytes.Buffer
+	u := &ui{out: &out, err: &out}
+	u.review = func(context.Context, *os.File, *os.File, planview.Options) (planview.Decision, error) {
+		t.Fatal("belay plan opened the viewer with no terminal to open it on")
+		return planview.Decision{}, nil
+	}
+	cmd := cmdWithContext()
+	cmd.Flags().String("workspace", store.Layout().WorkspaceDir(), "")
+
+	if err := showPlan(cmd, u, store.Layout().RunID()); err != nil {
+		t.Fatalf("belay plan: %v", err)
+	}
+	got := out.String()
+	assertPlainText(t, "belay plan", got)
+	for _, want := range []string{
+		"1. Rewrite the parser.",
+		filepath.Join(store.Layout().ArtifactsDir(), plan.ArtifactName),
+		"Edit that file if you want to, then approve it and carry on with:",
+		"belay resume " + store.Layout().RunID(),
+		"--regenerate",
+	} {
+		if !strings.Contains(got, want) {
+			t.Errorf("belay plan no longer says %q:\n%s", want, got)
+		}
+	}
+}
+
+// TestApprovingFromPlanContinuesTheRun: approving in the viewer opened by
+// `belay plan` continues the run, through the same approval and the same
+// dispatch as `belay resume`.
+func TestApprovingFromPlanContinuesTheRun(t *testing.T) {
+	p, store := pausedAtTheGateForReal(t, firstPlan)
+	reviewer := &scriptedReviewer{answers: []planview.Decision{{Action: planview.ActionApprove}}}
+	var out bytes.Buffer
+	u := reviewUI(&out, reviewer)
+	p.logger = newLogger(u)
+	reached := false
+	registry := graph.NewRegistry()
+	registry.MustRegister(plan.New(), approve.New(), endsTheRun{reached: &reached})
+	p.registry = registry
+	chosen, err := chooseRun(store.Layout().WorkspaceDir(), store.Layout().RunID())
+	if err != nil {
+		t.Fatalf("chooseRun: %v", err)
+	}
+
+	if err := reviewPlanOfRun(cmdWithContext(), u, p, store, chosen, true); err != nil {
+		t.Fatalf("reviewing the plan: %v", err)
+	}
+	if !reached {
+		t.Error("approving in the viewer did not continue the run")
+	}
+	st, err := store.LoadState()
+	if err != nil {
+		t.Fatalf("load state: %v", err)
+	}
+	if !st.Plan.Approved {
+		t.Error("the approval was not recorded")
+	}
+	if got := out.String(); !strings.Contains(got, "belay is continuing a run") {
+		t.Errorf("belay did not say it was continuing the run:\n%s", got)
 	}
 }
