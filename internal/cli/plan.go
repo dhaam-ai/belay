@@ -191,18 +191,12 @@ func regeneratePlan(cmd *cobra.Command, runID, guidance string) error {
 
 	announceContinue(u, runPlan, chosen, layout, runID == "")
 
-	// Preflight before the request is recorded, for the reason continueRun
-	// gives: recording it is the first thing belay writes to this run, and a
-	// crash afterwards must not leave an older belay a manifest it accepts
-	// over a state.json it does not (ADR-0011).
-	if err := store.Preflight(); err != nil {
+	// recordRegeneration is the same code the plan viewer's request goes
+	// through, so asking with a terminal and asking without one record the
+	// same thing.
+	if err := recordRegeneration(u, store, guidance); err != nil {
 		return &ExitError{Code: graph.ExitFailed, Message: "belay: " + err.Error(), Err: err}
 	}
-	if err := requestRegeneration(store, guidance); err != nil {
-		return &ExitError{Code: graph.ExitFailed, Message: "belay: " + err.Error(), Err: err}
-	}
-	u.say("  belay is writing a new plan; the run stops at the plan again when it has one")
-	u.say("")
 
 	return driveRun(cmd, u, runPlan, store, true)
 }

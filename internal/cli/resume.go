@@ -117,34 +117,16 @@ func continueRun(cmd *cobra.Command, runID string) error {
 
 	announceContinue(u, plan, chosen, layout, runID == "")
 
-	// Recording an approval below saves state.json, and that is the first
-	// thing belay writes to this run — before the dispatcher, which
-	// establishes the run for itself before it opens the journal.
-	// state.Store.Preflight refuses a run belay may not read, and saves the
-	// manifest at the schema version belay writes, so a crash after the
-	// approval cannot leave an older belay a manifest it still accepts over a
-	// state.json it does not (ADR-0011).
-	if err := store.Preflight(); err != nil {
-		return &ExitError{Code: graph.ExitFailed, Message: "belay: " + err.Error(), Err: err}
-	}
-
 	awaiting, err := awaitsApproval(chosen, layout)
 	if err != nil {
 		return &ExitError{Code: graph.ExitFailed, Message: "belay: " + err.Error(), Err: err}
 	}
 	if awaiting {
-		done, err := approvePlan(store)
-		if err != nil {
+		// Resuming past the gate is the approval, and recordApproval is
+		// where that is written — the same code the plan viewer's approval
+		// goes through, so the two can never mean different things.
+		if err := recordApproval(u, store); err != nil {
 			return &ExitError{Code: graph.ExitFailed, Message: "belay: " + err.Error(), Err: err}
-		}
-		if done.recorded {
-			u.say("  the plan is approved; belay reads it again now, so any edit you made counts")
-		}
-		if done.withdrew {
-			u.say("  the new plan you asked for is no longer wanted, so belay will not write one")
-		}
-		if done.changed() {
-			u.say("")
 		}
 	}
 
@@ -325,6 +307,17 @@ func awaitsApproval(chosen resumableRun, layout state.Layout) (bool, error) {
 	if chosen.node != graph.NodeApprove || chosen.status != state.RunStatusPaused {
 		return false, nil
 	}
+	return gateAsked(layout)
+}
+
+// gateAsked reports whether the last thing this run did was the approve
+// gate pausing it to ask about its plan.
+//
+// It is the journal half of awaitsApproval, on its own because everything
+// that treats a person as having been asked — resuming as approval, the
+// viewer opening, `belay runs` saying a run needs plan approval — must
+// agree about when that happened, and the manifest cannot tell.
+func gateAsked(layout state.Layout) (bool, error) {
 	read, err := journal.ReadFile(layout.JournalPath())
 	if err != nil {
 		return false, fmt.Errorf("cannot read this run's journal: %w", err)
