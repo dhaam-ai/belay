@@ -210,6 +210,19 @@ type RunContext struct {
 	// run has is decided once, when the registry is built.
 	Output state.Output
 
+	// ArchiveDir is where the run files its plan once it completes: a
+	// slash-separated directory relative to Workspace, as the run's manifest
+	// pinned it when the run was created (state.ArchivedPlan.Dir), or empty
+	// when the run does not archive its plan.
+	//
+	// It comes from the manifest for the reason Output does. The promote
+	// node writes a branch run's plan into its worktree from it just before
+	// the run's one commit, and a promote re-run after a crash must write the
+	// same file to the same place, whatever belay.yaml says by the time the
+	// run is resumed: read live, a changed plan.archive_dir would put a
+	// second copy somewhere else and make a second commit.
+	ArchiveDir string
+
 	// VCS is the run's version control: what the promote node commits and
 	// integrates through. It is nil unless the run's output is a branch,
 	// and a node that needs it must return a clear error when it is nil,

@@ -4,9 +4,11 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io/fs"
 	"log/slog"
 	"os"
 	"os/signal"
+	"path"
 	"path/filepath"
 	"slices"
 	"strconv"
@@ -19,6 +21,7 @@ import (
 	"github.com/dhaam-ai/belay/internal/config"
 	"github.com/dhaam-ai/belay/internal/detect"
 	"github.com/dhaam-ai/belay/internal/graph"
+	"github.com/dhaam-ai/belay/internal/planarchive"
 	"github.com/dhaam-ai/belay/internal/state"
 	"github.com/dhaam-ai/belay/pkg/belay"
 )
@@ -198,6 +201,11 @@ func createRun(ctx context.Context, plan *runPlan, spec runSpec) (*state.Store, 
 	// Creating artifacts/ creates the run directory above it in one call.
 	if err := os.MkdirAll(layout.ArtifactsDir(), 0o750); err != nil {
 		return nil, fmt.Errorf("cannot create the run directory %s: %w", layout.RunDir(), err)
+	}
+	// The first run in a repository is what creates .belay, so it is also
+	// what keeps .belay out of commits.
+	if err := ignoreRunState(spec.Workspace); err != nil {
+		return nil, err
 	}
 
 	if err := state.SaveState(layout.StatePath(), state.NewState(spec.Goal)); err != nil {
@@ -443,10 +451,21 @@ func pauseOnCancel(o *graph.Options) { o.PauseOnCancel = true }
 //  1. Save the recording, when agent.mode is "record". This happens whatever
 //     the outcome: a run that failed or was stopped still made the calls it
 //     recorded.
-//  2. Push the branch and open the draft pull request --pr asked for. It
+//  2. Move a completed run's plan out of the run directory (archivePlan). It
+//     goes after the recording because the recording exists only in memory
+//     until it is saved, and a crash here must not cost it, while the plan is
+//     whole on disk in at least one place for the whole of its move. It goes
+//     before the pull request because it is quick, local and durable, and a
+//     push that hangs or fails must not hold it up or skip it; the push does
+//     not need it, because a branch run's plan is already in the commit being
+//     pushed. And it goes before the worktree is tidied because in a branch
+//     run it confirms the plan against the worktree promote committed it
+//     from, which step 4 removes: run after that, it would find no plan and
+//     leave the run's copy behind.
+//  3. Push the branch and open the draft pull request --pr asked for. It
 //     goes before the worktree is tidied only because the two are
 //     independent and this is the one a person is waiting on.
-//  3. Tidy a finished branch run's worktree. It goes after the recording
+//  4. Tidy a finished branch run's worktree. It goes after the recording
 //     because saving the recording must not depend on a directory this step
 //     removes, and it reads how the run ended: a paused or failed run's
 //     worktree is where the person finishes, so only a completed run's goes.
@@ -466,6 +485,7 @@ func afterCompletion(ctx context.Context, u *ui, plan *runPlan, view *outcomeVie
 	} else if path != "" {
 		u.say("  recording saved to %s", path)
 	}
+	archivePlan(u, *view)
 	plan.publishRun(ctx, u, view)
 	plan.finishRun(ctx, *view)
 }
@@ -520,6 +540,9 @@ func announceStart(u *ui, plan *runPlan, layout state.Layout, want string) {
 	u.say("")
 	u.say("run %s", layout.RunID())
 	u.say("  state:  %s", layout.RunDir())
+	if where := plan.planGoesTo(layout.RunID(), want); where != "" {
+		u.say("  plan:   %s", where)
+	}
 	if plan.output.Branched() {
 		u.say("  branch: %s, from %s", plan.output.Branch, shortCommit(plan.output.Base))
 		u.say("  tree:   %s", plan.output.WorkTree)
@@ -898,7 +921,7 @@ func dryRunSections(u *ui, plan *runPlan, want, resuming string) []dryRunSection
 		dryRunSpend(u, plan),
 		dryRunSettings(plan),
 		dryRunRoute(plan),
-		dryRunCreates(plan),
+		dryRunCreates(plan, want, resuming != ""),
 	)
 	for _, w := range plan.warnings {
 		sections = append(sections, dryRunSection{title: "worth knowing", lines: []string{w}})
@@ -957,11 +980,45 @@ func dryRunRoute(plan *runPlan) dryRunSection {
 }
 
 // dryRunCreates is what a real run would write, and where.
-func dryRunCreates(plan *runPlan) dryRunSection {
-	return dryRunSection{title: "what it would create", lines: []string{
+//
+// Two of those writes land in the person's repository rather than in belay's
+// run directory, so each is named when it would happen: .belay/.gitignore,
+// which only the first run in a repository writes, and the plan, which a
+// finished run moves out beside its code. A resume creates neither — the
+// run already exists, and its plan goes where the run said when it started —
+// so neither is listed for one.
+func dryRunCreates(plan *runPlan, want string, resuming bool) dryRunSection {
+	lines := []string{
 		filepath.Join(plan.workspace, ".belay", "runs", "<run-id>"),
 		"holding manifest.json, state.json, journal.ndjson and the plan",
-	}}
+	}
+	if resuming {
+		return dryRunSection{title: "what it would create", lines: lines}
+	}
+	gitignore := filepath.Join(plan.workspace, ".belay", ".gitignore")
+	if _, err := os.Lstat(gitignore); errors.Is(err, fs.ErrNotExist) {
+		lines = append(lines, gitignore+", so git never offers any of that for a commit")
+	}
+	if where := plan.planGoesTo("<run-id>", want); where != "" {
+		lines = append(lines, "the plan, "+where)
+	}
+	return dryRunSection{title: "what it would create", lines: lines}
+}
+
+// planGoesTo says where a new run's plan ends up, or "" when plan.archive is
+// off: moved into the workspace for a run in place, committed with the change
+// for a run on a branch. It reads the settings NewManifest pins when the run
+// is created, cleaned the way it cleans them, so the promise made before the
+// run is the one the run keeps.
+func (p *runPlan) planGoesTo(runID, goal string) string {
+	if !p.config.Plan.Archive {
+		return ""
+	}
+	rel := planarchive.Rel(path.Clean(p.config.Plan.ArchiveDir), runID, goal)
+	if p.output.Branched() {
+		return "committed with the change, at " + rel
+	}
+	return "moved to " + filepath.Join(p.workspace, filepath.FromSlash(rel)) + " when the run finishes"
 }
 
 // budgetCeiling renders the budget in the two units it is capped in.

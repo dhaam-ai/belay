@@ -4,7 +4,9 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io/fs"
 	"os"
+	"path/filepath"
 	"slices"
 	"sync"
 
@@ -88,6 +90,11 @@ type fakeRepo struct {
 	conflicts map[string][]string
 	// failures makes the named method return an error.
 	failures map[string]error
+	// disk makes Commit also take up every file on disk under the working
+	// tree that no commit on its branch holds yet, the part of git's own
+	// `add --all` a test needs to see a file promote wrote itself end up
+	// in a commit. Tests that script their changes by name leave it off.
+	disk bool
 
 	next int
 }
@@ -241,6 +248,12 @@ func (r *fakeRepo) Commit(_ context.Context, dir string, msg vcs.Message) (strin
 		r.mu.Unlock()
 		return "", fmt.Errorf("commit in %s: %w", dir, errNoWorktree)
 	}
+	if r.disk {
+		if err := r.takeUpNewFiles(dir, branch); err != nil {
+			r.mu.Unlock()
+			return "", err
+		}
+	}
 	if len(r.dirty[dir]) == 0 {
 		tip := r.tips[branch]
 		r.mu.Unlock()
@@ -254,6 +267,31 @@ func (r *fakeRepo) Commit(_ context.Context, dir string, msg vcs.Message) (strin
 
 	r.log.record("Commit " + dir)
 	return id, nil
+}
+
+// takeUpNewFiles adds to dir's uncommitted changes every regular file under
+// dir that no commit reachable from branch holds. The caller holds r.mu.
+func (r *fakeRepo) takeUpNewFiles(dir, branch string) error {
+	held := map[string]bool{}
+	for id := range r.reachable(r.tips[branch]) {
+		for _, f := range r.commits[id].files {
+			held[f] = true
+		}
+	}
+	return filepath.WalkDir(dir, func(path string, d fs.DirEntry, err error) error {
+		if err != nil || !d.Type().IsRegular() {
+			return err
+		}
+		rel, err := filepath.Rel(dir, path)
+		if err != nil {
+			return err
+		}
+		rel = filepath.ToSlash(rel)
+		if !held[rel] && !slices.Contains(r.dirty[dir], rel) {
+			r.dirty[dir] = append(r.dirty[dir], rel)
+		}
+		return nil
+	})
 }
 
 // Integrate implements vcs.Repository: a merge commit with two parents,

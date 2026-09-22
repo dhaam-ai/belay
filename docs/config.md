@@ -30,6 +30,7 @@ review: {mode: lint, fail_on: major}
 budget: {max_usd: 5.00, max_tokens: 2000000, on_exceed: abort}
 fanout: {enabled: false, candidates: 3, isolator: auto, select: fewest_issues}
 output: {mode: auto}
+plan: {archive: true, archive_dir: docs/plans}
 ```
 
 ## `version`
@@ -356,6 +357,31 @@ The mode is recorded in the run's `manifest.json` when the run starts. `belay re
 
 <!-- slice:output -->
 
+## `plan`
+
+What becomes of a run's plan once the run is over.
+
+### `plan.archive`
+
+**Type**: Boolean  
+**Default**: `true`
+
+When a run finishes successfully, belay moves the plan it was approved with out of `.belay/runs/<run-id>/artifacts/plan.md` and into the repository, as `<plan.archive_dir>/<run-id>-<slug>.md`, where `<slug>` is your goal in lower-case words. The run directory is scratch, and deleting it is safe; the plan is the record of why the code looks the way it does, so it goes next to the code.
+
+- A run that edits the workspace in place leaves the plan as a new file beside its change, for you to commit with the change or delete. belay does not stage or commit it.
+- A run on a branch puts the plan in its one commit, so it is part of what the branch delivers, and of the pull request `--pr` opens.
+
+A run that failed, was stopped or has not finished keeps its plan in the run directory. After a plan has moved, `belay plan <run-id>` shows it from where it now is, and `belay timeline <run-id>` still shows the run: the journal and the manifest stay in the run directory.
+
+belay reads this setting when a run starts and records the answer in the run's manifest, so changing it does not change what a run already started does. Set `false` to leave every plan in `.belay`.
+
+### `plan.archive_dir`
+
+**Type**: String  
+**Default**: `"docs/plans"`
+
+Where finished plans go, relative to the workspace (`--workspace`), not to the directory belay was started from. Missing directories are created. It must stay inside the workspace: an absolute path, a `..`, and a path under `.belay` or `.git` are refused when the configuration loads, and a symbolic link that leads out of the workspace is refused when the plan is moved. belay never replaces a file that is already there; if one is, the plan stays in the run directory and belay says why. It is checked even when `plan.archive` is `false`.
+
 <!-- slice:plan -->
 
 <!-- slice:policy -->
@@ -437,6 +463,10 @@ fanout:
 
 output:
   mode: "auto"
+
+plan:
+  archive: true
+  archive_dir: "docs/plans"
 ```
 
 ## Example Configuration with SonarQube

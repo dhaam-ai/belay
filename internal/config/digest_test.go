@@ -144,6 +144,8 @@ func TestDigestChangesWhenAnyFieldChanges(t *testing.T) {
 		{"fanout.isolator", func(c *Config) { c.Fanout.Isolator = IsolatorWorktree }},
 		{"fanout.select", func(c *Config) { c.Fanout.Select = SelectFastest }},
 		{"output.mode", func(c *Config) { c.Output.Mode = OutputBranch }},
+		{"plan.archive", func(c *Config) { c.Plan.Archive = false }},
+		{"plan.archive_dir", func(c *Config) { c.Plan.ArchiveDir = "notes/plans" }},
 	}
 
 	base := Default().Digest()

@@ -3,8 +3,10 @@ package config
 import (
 	"errors"
 	"fmt"
+	"path"
 	"slices"
 	"strconv"
+	"strings"
 )
 
 // enumField describes one field whose value must come from a closed set.
@@ -111,6 +113,7 @@ func (c Config) Validate() error {
 	errs = append(errs, c.reviewErrors()...)
 	errs = append(errs, c.budgetErrors()...)
 	errs = append(errs, c.fanoutErrors()...)
+	errs = append(errs, c.planErrors()...)
 	return errors.Join(errs...)
 }
 
@@ -232,6 +235,44 @@ func (c Config) fanoutErrors() []error {
 			"want at least 2, because fanout.enabled is true"))
 	}
 	return errs
+}
+
+// planErrors checks plan.archive_dir, whether or not plan.archive is on.
+//
+// The value is a slash-separated path relative to the workspace, and the
+// rule is that it names a directory inside the workspace that neither belay
+// nor git keeps for itself. An absolute path would ignore the workspace, and
+// any ".." segment could climb out of it; the second is refused outright
+// rather than cleaned and judged, because a rule a person can check by eye
+// ("no ..") is worth more than accepting docs/../plans. Under .belay the plan
+// would be deleted with the run directory it was moved out of, and under
+// .git it would be in git's own files rather than in the repository. The
+// first segment is compared without regard to case, because on the file
+// systems macOS uses by default .Belay is the same directory as .belay.
+//
+// What this cannot see is the disk: a docs directory that is a symbolic link
+// out of the workspace passes here and is refused when the plan is moved
+// (internal/planarchive), which is the only moment the link can be read.
+func (c Config) planErrors() []error {
+	dir := c.Plan.ArchiveDir
+	cleaned := path.Clean(dir)
+	first, _, _ := strings.Cut(cleaned, "/")
+	var want string
+	switch {
+	case strings.ContainsRune(dir, 0):
+		want = "want a path with no NUL byte in it"
+	case path.IsAbs(dir):
+		want = "want a directory relative to the workspace, not an absolute path"
+	case slices.Contains(strings.Split(dir, "/"), ".."):
+		want = `want a path with no ".." in it, so the directory stays inside the workspace`
+	case cleaned == ".":
+		want = "want a directory inside the workspace, such as docs/plans"
+	case strings.EqualFold(first, ".belay") || strings.EqualFold(first, ".git"):
+		want = "want a directory not under .belay or .git, which belay and git keep for themselves"
+	default:
+		return nil
+	}
+	return []error{textError("plan.archive_dir", dir, want)}
 }
 
 func textError(field, value, want string) error {

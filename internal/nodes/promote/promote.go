@@ -53,6 +53,39 @@
 // point: destroying first would throw away the winner's uncommitted work,
 // which is all of what it did.
 //
+// # The approved plan
+//
+// A branch run's plan is part of what it delivers, so the one commit carries
+// it (ADR-0016). Just before it commits, promote writes the plan the run's
+// code was written from (internal/planarchive's Approved) into the tree it
+// is about to commit, at the path the run's manifest pinned when the run was
+// created (graph.RunContext.ArchiveDir). The CLI moves it out of the run
+// directory after the run completes: it records where the plan went and
+// removes the run's copy, which a node has no business doing.
+//
+// It is promote, and not a step before promote, because promote is the only
+// place that knows whether the commit has happened. A plan written by an
+// earlier node would sit uncommitted in the worktree while promote's re-run
+// question — is this work already committed? — was being asked about a tree
+// that had changed under it; a node of its own would add a step to every
+// branch run's route and journal for one file. Here the rule is the node's
+// usual one, asked of the repository: the plan is written while no commit of
+// this promotion is in the branch's history, and never after. Before the
+// commit a re-run writes the same bytes to the same path, which Place
+// adopts; after it, the re-run leaves the tree alone. Either way the tree,
+// the commit and the Result are the ones an uninterrupted promote produces,
+// even when the plan could not be read on the first attempt and can on the
+// second. A winner's promotion writes the plan into the winner's tree before
+// committing the winner's work there, so the merge brings plan and code in
+// together; the run's own worktree takes no uncommitted file, which the
+// merge would refuse.
+//
+// The plan is not what the tests and the quality gate judged — it is the
+// record of what their code was written from — and it cannot fail either.
+// So nothing about it can change the Result: a plan that cannot be written
+// is logged, the change is committed without it, and the CLI tells the
+// person the plan stayed in the run directory.
+//
 // # A merge conflict is a pause
 //
 // When the winner does not merge cleanly, a person has to decide what to
@@ -141,6 +174,7 @@ import (
 
 	"github.com/dhaam-ai/belay/internal/graph"
 	"github.com/dhaam-ai/belay/internal/journal"
+	"github.com/dhaam-ai/belay/internal/planarchive"
 	"github.com/dhaam-ai/belay/internal/state"
 	"github.com/dhaam-ai/belay/internal/vcs"
 	"github.com/dhaam-ai/belay/pkg/belay"
@@ -297,6 +331,7 @@ func checkOutput(rc *graph.RunContext) error {
 
 // promoteRun commits the run's own gated change.
 func promoteRun(ctx context.Context, rc *graph.RunContext) (graph.Result, error) {
+	archive(ctx, rc, rc.Workspace, rc.Output.WorkTree, trailers(rc.RunID, ""))
 	tip, err := rc.VCS.Commit(ctx, rc.Output.WorkTree, workMessage(rc, ""))
 	if err != nil {
 		if res, ok := unfinished(rc, err); ok {
@@ -337,6 +372,7 @@ func promoteWinner(ctx context.Context, rc *graph.RunContext) (graph.Result, err
 		if err := present(rc, winner); err != nil {
 			return failed(), err
 		}
+		archive(ctx, rc, winner.Dir, winner.Dir, mark)
 		if _, err := rc.VCS.Commit(ctx, winner.Dir, workMessage(rc, winner.ID)); err != nil {
 			if res, ok := unfinished(rc, err); ok {
 				return res, nil
@@ -377,6 +413,53 @@ func promoteWinner(ctx context.Context, rc *graph.RunContext) (graph.Result, err
 		slog.String("branch", promotion.Branch), slog.String("candidate", winner.ID),
 		slog.String("commit", promotion.Commit), slog.Int("files", promotion.Files))
 	return promoted(promotion, cleanup), nil
+}
+
+// archive writes the run's plan into root, the tree promote is about to
+// commit, at the path the run's manifest pinned (rc.ArchiveDir), so the
+// commit carries it. dir is the working tree that commit is made in, and
+// mark the trailers that commit carries. See "The approved plan" in the
+// package documentation.
+//
+// It writes nothing once the branch checked out at dir holds a commit
+// carrying mark: that commit is this promotion's, the tree is committed, and
+// a file written into it now would make a second commit on a re-run. A
+// repository that cannot answer the question, one without Carries, gets the
+// plan written anyway, and Place's convergence is what keeps a re-run from
+// changing the tree; one that fails to answer gets nothing, because not
+// writing can only leave the plan in the run directory.
+//
+// Nothing here can change the Result: every reason the plan stays out of
+// the commit is logged and the promotion goes ahead, because a run whose
+// change passed its quality gate has succeeded whether or not its plan
+// could be filed, and the CLI tells the person where the plan is.
+func archive(ctx context.Context, rc *graph.RunContext, root, dir string, mark []vcs.Trailer) {
+	if rc.ArchiveDir == "" {
+		return
+	}
+	rel := planarchive.Rel(rc.ArchiveDir, rc.RunID, rc.Goal)
+	log := logger(rc).With(slog.String("plan", rel))
+	if repo, ok := rc.VCS.(history); ok {
+		carried, err := repo.Carries(ctx, dir, mark...)
+		if err != nil {
+			log.Warn("promote: cannot tell whether this promotion already committed, so the plan stays out of its commit",
+				slog.Any("error", err))
+			return
+		}
+		if carried {
+			return
+		}
+	}
+	plan, err := planarchive.Approved(rc.Layout, rc.State.Plan)
+	if err == nil {
+		_, err = planarchive.Place(root, rel, plan)
+	}
+	if err != nil {
+		log.Warn("promote: the run's plan cannot go into its commit; the change is committed without it",
+			slog.Any("error", err))
+		return
+	}
+	log.Info("promote: the approved plan goes into the commit")
 }
 
 // findWinner returns the candidate join selected.

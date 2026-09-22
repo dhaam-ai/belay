@@ -17,6 +17,7 @@ import (
 // planFlags holds `belay plan`'s own settings.
 var planFlags struct {
 	regenerate string
+	archive    bool
 }
 
 var planCmd = &cobra.Command{
@@ -45,7 +46,15 @@ prompt, and the run stops at the plan again so you can read the new one. It
 spends what a planning step spends, which belay says before it starts.
 
 You can ask for a new plan only while a run is waiting at its plan for you;
-belay says where the run is instead if it is somewhere else.`,
+belay says where the run is instead if it is somewhere else.
+
+Name a run that has finished and belay shows its plan too, from wherever it
+is now. When a run finishes, belay moves its plan out of the run directory:
+into docs/plans in your repository, or, for a run on a branch, into the run's
+commit (plan.archive in belay.yaml). If belay could not move it, because a file
+was in the way or belay was stopped part way, move it once the way is clear:
+
+    belay plan --archive <run-id>`,
 	Example: `  belay plan
   belay plan 20260905T153301Z-1f2e3d4c5b6a
   belay plan --regenerate "fewer steps; do not touch the parser"`,
@@ -54,6 +63,9 @@ belay says where the run is instead if it is somewhere else.`,
 		var runID string
 		if len(args) == 1 {
 			runID = strings.TrimSpace(args[0])
+		}
+		if planFlags.archive {
+			return archivePlanNow(cmd, runID)
 		}
 		if cmd.Flags().Changed("regenerate") {
 			return regeneratePlan(cmd, runID, planFlags.regenerate)
@@ -66,6 +78,9 @@ func init() {
 	addRunFlags(planCmd)
 	planCmd.Flags().StringVar(&planFlags.regenerate, "regenerate", "",
 		`ask the agent for a new plan, saying what it should do differently`)
+	planCmd.Flags().BoolVar(&planFlags.archive, "archive", false,
+		"move a finished run's plan into the repository, if belay could not when the run finished")
+	planCmd.MarkFlagsMutuallyExclusive("archive", "regenerate")
 	rootCmd.AddCommand(planCmd)
 }
 
@@ -83,7 +98,7 @@ func showPlan(cmd *cobra.Command, runID string) error {
 	if err != nil {
 		return err
 	}
-	chosen, err := chooseRun(workspace, runID)
+	chosen, err := choosePlanRun(workspace, runID)
 	if err != nil {
 		return &ExitError{Code: graph.ExitFailed, Message: err.Error(), Err: err}
 	}
@@ -102,6 +117,9 @@ func showPlan(cmd *cobra.Command, runID string) error {
 		err := fmt.Errorf("run %s has not written a plan yet; it is %s.\nWatch it, or pick it up, with: belay resume %s",
 			chosen.id, statusSentence(chosen.status, chosen.node), chosen.id)
 		return &ExitError{Code: graph.ExitFailed, Message: "belay: " + err.Error(), Err: err}
+	}
+	if !resumable(chosen.status) {
+		return showFinishedPlan(cmd.Context(), u, workspace, chosen, layout, st)
 	}
 	_, abs, err := approve.PlanArtifact(layout, st.Plan.Path)
 	if err != nil {
