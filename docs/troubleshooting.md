@@ -411,6 +411,40 @@ The run has ended, and `belay resume` will not continue it. Change belay.yaml or
 
 <!-- slice:output -->
 
+## The Plan Did Not Move Into the Repository
+
+**Symptom**: A run finished, but its plan is still at `.belay/runs/<run-id>/artifacts/plan.md` and there is nothing in `docs/plans/`. belay said so on stderr, starting "the plan stays in the run directory".
+
+**Cause**: belay moves a finished run's plan into the repository (`plan.archive`), and refuses rather than force it. The message says which of these it hit:
+
+- `there is already a different file at ...` — something else is at that path, and belay never replaces a file somebody wrote
+- `the way to ... leads outside the workspace` — the archive directory, or a directory on the way to it, is a symbolic link leading out of the repository
+- `... changed after the run last read it` — `artifacts/plan.md` was edited after the run last read it, so it is no longer the plan the code was written from
+- `the run's commit does not have the plan at ...` — a run on a branch whose `promote` node could not write the plan before committing; `--verbose` shows the reason it logged
+- `the run has not finished successfully` — only a completed run's plan moves; a failed or stopped run's plan describes code that does not exist
+
+A run stopped between finishing and moving its plan leaves it in the run directory too, with nothing said, because belay never got that far.
+
+**Diagnosis**:
+- `belay plan <run-id>` shows the plan wherever it is now, and says where that is
+- `belay timeline <run-id>` is unaffected either way: the journal, the manifest and `state.json` never move
+
+**Remedy**:
+- Clear whatever the message named — move the file that is in the way, point `plan.archive_dir` inside the workspace — then run `belay plan --archive <run-id>`. Repeating it is harmless: belay adopts a copy it already placed rather than filing a second one
+- Copy the plan across by hand if you would rather; nothing reads it again
+- Set `plan.archive: false` to stop belay filing plans at all
+
+## Git Ignores Everything in .belay, Including the Cassette
+
+**Symptom**: `git add .belay/cassette.json` says the path is ignored.
+
+**Cause**: The first run in a repository writes `.belay/.gitignore` holding `*`, so run state — journals, manifests, worktrees, agent transcripts — is never offered for a commit by accident. The recording `agent.mode: record` saves lives under `.belay` by default, so it is ignored with the rest.
+
+**Remedy**:
+- Record it somewhere else: `belay run --cassette ./testdata/cassette.json ...`
+- Or commit that one file with `git add -f .belay/cassette.json`
+- A `.belay/.gitignore` you wrote yourself is never replaced, so you can also write your own rules there
+
 <!-- slice:plan -->
 
 <!-- slice:fork -->

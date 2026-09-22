@@ -21,7 +21,7 @@ This directory contains architecture decisions for belay, recorded to capture th
 | 0013 | A second agent backend | Reserved (slice 5) | Will amend 0005. |
 | 0014 | Per-node model routing and the policy gate | Reserved (slice 4) | |
 | 0015 | The interactive plan viewer | Reserved (slice 2) | |
-| 0016 | Archiving the approved plan into the repository | Reserved (slice 2) | |
+| [0016](0016-archiving-the-approved-plan-into-the-repository.md) | A finished run moves its plan into the repository | Accepted | A completed run's plan moves from `.belay/runs/<id>/artifacts/` to `docs/plans/<run-id>-<slug>.md`: into the commit for a branch run (written by `promote` before it commits), into the workspace for a run in place. Place, record, then remove, so a crash anywhere converges and never loses the plan. Cost: belay writes a file into the repository nobody named, and two settings change every config digest. |
 | 0017 | Forking a run to re-run one node, and the goal queue | Reserved (slice 3) | |
 | 0018 | SWE-bench corpus and the bare-agent control arm | Reserved (slice 6) | |
 | 0019 | Executing fanout candidates | Reserved (slice 7) | |

@@ -125,10 +125,12 @@ Usage.Estimated reports whether USD was computed from actual backend costs or es
 **CLI** (`cmd/belay`, implemented in `internal/cli`):
 - `belay run "<what you want built>"`: start a new run. `--workspace` names the repository, and `--config` adds a settings file on top of belay.yaml
 - `belay resume <run-id>`: continue a paused or crashed run
-- `belay plan [run-id]`: read the plan a run stopped at; `--regenerate "<guidance>"` records a request for a new one and continues the run, so the plan node writes it
+- `belay plan [run-id]`: read the plan a run stopped at, or a finished run's plan wherever it has moved to; `--regenerate "<guidance>"` records a request for a new one and continues the run, so the plan node writes it, and `--archive` finishes moving a finished run's plan into the repository when the run could not
 - `belay runs`: list the workspace's runs
 - `belay timeline <run-id>`: inspect the journal and manifest
 - Config is validated on load; invalid settings abort before any work starts.
+
+**After a dispatch** (`afterCompletion` in `internal/cli/run.go`): the CLI does what belongs to the end of a run, in a fixed order that can never change the exit status — save the recording, move a completed run's plan into the repository (`internal/planarchive`, ADR-0016), push the branch and open the pull request `--pr` asked for, and remove a completed branch run's worktree. A run on a branch has its plan written into the commit by the `promote` node instead, before it commits, so only the manifest pointer and the removal of the run's copy are left for the CLI.
 
 ## Component Interaction
 

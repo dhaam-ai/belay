@@ -339,7 +339,17 @@ Everything belay records about a run lives in `.belay/runs/<run-id>`:
 
 If you stopped the run with Ctrl-C, or it crashed mid-execution, your work is safe on disk. `belay resume` picks it up where it left off: the step that was interrupted runs again, and the steps that finished do not. A run that belay stopped on its own, at the budget ceiling, `graph.max_steps` or `graph.node_timeout`, is waiting too: raise that setting in belay.yaml and `belay resume` carries on with what the run has already spent still counted, rather than spending it again from the beginning.
 
-If you want to delete a run, `rm -rf .belay/runs/<run-id>` is safe.
+When a run finishes, its plan moves out of that directory and into your
+repository, as `docs/plans/<run-id>-<slug>.md`: it is the record of why the
+code looks the way it does, and it belongs beside the code rather than in
+scratch state. A run on a branch puts it in the run's own commit, so it
+arrives with the change; a run that edits your workspace in place leaves it
+as a new file for you to commit or delete. `belay plan <run-id>` shows it
+wherever it is, and `plan.archive` in belay.yaml turns it off.
+
+Nothing else in `.belay` is meant to be committed, and belay says so to git:
+the first run in a repository writes `.belay/.gitignore`. If you want to
+delete a run, `rm -rf .belay/runs/<run-id>` is safe.
 
 ## How It Works (in One Picture)
 

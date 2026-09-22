@@ -31,6 +31,35 @@ that only `pkg/belay` carries a compatibility promise. Everything under
   find out. A pull request that already exists for the branch is reported
   rather than opened again, and one that cannot be opened never fails a run
   that finished — the closing report names the two commands to finish by hand.
+- **A finished run puts its plan beside the code it produced.** When a run
+  completes, belay moves the plan it followed out of
+  `.belay/runs/<run-id>/artifacts/` and into the repository, as
+  `docs/plans/<run-id>-<slug>.md`. A run on a branch puts it in the run's one
+  commit, written just before that commit, so it is part of what the branch
+  and the pull request deliver; a run that edits the workspace in place leaves
+  it as a new file beside the change, for you to commit or delete — belay
+  stages nothing. It is a move, and a careful one: the plan is written whole
+  and fsynced, then the manifest records where it went, then the run's copy
+  goes, so a crash anywhere leaves the plan in at least one place and running
+  the move again finishes it instead of filing a second copy. belay never
+  replaces a file already there, never writes outside the workspace, and never
+  files the plan of a run that failed or of a plan edited after the run last
+  read it; when it cannot move a plan it says why, and `belay plan --archive
+  <run-id>` finishes the move once the way is clear. `plan.archive` and
+  `plan.archive_dir` choose whether and where, and belay says where the plan
+  will go in `--dry-run` and in the run's opening lines. ADR-0016 records the
+  decision.
+- **`belay plan` reads a finished run's plan.** Naming a run that is over used
+  to be refused with "it is already finished" — which is exactly the run whose
+  plan has just moved. `belay plan <run-id>` now shows it from wherever it is:
+  the copy in your repository, the run's commit for a branch you have not
+  taken yet, or the run directory when the plan never moved.
+- **belay keeps its own scratch out of your commits.** The first run in a
+  repository writes `.belay/.gitignore` holding `*`, so run state is never
+  offered for a commit by accident. One you wrote yourself is never replaced.
+  The recording `agent.mode: record` saves lives under `.belay` by default and
+  is ignored with the rest; record it elsewhere with `--cassette` if you mean
+  to commit it.
 - **Fanout candidates can be git worktrees.** `fanout.isolator` accepts
   `worktree`, which puts each candidate on a branch of its own so a winner
   can be merged rather than copied back by hand, and `auto`, which follows
