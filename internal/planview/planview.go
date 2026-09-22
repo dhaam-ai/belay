@@ -152,6 +152,9 @@ type Model struct {
 	editAt int
 	shown  string
 	adding bool
+	// altered is true when the editor shows the step differently from how
+	// the file holds it: tabs as spaces, control characters left out.
+	altered bool
 
 	// message is the viewer's answer to the last key, when it has one.
 	message string
@@ -515,6 +518,7 @@ func (m *Model) openEditor() {
 	m.adding = false
 	m.editor = m.newEditor(steps[m.selected].Text)
 	m.shown = m.editor.Value()
+	m.altered = m.shown != steps[m.selected].Text
 	m.follow()
 }
 
@@ -527,6 +531,7 @@ func (m *Model) openNewStep() {
 	m.screen = editing
 	m.editAt = m.selected + 1
 	m.adding = true
+	m.altered = false
 	m.editor = m.newEditor("")
 	m.shown = ""
 	m.follow()

@@ -1116,3 +1116,38 @@ func TestTextThatIsNotUTF8IsRefusedOutLoud(t *testing.T) {
 		t.Errorf("an unrecognised escape sequence was reported as a key:\n%s", screenText(m))
 	}
 }
+
+// TestTheEditorSaysWhatItCannotHold: the editor shows a tab as spaces and
+// leaves control characters out, so a step holding either is not shown as
+// the file holds it. Opening such a step says so before the person types;
+// keeping it unchanged changes nothing; and a step they did change is saved
+// as they saw it.
+func TestTheEditorSaysWhatItCannotHold(t *testing.T) {
+	const plan = "## Steps\n\n1. Keep\tthe tab.\n2. An ordinary step.\n"
+	var s saves
+	opts := withSaves(&s)
+	opts.Plan = []byte(plan)
+	m := keys(t, open(t, opts, 80, 24), "e")
+	if got := flat(m); !strings.Contains(got, "tabs or control characters") {
+		t.Errorf("opening a step with a tab does not say the editor cannot hold it:\n%s", screenText(m))
+	}
+	if got := flat(keys(t, m, "ctrl+s")); strings.Contains(got, "edited") {
+		t.Errorf("keeping the step unchanged changed the plan:\n%s", got)
+	}
+	keys(t, typeText(t, m, " More."), "ctrl+s", "s")
+	doc, err := plandoc.Parse([]byte(plan))
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	want, err := doc.Edit(0, "Keep    the tab. More.")
+	if err != nil {
+		t.Fatalf("Edit: %v", err)
+	}
+	if !bytes.Equal(s.last(), want.Bytes()) {
+		t.Errorf("saved:\n%q\nwant the step as it was shown and changed:\n%q", s.last(), want.Bytes())
+	}
+
+	if got := flat(keys(t, open(t, opts, 80, 24), "j", "e")); strings.Contains(got, "tabs or control characters") {
+		t.Errorf("an ordinary step was said to hold tabs or control characters:\n%s", got)
+	}
+}

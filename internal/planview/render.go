@@ -437,6 +437,10 @@ func (m Model) screenBlocks() []block {
 			hints("enter asks for it", "esc goes back"))
 	}
 	var out []block
+	if m.screen == editing && m.altered {
+		out = append(out, block{drop: 2, lines: m.sentences("This step holds tabs or control characters, which the " +
+			"editor shows as spaces or leaves out. Keep it unchanged and nothing changes; change it and it is saved as shown.")})
+	}
 	if m.glyphs.ascii {
 		out = append(out, block{lines: m.sentences(m.localeNotice()), drop: 2})
 	}
