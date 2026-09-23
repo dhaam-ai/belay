@@ -48,6 +48,32 @@ that only `pkg/belay` carries a compatibility promise. Everything under
   resuming after asking for a new plan withdraws the request instead of
   spending on one, and says so.
 
+- **A plan can be read, edited and approved in belay, without leaving it.**
+  At a terminal, `belay plan` now opens the plan in a full-screen viewer:
+  scroll it, edit a step in place, add, delete and reorder steps, undo, ask
+  the agent for a different plan in your own words, and approve it and carry
+  on — all in one place, with what the run has spent shown before you commit
+  it to spending more. `belay run` and `belay resume` open it too, whenever a
+  run stops at its plan and there is a terminal to open it on. Press q to
+  leave: the run stays exactly where it was waiting, and belay says how to
+  come back.
+
+  Nothing about belay without a terminal changes. The viewer opens only when
+  belay is reading from and writing to a real terminal, `TERM` is set and is
+  not "dumb", `CI` is unset, and `--no-input` — a new flag for saying so
+  outright — was not given. Anywhere else, and under `--dry-run`, every
+  command prints exactly what it printed before and exits, and the run waits
+  for `belay resume` as it always has.
+
+  What the viewer does is what you could already do by hand: it edits the
+  same plan file, which it saves only when the approve gate would accept it,
+  and approving is `belay resume` and asking for a new plan is `belay plan
+  --regenerate`. It never runs a step of the run itself — it opens after the
+  run is durably waiting and closes before belay dispatches again — so
+  stopping belay while it is open loses nothing but edits you had not saved.
+  ADR-0015 records the decision, including the nineteen modules it adds, all
+  MIT or BSD-3-Clause.
+
 - **A dry run says that `fanout.enabled` does nothing yet.** Nothing in the
   graph leads to the fanout node, so a run with fanout on takes the ordinary
   route once, whatever `fanout.candidates` says — and belay said nothing about
@@ -96,13 +122,18 @@ that only `pkg/belay` carries a compatibility promise. Everything under
   A step that overran `graph.node_timeout` runs again from its start. The
   exit code is unchanged: an invocation belay stopped this way still exits 3,
   so scripts can tell it from a run that paused for you to read the plan.
-  `belay runs` lists such a run as waiting and `belay resume` accepts it —
-  except that a run stopped right before the plan gate is still listed as
-  "needs plan approval", since that listing reads only manifest.json.
-  Resuming it does the right thing regardless: it runs the gate and asks,
-  rather than approving a plan nobody was shown.
+  `belay runs` lists such a run as waiting and `belay resume` accepts it.
 
 ### Fixed
+
+- **`belay runs` says "needs plan approval" only when the plan gate asked.**
+  A run stopped by Ctrl-C while the gate was running, or by one of belay's
+  own limits just before it, is paused at the same step and looked the same
+  in the listing, which reads manifest.json — so belay told you to go and
+  read a plan nothing had offered you. The listing now asks the run's journal
+  whether the gate stopped to ask, which is the same question `belay resume`
+  asks before treating a resume as your approval, and says "waiting at
+  approve" for the rest. `belay runs --json` is unchanged in shape.
 
 - **A step belay re-runs after a crash no longer counts its crashed attempt
   as well as its own.** belay saves a step's changes and only then records

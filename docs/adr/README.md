@@ -20,7 +20,7 @@ This directory contains architecture decisions for belay, recorded to capture th
 | [0012](0012-git-native-run-output.md) | Git worktrees for isolation, and a run's result on its own branch | Accepted | A run in a git repository works in its own worktree on `belay/<run-id>`, never edits the user's checkout, and commits once after the quality gate passes; `--pr` opens a draft pull request. Fanout candidates are worktrees on sibling branches. Supersedes 0004 for git targets; dircopy stays as the non-git fallback. Cost: a full checkout of the tree per worktree, a git 2.38 floor, and two output modes to support. |
 | 0013 | A second agent backend | Reserved (slice 5) | Will amend 0005. |
 | 0014 | Per-node model routing and the policy gate | Reserved (slice 4) | |
-| 0015 | The interactive plan viewer | Reserved (slice 2) | |
+| [0015](0015-interactive-plan-viewer.md) | The interactive plan viewer runs outside the graph | Accepted | `belay plan` opens a full-screen viewer to read, edit, reorder, approve or replace a plan, on a terminal only. It runs between two dispatches, so the approve gate still never reads a terminal; editing goes through plandoc, saving through the gate's own rule and path, approving through the resume path. Cost: nineteen modules, all MIT or BSD-3. |
 | 0016 | Archiving the approved plan into the repository | Reserved (slice 2) | |
 | 0017 | Forking a run to re-run one node, and the goal queue | Reserved (slice 3) | |
 | 0018 | SWE-bench corpus and the bare-agent control arm | Reserved (slice 6) | |
