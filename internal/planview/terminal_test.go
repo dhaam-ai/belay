@@ -8,6 +8,7 @@ import (
 	"io"
 	"os"
 	"reflect"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -139,6 +140,65 @@ func TestRunTakesOverATerminalAndGivesItBack(t *testing.T) {
 	r := tm.result(t)
 	if r.decision != (Decision{}) {
 		t.Errorf("Run decided %+v when it was stopped, want nothing decided", r.decision)
+	}
+	tm.assertRestored(t)
+}
+
+// TestAPersonCanReadAndLeaveThePlanOnARealTerminal drives the viewer the
+// way a person does: over a pseudo-terminal, with the keys decoded from
+// bytes by the input reader and the page drawn by the renderer. Everything
+// else in this package drives the model directly, which cannot show that
+// raw mode, the decoder and the renderer are wired together at all.
+//
+// A guard, not RED: the behaviour it pins came with the model.
+func TestAPersonCanReadAndLeaveThePlanOnARealTerminal(t *testing.T) {
+	const plan = "## Steps\n\n1. Add a dryRun field to runOptions.\n2. Bind the flag in newRunCmd.\n"
+	tm := startOnTerminal(t, Options{
+		RunID: "20260921T101500Z-1f2e3d4c5b6a",
+		Goal:  "add a --dry-run flag",
+		Path:  "/work/.belay/runs/20260921T101500Z-1f2e3d4c5b6a/artifacts/plan.md",
+		Plan:  []byte(plan),
+		Mode:  Review,
+	})
+
+	// It draws the plan, on the alternate screen so the run's scrollback is
+	// still there afterwards.
+	waitUntil(t, func() bool { return strings.Contains(tm.drawn.String(), "Add a dryRun field") },
+		"the viewer never drew the plan on the terminal")
+	if drawn := tm.drawn.String(); !strings.Contains(drawn, "\x1b[?1049h") {
+		t.Errorf("the viewer did not take the alternate screen:\n%q", drawn)
+	}
+	for _, want := range []string{"20260921T101500Z-1f2e3d4c5b6a", "add a --dry-run flag", "c approve", "q leave"} {
+		if !strings.Contains(tm.drawn.String(), want) {
+			t.Errorf("the terminal does not show %q", want)
+		}
+	}
+
+	// A key typed into the terminal reaches the model: it is read as a byte
+	// and decoded by the input reader, not handed over by a test. ? is the
+	// key to watch for, because the page it opens is all new text; the
+	// renderer draws only what changed, so moving the cursor one step down
+	// redraws two characters, which proves nothing to a reader of the
+	// stream.
+	if _, err := tm.master.WriteString("?"); err != nil {
+		t.Fatalf("type ?: %v", err)
+	}
+	waitUntil(t, func() bool { return strings.Contains(tm.drawn.String(), "put belay in the background") },
+		"? did not open the list of keys")
+
+	// The first q closes that list, the second leaves.
+	if _, err := tm.master.WriteString("qq"); err != nil {
+		t.Fatalf("type q: %v", err)
+	}
+	r := tm.result(t)
+	if r.err != nil {
+		t.Fatalf("Run: %v", r.err)
+	}
+	if r.decision != (Decision{Action: ActionLeave}) {
+		t.Errorf("q decided %+v, want to leave the run as it is", r.decision)
+	}
+	if !strings.Contains(tm.drawn.String(), "\x1b[?1049l") {
+		t.Error("the viewer did not give the alternate screen back")
 	}
 	tm.assertRestored(t)
 }
