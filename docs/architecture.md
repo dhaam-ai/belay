@@ -125,10 +125,19 @@ Usage.Estimated reports whether USD was computed from actual backend costs or es
 **CLI** (`cmd/belay`, implemented in `internal/cli`):
 - `belay run "<what you want built>"`: start a new run. `--workspace` names the repository, and `--config` adds a settings file on top of belay.yaml
 - `belay resume <run-id>`: continue a paused or crashed run
-- `belay plan [run-id]`: read the plan a run stopped at, or a finished run's plan wherever it has moved to; `--regenerate "<guidance>"` records a request for a new one and continues the run, so the plan node writes it, and `--archive` finishes moving a finished run's plan into the repository when the run could not
+- `belay plan [run-id]`: read the plan a run stopped at, or a finished run's plan wherever it has moved to; `--regenerate "<guidance>"` records a request for a new one and continues the run, so the plan node writes it, and `--archive` finishes moving a finished run's plan into the repository when the run could not. At a terminal it opens the plan viewer instead of printing (see *The plan review* below)
 - `belay runs`: list the workspace's runs
 - `belay timeline <run-id>`: inspect the journal and manifest
 - Config is validated on load; invalid settings abort before any work starts.
+- `--no-input` never opens the plan viewer, wherever belay is run
+
+**The plan review** (`internal/plandoc`, `internal/planview`): two packages sit between a paused run and the person it is waiting for.
+
+`internal/plandoc` is belay's one reader and writer of a plan document. It parses the numbered list under a plan's `## Steps` heading and edits, inserts, deletes and moves those steps, keeping every other byte exactly as it was — a document it did not change comes back byte for byte, which is what keeps the approve gate from reporting an edit nobody made. It holds no opinion about whether a plan is any good: a plan it cannot split into steps is still a plan, and whether one may be approved is the approve gate's judgement alone (`approve.CheckPlan`).
+
+`internal/planview` is the full-screen viewer, the only package that imports a terminal library (bubbletea, bubbles and lipgloss; a test enforces it, and enforces that only `internal/cli` imports the viewer). It runs **between two dispatches, never inside one**: the CLI opens it after the dispatcher has journalled the gate's pause and closes it before dispatching again, so the approve node still never reads a terminal and a paused run still outlives the session that started it. Killing belay while it is open loses nothing but unsaved edits.
+
+Everything the viewer can do, belay could already do without it, and it goes the same way: it edits through plandoc, saves to the gate's own artifact path only what the gate's own rule accepts (atomically, through `state.ReplaceArtifact`), approves through the same `recordApproval` that `belay resume` uses, and asks for a new plan through the same journalled approve→plan edge as `belay plan --regenerate`. The viewer opens only when belay is reading and writing real terminals (by ioctl), `TERM` is set and is not `dumb`, `CI` is unset and `--no-input` was not given; in every other case belay prints and exits exactly as before (`internal/cli/interactive.go`, `internal/cli/review.go`).
 
 **After a dispatch** (`afterCompletion` in `internal/cli/run.go`): the CLI does what belongs to the end of a run, in a fixed order that can never change the exit status — save the recording, move a completed run's plan into the repository (`internal/planarchive`, ADR-0016), push the branch and open the pull request `--pr` asked for, and remove a completed branch run's worktree. A run on a branch has its plan written into the commit by the `promote` node instead, before it commits, so only the manifest pointer and the removal of the run's copy are left for the CLI.
 

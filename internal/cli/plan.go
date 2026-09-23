@@ -11,6 +11,7 @@ import (
 	"github.com/dhaam-ai/belay/internal/graph"
 	"github.com/dhaam-ai/belay/internal/nodes/approve"
 	"github.com/dhaam-ai/belay/internal/nodes/plan"
+	"github.com/dhaam-ai/belay/internal/planview"
 	"github.com/dhaam-ai/belay/internal/state"
 )
 
@@ -70,7 +71,7 @@ was in the way or belay was stopped part way, move it once the way is clear:
 		if cmd.Flags().Changed("regenerate") {
 			return regeneratePlan(cmd, runID, planFlags.regenerate)
 		}
-		return showPlan(cmd, runID)
+		return showPlan(cmd, newUI(cmd), runID)
 	},
 }
 
@@ -91,9 +92,7 @@ func init() {
 // that has already stopped needs no agent, no test runner and no quality
 // gate, and refusing to show a person their own plan because the backend
 // they configured is not installed would be absurd.
-func showPlan(cmd *cobra.Command, runID string) error {
-	u := newUI(cmd)
-
+func showPlan(cmd *cobra.Command, u *ui, runID string) error {
 	workspace, err := workspaceDirOf(cmd)
 	if err != nil {
 		return err
@@ -130,6 +129,16 @@ func showPlan(cmd *cobra.Command, runID string) error {
 		return &ExitError{Code: graph.ExitFailed, Message: "belay: cannot read " + abs + ": " + err.Error(), Err: err}
 	}
 
+	// With a terminal to open it on, the plan is reviewed rather than
+	// printed: read, edited, approved or replaced in one place. Everything
+	// below is what belay does without one, unchanged, and what it falls
+	// back to when the viewer cannot open.
+	if u.mayReview() && !rootFlags.dryRun {
+		if reviewed, err := reviewChosenPlan(cmd, u, chosen, layout, abs, body); reviewed {
+			return err
+		}
+	}
+
 	u.say("run %s", chosen.describe(runID == ""))
 	u.say("  what you asked for:  %s", orUnrecorded(chosen.goal))
 	u.say("  the plan is at:      %s", abs)
@@ -144,6 +153,129 @@ func showPlan(cmd *cobra.Command, runID string) error {
 	u.say("")
 	u.say(`    belay plan --regenerate "what it should do differently" %s`, chosen.id)
 	return nil
+}
+
+// reviewChosenPlan opens the plan of the run belay picked in the viewer,
+// and carries out what the person decided there. It reports whether the
+// plan was reviewed at all: everything it cannot do — a run whose settings
+// belay cannot resolve, a worktree that is gone, a viewer that would not
+// open — leaves the plan to be printed instead, which is what `belay plan`
+// has always done.
+//
+// A run the gate is waiting at is opened for review; any other run is
+// opened to read, saying which state it is in, because approving a run
+// that is not waiting for approval would mean nothing and editing the plan
+// of a run that is past it would mislead.
+func reviewChosenPlan(cmd *cobra.Command, u *ui, chosen resumableRun, layout state.Layout,
+	path string, body []byte) (bool, error) {
+	awaiting, err := awaitsApproval(chosen, layout)
+	if err != nil {
+		u.note("belay: %v", err)
+		return false, nil
+	}
+	if !awaiting {
+		return readPlanOnly(cmd, u, chosen, path, body), nil
+	}
+
+	runPlan, err := resolve(resolveRequest{
+		workspace:  layout.WorkspaceDir(),
+		configPath: rootFlags.configPath,
+		cassette:   runFlags.cassette,
+		logger:     newLogger(u),
+		context:    cmd.Context(),
+	})
+	if err != nil {
+		u.note("belay: the plan cannot be reviewed here: %v", err)
+		return false, nil
+	}
+	runPlan.goal = chosen.goal
+	// openRun, so that a run working on its own branch is continued in its
+	// own worktree rather than in the checkout it was started from.
+	store, err := runPlan.openRun(cmd.Context(), layout)
+	if err != nil {
+		u.note("belay: the plan cannot be reviewed here: %v", err)
+		return false, nil
+	}
+	return true, reviewPlanOfRun(cmd, u, runPlan, store, chosen, true)
+}
+
+// readPlanOnly shows a plan nobody is being asked to approve, and reports
+// whether it was shown.
+func readPlanOnly(cmd *cobra.Command, u *ui, chosen resumableRun, path string, body []byte) bool {
+	opts := planview.Options{
+		RunID:  chosen.id,
+		Goal:   chosen.goal,
+		Path:   path,
+		Plan:   body,
+		Mode:   planview.ReadOnly,
+		Color:  u.color,
+		ASCII:  u.viewer.ascii,
+		Locale: u.viewer.locale,
+		ReadOnlyReason: fmt.Sprintf("Run %s is %s, so its plan can be read here but not changed.",
+			chosen.id, statusSentence(chosen.status, chosen.node)),
+	}
+	if _, err := u.review(cmd.Context(), u.viewer.in, u.viewer.out, opts); err != nil {
+		u.note("belay: the plan viewer stopped: %v", err)
+		return false
+	}
+	sayWhereThePlanIs(u, chosen, path, false)
+	return true
+}
+
+// reviewPlanOfRun opens the viewer on a run's plan and does what the person
+// decided: approving and asking for a new plan both continue the run, by
+// the same two steps `belay resume` and `belay plan --regenerate` take.
+func reviewPlanOfRun(cmd *cobra.Command, u *ui, runPlan *runPlan, store *state.Store,
+	chosen resumableRun, awaiting bool) error {
+	opts, err := planOptions(u, runPlan, store)
+	if err != nil {
+		return &ExitError{Code: graph.ExitFailed, Message: "belay: " + err.Error(), Err: err}
+	}
+	decision, err := u.review(cmd.Context(), u.viewer.in, u.viewer.out, opts)
+	if err != nil {
+		u.note("belay: the plan viewer stopped: %v", err)
+		sayWhereThePlanIs(u, chosen, opts.Path, awaiting)
+		return nil
+	}
+	if decision.Action == planview.ActionLeave {
+		sayWhereThePlanIs(u, chosen, opts.Path, awaiting)
+		return nil
+	}
+	if len(runPlan.blockers) > 0 {
+		return refuseToStart(u, runPlan)
+	}
+
+	announceContinue(u, runPlan, chosen, store.Layout(), false)
+	switch decision.Action {
+	case planview.ActionApprove:
+		if err := recordApproval(u, store); err != nil {
+			return &ExitError{Code: graph.ExitFailed, Message: "belay: " + err.Error(), Err: err}
+		}
+	case planview.ActionRegenerate:
+		if err := recordRegeneration(u, store, decision.Guidance); err != nil {
+			return &ExitError{Code: graph.ExitFailed, Message: "belay: " + err.Error(), Err: err}
+		}
+	}
+	return driveRun(cmd, u, runPlan, store, true)
+}
+
+// sayWhereThePlanIs is what belay prints once the viewer has closed with
+// nothing decided: where the plan is, and the commands that come back to
+// it. The viewer took the screen while it was open, so this is the person's
+// record of where they were.
+func sayWhereThePlanIs(u *ui, chosen resumableRun, path string, awaiting bool) {
+	u.say("run %s", chosen.describe(false))
+	u.say("  the plan is at:      %s", path)
+	u.say("")
+	if awaiting {
+		u.say("Approve it and carry on with:")
+		u.say("")
+		u.say("    belay resume %s", chosen.id)
+		u.say("")
+	}
+	u.say("Read it again with:")
+	u.say("")
+	u.say("    belay plan %s", chosen.id)
 }
 
 // regeneratePlan records a person's request for a new plan and continues the
@@ -209,18 +341,12 @@ func regeneratePlan(cmd *cobra.Command, runID, guidance string) error {
 
 	announceContinue(u, runPlan, chosen, layout, runID == "")
 
-	// Preflight before the request is recorded, for the reason continueRun
-	// gives: recording it is the first thing belay writes to this run, and a
-	// crash afterwards must not leave an older belay a manifest it accepts
-	// over a state.json it does not (ADR-0011).
-	if err := store.Preflight(); err != nil {
+	// recordRegeneration is the same code the plan viewer's request goes
+	// through, so asking with a terminal and asking without one record the
+	// same thing.
+	if err := recordRegeneration(u, store, guidance); err != nil {
 		return &ExitError{Code: graph.ExitFailed, Message: "belay: " + err.Error(), Err: err}
 	}
-	if err := requestRegeneration(store, guidance); err != nil {
-		return &ExitError{Code: graph.ExitFailed, Message: "belay: " + err.Error(), Err: err}
-	}
-	u.say("  belay is writing a new plan; the run stops at the plan again when it has one")
-	u.say("")
 
 	return driveRun(cmd, u, runPlan, store, true)
 }

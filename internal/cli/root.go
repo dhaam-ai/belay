@@ -23,6 +23,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/dhaam-ai/belay/internal/graph"
+	"github.com/dhaam-ai/belay/internal/planview"
 )
 
 // Version information, injected via ldflags during build.
@@ -87,6 +88,7 @@ var rootFlags struct {
 	configPath string
 	verbose    bool
 	noColor    bool
+	noInput    bool
 	dryRun     bool
 	workspace  string
 }
@@ -116,6 +118,8 @@ func init() {
 		"also print belay's own log to stderr while it works")
 	f.BoolVar(&rootFlags.noColor, "no-color", false,
 		"never colour the output (setting NO_COLOR, or piping belay to a file, does the same)")
+	f.BoolVar(&rootFlags.noInput, "no-input", false,
+		"never open the plan viewer: behave as if nobody were at the terminal")
 	f.BoolVar(&rootFlags.dryRun, "dry-run", false,
 		"say what belay would do, then stop without creating anything or spending anything")
 	// --workspace is persistent so that every command names the repository
@@ -183,6 +187,10 @@ type ui struct {
 	err     io.Writer
 	color   bool
 	verbose bool
+	// viewer says whether a plan may be reviewed on a terminal here, and
+	// review opens it. The zero viewerTerminal opens nothing.
+	viewer viewerTerminal
+	review reviewer
 }
 
 // newUI builds the output surface for cmd from the root's persistent flags.
@@ -193,6 +201,11 @@ func newUI(cmd *cobra.Command) *ui {
 		err:     cmd.ErrOrStderr(),
 		color:   colorEnabled(out, rootFlags.noColor),
 		verbose: rootFlags.verbose,
+		// Whether a plan may be reviewed on a terminal is decided once, here,
+		// from the streams this invocation actually has. A ui built any other
+		// way opens no viewer at all.
+		viewer: detectViewerTerminal(cmd.InOrStdin(), out, rootFlags.noInput, os.Getenv, realTerminal),
+		review: planview.Run,
 	}
 }
 

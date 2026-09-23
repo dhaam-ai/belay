@@ -13,6 +13,8 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"github.com/dhaam-ai/belay/internal/graph"
+	"github.com/dhaam-ai/belay/internal/journal"
 	"github.com/dhaam-ai/belay/internal/state"
 	"github.com/google/go-cmp/cmp"
 )
@@ -356,10 +358,14 @@ func TestRunsScanHumanizesStatusAndLocation(t *testing.T) {
 			wantStatus: "running", wantManifest: "running", wantWhere: "code", wantResumable: true,
 		},
 		{
-			name:   "paused at approve says what it is waiting for",
+			// What the manifest alone can say: this run is paused at the
+			// gate. Whether the gate stopped to ask is in the journal, which
+			// these fixtures do not write; see
+			// TestRunsSaysNeedsPlanApprovalOnlyWhenTheGateAsked.
+			name:   "paused at approve says where it is waiting",
 			status: state.RunStatusPaused, node: "approve",
 			wantStatus: "paused", wantManifest: "paused",
-			wantWhere: "needs plan approval", wantResumable: true,
+			wantWhere: "waiting at approve", wantResumable: true,
 		},
 		{
 			name: "paused elsewhere", status: state.RunStatusPaused, node: "test",
@@ -1133,5 +1139,84 @@ func TestRunsRenderHonoursNoColorOnATerminal(t *testing.T) {
 	got := runsRender(runsRenderFixture(), 5, colorEnabled(devNull, false))
 	if strings.ContainsRune(got, 0x1b) {
 		t.Errorf("NO_COLOR=1 output still contains an escape sequence:\n%q", got)
+	}
+}
+
+// runsSeedJournal writes a journal for a seeded run whose last finished
+// node is node with status status.
+func runsSeedJournal(t *testing.T, workspace, runID, node string, status journal.Status) {
+	t.Helper()
+	layout, err := state.NewLayout(workspace, runID)
+	if err != nil {
+		t.Fatalf("NewLayout(%q): %v", runID, err)
+	}
+	j, err := journal.Open(layout.JournalPath())
+	if err != nil {
+		t.Fatalf("open journal: %v", err)
+	}
+	defer func() {
+		if err := j.Close(); err != nil {
+			t.Errorf("close journal: %v", err)
+		}
+	}()
+	for _, rec := range []journal.Record{
+		{Event: journal.EventRunStarted},
+		{Event: journal.EventNodeStarted, Node: node, Attempt: 1},
+		{Event: journal.EventNodeFinished, Node: node, Attempt: 1, Status: status, Next: graph.NodeCode},
+	} {
+		if _, err := j.Append(rec); err != nil {
+			t.Fatalf("append %v: %v", rec.Event, err)
+		}
+	}
+}
+
+// TestRunsSaysNeedsPlanApprovalOnlyWhenTheGateAsked: a run is waiting on a
+// person only when the approve gate stopped it to ask. A run that Ctrl-C
+// or one of belay's own limits stopped at the same node looks identical in
+// the manifest, and saying it needs plan approval sends somebody to read a
+// plan nobody has offered them. The journal is what tells them apart.
+func TestRunsSaysNeedsPlanApprovalOnlyWhenTheGateAsked(t *testing.T) {
+	tests := []struct {
+		name    string
+		node    string
+		status  journal.Status
+		journal bool
+		want    string
+	}{
+		{
+			name: "the gate paused to ask", node: graph.NodeApprove, status: journal.StatusPaused,
+			journal: true, want: "needs plan approval",
+		},
+		{
+			name: "Ctrl-C landed while the gate ran", node: graph.NodeApprove, status: journal.StatusAborted,
+			journal: true, want: "waiting at approve",
+		},
+		{
+			name: "belay stopped itself before the gate could ask", node: graph.NodePlan, status: journal.StatusOK,
+			journal: true, want: "waiting at approve",
+		},
+		{name: "no journal to read", want: "waiting at approve"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			workspace := t.TempDir()
+			m := runsManifest("run-x", state.RunStatusPaused, runsBase)
+			m.CurrentNode = graph.NodeApprove
+			runsSeed(t, workspace, m)
+			if tt.journal {
+				runsSeedJournal(t, workspace, "run-x", tt.node, tt.status)
+			}
+
+			got, err := ScanRuns(workspace)
+			if err != nil {
+				t.Fatalf("ScanRuns: %v", err)
+			}
+			if len(got) != 1 {
+				t.Fatalf("ScanRuns = %d summaries, want 1", len(got))
+			}
+			if got[0].Where != tt.want {
+				t.Errorf("Where = %q, want %q", got[0].Where, tt.want)
+			}
+		})
 	}
 }

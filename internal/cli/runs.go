@@ -149,10 +149,12 @@ type RunSummary struct {
 // hide the healthy runs listed beside it, and a run that silently vanishes
 // from the listing is worse than one that admits it is damaged.
 //
-// ScanRuns only ever reads manifest.json. It deliberately does not open
-// state.json or journal.ndjson, which keeps the cost of listing runs
-// proportional to the number of runs rather than to their length, and
-// keeps a corrupt journal from affecting a listing that does not need it.
+// ScanRuns reads manifest.json for every run, and the journal of exactly
+// one kind of run: one paused at the approve gate, where the manifest
+// cannot say whether the gate stopped to ask (see runsWhere). It reads
+// state.json for none of them. Listing runs therefore still costs what the
+// number of runs costs, not what their length costs, and a journal it
+// cannot read costs a run only the difference between two phrasings.
 func ScanRuns(workspaceDir string) ([]RunSummary, error) {
 	runsDir, err := runsDirOf(workspaceDir)
 	if err != nil {
@@ -228,7 +230,7 @@ func runsSummarize(workspaceDir, name, path string, modTime time.Time) RunSummar
 		RunID:          id,
 		Status:         runsStatusLabel(manifest.Status),
 		ManifestStatus: manifest.Status.String(),
-		Where:          runsWhere(manifest.Status, node),
+		Where:          runsWhere(manifest.Status, node, layout),
 		CurrentNode:    node,
 		Step:           manifest.Step,
 		CreatedAt:      manifest.CreatedAt,
@@ -323,14 +325,26 @@ func runsStatusLabel(s state.RunStatus) string {
 // happening rather than which node happens to be current.
 //
 // A run paused on the approve node is the case that matters: "approve" is
-// an instruction to belay, but the person reading the list is the one being
-// waited on, and needs to be told so.
-func runsWhere(status state.RunStatus, node string) string {
+// an instruction to belay, but the person reading the list may be the one
+// being waited on, and needs to be told so.
+//
+// May be: a run stopped by Ctrl-C while the gate ran, or by one of belay's
+// own limits before the gate could ask, is paused on the same node with the
+// same manifest, and nobody has been shown a plan. Telling that person
+// their run needs plan approval sends them to read something nothing has
+// offered them. So the manifest settles where the run is and the journal
+// settles whether it is waiting on them (gateAsked), which is the same
+// question `belay resume` asks before taking a resume for an approval. A
+// journal that cannot be read answers the safer of the two.
+func runsWhere(status state.RunStatus, node string, layout state.Layout) string {
 	switch {
 	case node == "":
 		return ""
 	case status == state.RunStatusPaused && node == graph.NodeApprove:
-		return "needs plan approval"
+		if asked, err := gateAsked(layout); err == nil && asked {
+			return "needs plan approval"
+		}
+		return "waiting at " + node
 	case status == state.RunStatusPaused:
 		return "waiting at " + node
 	default:

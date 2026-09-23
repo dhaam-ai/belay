@@ -382,15 +382,27 @@ func driveRun(cmd *cobra.Command, u *ui, plan *runPlan, store *state.Store, resu
 	ctx, stop := stopOnSignal(cmd.Context(), u)
 	defer stop()
 
-	view, err := dispatchOnce(ctx, plan, store, resuming, pauseOnCancel)
-	if err != nil {
-		return &ExitError{Code: graph.ExitFailed, Message: "belay: " + err.Error(), Err: err}
+	for {
+		view, err := dispatchOnce(ctx, plan, store, resuming, pauseOnCancel)
+		if err != nil {
+			return &ExitError{Code: graph.ExitFailed, Message: "belay: " + err.Error(), Err: err}
+		}
+		// A run that stopped at the gate is offered to a person at a
+		// terminal, who may approve it or ask for a different plan; the run
+		// is then dispatched again, from the state their decision was
+		// recorded in. Every other invocation — no terminal, CI, --no-input,
+		// a decision to leave — falls straight through, exactly as belay has
+		// always behaved. A Ctrl-C ends it too: the person asked to stop.
+		if ctx.Err() != nil || !reviewPause(cmd, u, plan, store, view) {
+			// The context here is the run's, which a Ctrl-C has already
+			// cancelled by the time a paused run reaches this.
+			// afterCompletion's steps must still run, so they are given the
+			// command's context rather than that one.
+			afterCompletion(cmd.Context(), u, plan, &view)
+			return reportOutcome(u, view)
+		}
+		resuming = true
 	}
-	// The context here is the run's, which a Ctrl-C has already cancelled by
-	// the time a paused run reaches this. afterCompletion's steps must still
-	// run, so they are given the command's context rather than that one.
-	afterCompletion(cmd.Context(), u, plan, &view)
-	return reportOutcome(u, view)
 }
 
 // dispatchOnce builds the dispatcher for an existing run and dispatches it
