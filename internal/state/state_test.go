@@ -313,7 +313,27 @@ func TestFix_JSONKeySetMatchesSpec(t *testing.T) {
 }
 
 func TestCandidate_JSONKeySetMatchesSpec(t *testing.T) {
-	assertExactJSONKeys(t, Candidate{}, []string{"id", "dir", "test_passed", "issue_count", "ephemeral"})
+	assertExactJSONKeys(t, Candidate{}, []string{
+		"id", "dir", "test_passed", "issue_count", "ephemeral",
+		"outcome", "run_dir", "spent_usd", "estimated", "duration_ms", "note",
+	})
+}
+
+// TestCandidateWrittenBeforeItsOutcomeDecodesAsLegacy is a guard, not a RED.
+// It states what a blackboard written before a candidate recorded how it
+// ended has to mean: every new field zero, and an empty outcome — which join
+// reads as "no verdict was recorded", and therefore as eligible, so nothing
+// about an existing run changes.
+func TestCandidateWrittenBeforeItsOutcomeDecodesAsLegacy(t *testing.T) {
+	var c Candidate
+	raw := `{"id":"c1","dir":"/work/candidates/c1","test_passed":true,"issue_count":2,"ephemeral":true}`
+	if err := json.Unmarshal([]byte(raw), &c); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	want := Candidate{ID: "c1", Dir: "/work/candidates/c1", TestPassed: true, IssueCount: 2, Ephemeral: true}
+	if diff := cmp.Diff(want, c); diff != "" {
+		t.Errorf("a candidate written before these fields existed (-want +got):\n%s", diff)
+	}
 }
 
 func TestPromotion_JSONKeySetMatchesSpec(t *testing.T) {
@@ -386,7 +406,11 @@ func TestStateGolden(t *testing.T) {
 	}, "")
 	st.Fix = Fix{Attempts: 0, GiveUp: false}
 	st.Candidates = []Candidate{
-		{ID: "c1", Dir: "/work/candidates/c1", TestPassed: true, IssueCount: 0, Ephemeral: true},
+		{
+			ID: "c1", Dir: "/work/candidates/c1", TestPassed: true, IssueCount: 0, Ephemeral: true,
+			Outcome: "completed", RunDir: "candidate-runs/c1", SpentUSD: 0.21,
+			Estimated: false, DurationMS: 18000, Note: "",
+		},
 	}
 	st.Winner = "c1"
 	st.Promotion = Promotion{

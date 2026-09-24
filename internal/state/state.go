@@ -457,6 +457,41 @@ type Candidate struct {
 	// made. The cost of getting it wrong in that direction is a directory
 	// left behind; in the other, it is the user's own checkout.
 	Ephemeral bool `json:"ephemeral"`
+	// Outcome is how this candidate's own run ended, as the short lowercase
+	// word its journal's run marker uses: "completed", "failed", "aborted",
+	// or "error" for a candidate that never ran at all. Free text by design,
+	// like HistoryEntry.Status.
+	//
+	// Empty means no verdict was recorded — which is every candidate a belay
+	// that only prepared workspaces wrote — and join reads that as eligible,
+	// so nothing about an existing run's blackboard changes. A candidate that
+	// does record one is eligible only when it says "completed": tests that
+	// passed in a run whose quality gate then failed, and whose fix loop gave
+	// up, would otherwise promote code a single run would have refused.
+	Outcome string `json:"outcome"`
+	// RunDir is where this candidate's own run lives, relative to the parent
+	// run directory ("candidate-runs/cand-01"). It is relative because a run
+	// directory can be moved or copied, and a reader that has the parent has
+	// the candidate.
+	RunDir string `json:"run_dir"`
+	// SpentUSD is what this candidate's run cost, read from its own journal.
+	SpentUSD float64 `json:"spent_usd"`
+	// Estimated reports whether any part of SpentUSD was estimated rather
+	// than reported — an attempt a crash left open is charged the largest
+	// step its run has paid for. It is sticky, exactly as everywhere else
+	// belay totals money: a figure built even partly from a guess must never
+	// be shown as though it were not.
+	Estimated bool `json:"estimated"`
+	// DurationMS is the sum of this candidate's own node durations in
+	// milliseconds, which is what the fastest strategy compares. Summing the
+	// node records rather than taking wall-clock time excludes the downtime
+	// between a crash and the resume that healed it, which no candidate
+	// should be blamed for.
+	DurationMS int64 `json:"duration_ms"`
+	// Note is a short, human-readable sentence about how this candidate
+	// ended, for the cases a reader would otherwise have to open a journal to
+	// understand — a refused workspace, a spent envelope. May be empty.
+	Note string `json:"note"`
 }
 
 // Promotion is what a run's promote node put on its branch: the record a

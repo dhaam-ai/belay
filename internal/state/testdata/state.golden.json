@@ -51,7 +51,13 @@
       "dir": "/work/candidates/c1",
       "test_passed": true,
       "issue_count": 0,
-      "ephemeral": true
+      "ephemeral": true,
+      "outcome": "completed",
+      "run_dir": "candidate-runs/c1",
+      "spent_usd": 0.21,
+      "estimated": false,
+      "duration_ms": 18000,
+      "note": ""
     }
   ],
   "winner": "c1",
