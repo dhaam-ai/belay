@@ -13,9 +13,9 @@
 // # Threat model
 //
 // This package is small but dangerous, and it is written defensively for one
-// reason: Create copies a tree the user designated and Destroy deletes a
-// directory. A path-handling bug here does not produce a wrong answer, it
-// deletes someone's work. Worse, the tree Create produces is then handed to
+// reason: Create copies a tree the user designated, and Destroy and Reclaim
+// delete a directory. A path-handling bug here does not produce a wrong
+// answer, it deletes someone's work. Worse, the tree Create produces is then handed to
 // an autonomous coding agent with write access, so anything reachable from
 // inside the copy is reachable by that agent.
 //
@@ -29,7 +29,9 @@
 //     Workspace this Isolator did not produce, a Dir that escapes the root, a
 //     Dir that is itself a symlink out of the root, and an empty Dir are all
 //     refused with an error wrapping [ErrRefused]. Nothing is deleted on a
-//     refusal.
+//     refusal. [Isolator.Reclaim], which deletes by id rather than by
+//     Workspace, derives its path from that same root and goes through that
+//     same check; it is not a second way in.
 //
 //   - Create never follows a symlink out of the source tree. A repository
 //     containing "link -> /" copies a symlink, never the filesystem. By
@@ -60,7 +62,8 @@
 // An *Isolator is safe for concurrent use: fanout creating N candidates at
 // once is the normal case, not an edge case. Two concurrent Create calls
 // with the same id are not: the second is refused while the first is in
-// flight. Nothing here arbitrates between processes — belay assumes one
+// flight, and a [Isolator.Reclaim] for an id a Create holds is refused the
+// same way, so a reclaim cannot delete a tree a copy is still filling. Nothing here arbitrates between processes — belay assumes one
 // dispatcher owns a run directory at a time, the same assumption
 // internal/state makes.
 package dircopy

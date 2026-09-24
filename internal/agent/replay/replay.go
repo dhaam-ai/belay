@@ -58,23 +58,32 @@
 // call) and both name the fingerprint and the attempt number so a
 // maintainer can tell, at a glance, which is which.
 //
-// # A known limitation: identical prompts with no other distinguishing
-// field
+// # Identical prompts with no other distinguishing field: scopes
 //
 // Fingerprint deliberately excludes WorkDir (see NormalizedRequest), so
 // two logically DIFFERENT requests that happen to be byte-identical in
-// every field Fingerprint hashes — for example, best-of-N fanout
-// candidates that all receive the exact same prompt and differ only in
-// which isolated workspace they run in — collapse onto one Fingerprint.
-// Recording and later replaying such a run correctly depends on both runs
-// invoking that fingerprint's candidates in the same order, which a
-// concurrent fanout does not by itself guarantee. AgentRequest carries no
-// field a decorator could use to disambiguate fanout candidates without
-// reintroducing exactly the machine- and run-specific instability
-// Fingerprint exists to avoid, so this is accepted as a residual risk
-// rather than solved here — a maintainer recording a cassette that
-// exercises fanout should record it with fanout concurrency disabled (or
-// width 1) if reproducible replay matters for that test.
+// every field Fingerprint hashes — best-of-N fanout candidates, which all
+// receive the exact same prompt and differ only in which isolated
+// workspace they run in — would collapse onto one Fingerprint. Which
+// candidate then received which recorded answer would be decided by
+// whichever of them asked first, and a concurrent fanout does not fix
+// that order between two runs.
+//
+// Backend.Scoped is the answer: it returns a view of a Backend whose
+// Fingerprints are qualified by a scope of the caller's choosing — a
+// candidate's id — sharing the one cassette the run records into or
+// replays from. Each candidate records and replays its own interactions,
+// in any order. The scope is an id rather than a path precisely so the
+// property this package exists for survives: a scoped cassette recorded
+// on a contributor's laptop still replays on a stranger's CI runner.
+//
+// A Backend nobody scoped fingerprints exactly as it did before scopes
+// existed — the empty scope is left out of the hashed encoding entirely —
+// so every cassette already recorded stays valid. replay/scope_test.go
+// pins that with literal digests rather than recomputed ones, because a
+// scope implementation that hashed an empty scope would be
+// self-consistent and would quietly invalidate every cassette in
+// existence.
 package replay
 
 import (
@@ -192,6 +201,31 @@ type Backend struct {
 	mode  Mode
 	inner belay.AgentBackend
 
+	// scope qualifies every Fingerprint this Backend computes. It is
+	// empty for a Backend any constructor returns, and set only by
+	// Scoped. See Scoped for what it is for.
+	scope string
+
+	// shared is the recording this Backend and every scoped view of it
+	// write to and read from. It is a pointer precisely so that a scoped
+	// view is a VIEW: N candidates recording through N scopes fill one
+	// cassette, which is the one the run saves.
+	//
+	// It is nil for the zero Backend, and that is what makes the zero
+	// value structurally unusable rather than usable-but-wrong: there is
+	// no recording to append to and none to serve from, so Invoke
+	// refuses with ErrInvalidMode instead of quietly recording into
+	// nothing.
+	shared *recording
+}
+
+// recording is the mutable state a Backend and its scoped views share.
+//
+// Every field of it is guarded by mu, including in a fanout where several
+// candidate goroutines Invoke through their own scoped views at the same
+// time: the views differ only in the scope they fold into a fingerprint,
+// and all of them reach this one struct.
+type recording struct {
 	mu       sync.Mutex
 	cassette *Cassette                // record: accumulating; replay: source
 	index    map[string][]Interaction // replay only: fingerprint -> recorded interactions, in order
@@ -202,7 +236,7 @@ type Backend struct {
 // Live returns a Backend that passes every Invoke straight through to
 // inner and does nothing else. inner must not be nil.
 func Live(inner belay.AgentBackend) *Backend {
-	return &Backend{mode: ModeLive, inner: inner}
+	return &Backend{mode: ModeLive, inner: inner, shared: &recording{}}
 }
 
 // Record returns a Backend that passes every Invoke through to inner and
@@ -222,9 +256,11 @@ func Record(inner belay.AgentBackend, prov Provenance) *Backend {
 	return &Backend{
 		mode:  ModeRecord,
 		inner: inner,
-		cassette: &Cassette{
-			FormatVersion: FormatVersion,
-			Provenance:    prov,
+		shared: &recording{
+			cassette: &Cassette{
+				FormatVersion: FormatVersion,
+				Provenance:    prov,
+			},
 		},
 	}
 }
@@ -249,10 +285,12 @@ func Replay(cassette *Cassette) (*Backend, error) {
 		index[it.Fingerprint] = append(index[it.Fingerprint], it)
 	}
 	return &Backend{
-		mode:     ModeReplay,
-		cassette: cassette,
-		index:    index,
-		cursor:   make(map[string]int),
+		mode: ModeReplay,
+		shared: &recording{
+			cassette: cassette,
+			index:    index,
+			cursor:   make(map[string]int),
+		},
 	}, nil
 }
 
@@ -299,8 +337,8 @@ func New(mode Mode, inner belay.AgentBackend, cassette *Cassette, prov Provenanc
 // which mode produced the response.
 func (b *Backend) Name() string {
 	if b.mode == ModeReplay {
-		if b.cassette != nil && b.cassette.Provenance.Backend != "" {
-			return b.cassette.Provenance.Backend
+		if b.shared != nil && b.shared.cassette != nil && b.shared.cassette.Provenance.Backend != "" {
+			return b.shared.cassette.Provenance.Backend
 		}
 		return "replay"
 	}
@@ -320,18 +358,28 @@ func (b *Backend) logger() *slog.Logger {
 // Invoke implements belay.AgentBackend, dispatching to the inner backend,
 // to recording, or to replay according to Mode.
 func (b *Backend) Invoke(ctx context.Context, req belay.AgentRequest) (belay.AgentResponse, error) {
-	fp := Fingerprint(req)
-	b.mu.Lock()
-	b.seen = append(b.seen, fp)
-	b.mu.Unlock()
+	if b.shared == nil {
+		// The zero Backend: no recording to append to and none to serve
+		// from. See Backend.shared.
+		return belay.AgentResponse{}, fmt.Errorf("%w: %q", ErrInvalidMode, b.mode)
+	}
+
+	// Normalized once and threaded down, rather than recomputed in each
+	// mode's helper, so the request a cassette stores is provably the one
+	// its fingerprint was taken of — scope included.
+	norm := b.normalize(req)
+	fp := fingerprintNormalized(norm)
+	b.shared.mu.Lock()
+	b.shared.seen = append(b.shared.seen, fp)
+	b.shared.mu.Unlock()
 
 	switch b.mode {
 	case ModeLive:
 		return b.inner.Invoke(ctx, req)
 	case ModeRecord:
-		return b.recordInvoke(ctx, req, fp)
+		return b.recordInvoke(ctx, req, norm, fp)
 	case ModeReplay:
-		return b.replayInvoke(ctx, req, fp)
+		return b.replayInvoke(ctx, norm, fp)
 	default:
 		return belay.AgentResponse{}, fmt.Errorf("%w: %q", ErrInvalidMode, b.mode)
 	}
@@ -341,30 +389,30 @@ func (b *Backend) Invoke(ctx context.Context, req belay.AgentRequest) (belay.Age
 // b.inner — a ModeReplay Backend does not even hold one (see Replay) —
 // so there is no way for a replay run to reach a subprocess or the
 // network.
-func (b *Backend) replayInvoke(ctx context.Context, req belay.AgentRequest, fp string) (belay.AgentResponse, error) {
+func (b *Backend) replayInvoke(ctx context.Context, norm NormalizedRequest, fp string) (belay.AgentResponse, error) {
 	if err := ctx.Err(); err != nil {
 		return belay.AgentResponse{}, err
 	}
 
-	b.mu.Lock()
-	defer b.mu.Unlock()
+	b.shared.mu.Lock()
+	defer b.shared.mu.Unlock()
 
-	list := b.index[fp]
-	attempt := b.cursor[fp] + 1
+	list := b.shared.index[fp]
+	attempt := b.shared.cursor[fp] + 1
 
-	if b.cursor[fp] >= len(list) {
+	if b.shared.cursor[fp] >= len(list) {
 		b.logger().Error("replay: no recorded interaction",
 			slog.String("fingerprint", fp), slog.Int("attempt", attempt), slog.Int("recorded", len(list)))
 		return belay.AgentResponse{}, &MissingInteractionError{
 			Fingerprint: fp,
-			Request:     Normalize(req),
+			Request:     norm,
 			Attempt:     attempt,
 			Recorded:    len(list),
 		}
 	}
 
-	it := list[b.cursor[fp]]
-	b.cursor[fp]++
+	it := list[b.shared.cursor[fp]]
+	b.shared.cursor[fp]++
 
 	b.logger().Debug("replay: served recorded interaction",
 		slog.String("fingerprint", fp), slog.Int("attempt", attempt))
@@ -380,21 +428,21 @@ func (b *Backend) replayInvoke(ctx context.Context, req belay.AgentRequest, fp s
 // b.cassette, and returns inner's result to the caller UNMODIFIED: only
 // what gets persisted to disk is scrubbed, never what a live-running
 // dispatcher actually sees or acts on.
-func (b *Backend) recordInvoke(ctx context.Context, req belay.AgentRequest, fp string) (belay.AgentResponse, error) {
+func (b *Backend) recordInvoke(ctx context.Context, req belay.AgentRequest, norm NormalizedRequest, fp string) (belay.AgentResponse, error) {
 	resp, err := b.inner.Invoke(ctx, req)
 
 	it := Interaction{
 		Fingerprint: fp,
-		Request:     scrubRequest(Normalize(req)),
+		Request:     scrubRequest(norm),
 		Response:    scrubResponse(resp),
 	}
 	if err != nil {
 		it.Error = Scrub(err.Error())
 	}
 
-	b.mu.Lock()
-	b.cassette.Interactions = append(b.cassette.Interactions, it)
-	b.mu.Unlock()
+	b.shared.mu.Lock()
+	b.shared.cassette.Interactions = append(b.shared.cassette.Interactions, it)
+	b.shared.mu.Unlock()
 
 	b.logger().Debug("replay: recorded interaction", slog.String("fingerprint", fp))
 	return resp, err
@@ -415,14 +463,17 @@ func (b *Backend) recordInvoke(ctx context.Context, req belay.AgentRequest, fp s
 // cassette is a read-only source this method does not mutate or copy the
 // (potentially large) Interactions slice of.
 func (b *Backend) Cassette() Cassette {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	if b.cassette == nil {
+	if b.shared == nil {
 		return Cassette{FormatVersion: FormatVersion}
 	}
-	out := Cassette{FormatVersion: b.cassette.FormatVersion, Provenance: b.cassette.Provenance}
+	b.shared.mu.Lock()
+	defer b.shared.mu.Unlock()
+	if b.shared.cassette == nil {
+		return Cassette{FormatVersion: FormatVersion}
+	}
+	out := Cassette{FormatVersion: b.shared.cassette.FormatVersion, Provenance: b.shared.cassette.Provenance}
 	if b.mode == ModeRecord {
-		out.Interactions = append([]Interaction(nil), b.cassette.Interactions...)
+		out.Interactions = append([]Interaction(nil), b.shared.cassette.Interactions...)
 	}
 	return out
 }
@@ -432,9 +483,12 @@ func (b *Backend) Cassette() Cassette {
 // expects from a live or recording run being checked against an existing
 // cassette.
 func (b *Backend) Seen() []string {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	return append([]string(nil), b.seen...)
+	if b.shared == nil {
+		return nil
+	}
+	b.shared.mu.Lock()
+	defer b.shared.mu.Unlock()
+	return append([]string(nil), b.shared.seen...)
 }
 
 // cloneResponse returns a copy of resp whose Raw byte slice is
