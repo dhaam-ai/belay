@@ -837,11 +837,23 @@ func (d *Dispatcher) loop(
 				ExitFailed, current, steps, ErrNoResumePoint.Error(), ErrNoResumePoint)
 		}
 
+		// Resolved here, before the guards, only so the budget guard can
+		// ask what kind of node this is (Unpriced). An unknown name is
+		// still reported below, after the guards: a run that met a limit
+		// pauses at it, exactly as it did before, rather than ending for
+		// good on a wiring bug the pause would have let someone fix.
+		node, nodeErr := d.registry.Get(current)
+		_, unpriced := node.(Unpriced)
+
 		// Both guards run BEFORE the node does, and before any node_started
 		// is appended: a run that is already over budget must not pay for
 		// one more node to discover it, and an aborting run must leave the
 		// journal with nothing open.
-		if err := ledger.Check(d.cfg.Budget); err != nil {
+		//
+		// The ceiling is not checked before a node that cannot spend. It
+		// would stop a run that has already bought its result from
+		// delivering it, and save nothing by doing so; see Unpriced.
+		if err := ledger.Check(d.cfg.Budget); err != nil && !unpriced {
 			cause := fmt.Errorf("graph: budget ceiling reached before %q: %w", current, err)
 			return d.pauseAtLimit(jrnl, man, ledger, current, steps,
 				d.limitNote(cause, "budget.max_usd or budget.max_tokens"), cause)
@@ -861,11 +873,10 @@ func (d *Dispatcher) loop(
 			return d.pauseInterrupted(jrnl, man, ledger, current, steps)
 		}
 
-		node, err := d.registry.Get(current)
-		if err != nil {
+		if nodeErr != nil {
 			return d.endRun(jrnl, man, ledger, journal.EventRunFailed, state.RunStatusFailed,
-				ExitFailed, current, steps, d.note(err.Error()),
-				fmt.Errorf("graph: cannot dispatch: %w", err))
+				ExitFailed, current, steps, d.note(nodeErr.Error()),
+				fmt.Errorf("graph: cannot dispatch: %w", nodeErr))
 		}
 
 		st, err := d.store.LoadState()

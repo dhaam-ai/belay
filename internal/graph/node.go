@@ -159,6 +159,24 @@ type Node interface {
 // is where the bound belongs.
 type Supervisor interface{ SupervisesCandidates() }
 
+// Unpriced marks a node that calls no agent and so cannot add to the run's
+// bill. The dispatcher does not check the budget ceiling before running one.
+//
+// It is not an exemption from the ceiling — it is the observation that the
+// ceiling has nothing to say about a node that cannot spend. join compares
+// numbers other nodes produced; promote runs git. Stopping either at the
+// ceiling does not save a penny, and it costs the run the delivery of work
+// already bought, which is the opposite of what ADR-0007 exists for: a
+// fanout whose candidates spent the ceiling would otherwise leave its winner
+// selected, paid for, and undeliverable until someone raised a limit in
+// belay.yaml.
+//
+// A node implementing it must really spend nothing, because the check it
+// skips is the only thing standing before it. Everything such a node spends
+// is still recorded, as every node's is: the marker changes what is checked,
+// never what is counted.
+type Unpriced interface{ SpendsNothing() }
+
 // RunContext is everything a node is allowed to see. The dispatcher builds one
 // per node execution.
 //

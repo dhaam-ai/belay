@@ -915,6 +915,93 @@ func TestDispatcher_BudgetExceededStopsTheRunBeforeTheNodeRuns(t *testing.T) {
 	}
 }
 
+// unpricedNode is a fakeNode that calls no agent, so the run's budget
+// ceiling has nothing to say about it.
+type unpricedNode struct{ *fakeNode }
+
+func (unpricedNode) SpendsNothing() {}
+
+// TestDispatcher_JoinAndPromoteRunAfterTheCeilingIsCrossed is the fanout
+// scenario: three candidates split a $3.00 ceiling, two of them cross their
+// envelopes, and the parent ledger settles above max_usd with a winner
+// already selected and already paid for. The nodes that deliver it — join,
+// which compares numbers other nodes produced, and promote, which runs git —
+// cannot spend anything, so stopping them at the ceiling saves nothing and
+// throws the work away.
+func TestDispatcher_JoinAndPromoteRunAfterTheCeilingIsCrossed(t *testing.T) {
+	tests := []struct {
+		name       string
+		unpriced   bool
+		wantStatus state.RunStatus
+		wantCalls  int
+		wantErr    error
+		wantSteps  []string
+	}{
+		{
+			name:       "a run holding a paid-for winner delivers it",
+			unpriced:   true,
+			wantStatus: state.RunStatusCompleted,
+			wantCalls:  1,
+			wantSteps: []string{
+				"run_started",
+				"join#1 started", "join#1 finished ok -> promote",
+				"promote#1 started", "promote#1 finished ok -> END",
+				"run_completed",
+			},
+		},
+		{
+			name:       "a node that could spend is still stopped at the ceiling",
+			unpriced:   false,
+			wantStatus: state.RunStatusPaused,
+			wantCalls:  0,
+			wantErr:    belay.ErrBudgetExceeded,
+			wantSteps:  []string{"run_started", "run_paused"},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			h := newRun(t, budgetCfg(3.00, 0), "deliver the winner")
+			man := h.manifest(t)
+			man.Budget = state.Budget{LimitUSD: 3.00, SpentUSD: 3.10, TokensIn: 100, TokensOut: 50}
+			if err := h.store.SaveManifest(man); err != nil {
+				t.Fatalf("SaveManifest() error = %v", err)
+			}
+
+			join := ok(graph.NodeJoin, graph.NodePromote)
+			promote := ok(graph.NodePromote, graph.End)
+			nodes := []graph.Node{join, promote}
+			if tt.unpriced {
+				nodes = []graph.Node{unpricedNode{fakeNode: join}, unpricedNode{fakeNode: promote}}
+			}
+
+			out, err := h.entryDispatcher(t, graph.NodeJoin, nodes...).Run(context.Background())
+
+			if tt.wantErr == nil && err != nil {
+				t.Fatalf("Run() error = %v, want nil", err)
+			}
+			if tt.wantErr != nil && !errors.Is(err, tt.wantErr) {
+				t.Fatalf("Run() error = %v, want one wrapping %v", err, tt.wantErr)
+			}
+			if out.Status != tt.wantStatus {
+				t.Errorf("Outcome.Status = %v, want %v (note %q)", out.Status, tt.wantStatus, out.Note)
+			}
+			if join.calls != tt.wantCalls || promote.calls != tt.wantCalls {
+				t.Errorf("join ran %d times and promote %d, want %d each",
+					join.calls, promote.calls, tt.wantCalls)
+			}
+			if got := h.timeline(t); !equalStrings(got, tt.wantSteps) {
+				t.Errorf("timeline =\n  %v\nwant\n  %v", got, tt.wantSteps)
+			}
+			// Whatever the ceiling did, the run's spend is reported as it
+			// stands: an unpriced node adds nothing to it and hides nothing.
+			if !closeTo(out.Usage.USD, 3.10) {
+				t.Errorf("Outcome.Usage.USD = %v, want 3.10", out.Usage.USD)
+			}
+		})
+	}
+}
+
 // TestDispatcher_ResumeContinuesTheLedgerRatherThanResettingIt is acceptance
 // criterion 4: a resumed run must keep spending from where the crash left off.
 // A fresh ledger would let every crash hand the run a full ceiling again.
