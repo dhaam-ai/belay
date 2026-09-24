@@ -80,6 +80,54 @@ Whether belay calls the agent, and whether it keeps a recording (a cassette) of 
 - `"record"`: Call the agent for real and save every exchange to the cassette, `<workspace>/.belay/cassette.json` unless `--cassette` names another file.
 - `"replay"`: Answer every agent call from the cassette instead. No agent process is started and nothing is spent, so a recorded run can be repeated in CI for free (see [ADR-0009](adr/0009-record-replay-cassettes.md)). A call the cassette has no answer for is an error.
 
+### `agent.models`
+
+**Type**: Map of strings  
+**Default**: `{}`  
+**Example**: `{plan: opus, code: haiku}`
+
+Per-node routing: the model each step is given, keyed by the node that asks
+for it. A node with no entry here is sent `agent.model`, so leaving this out
+is exactly belay's behaviour without it.
+
+```yaml
+agent:
+  model: sonnet        # every node not named below
+  models:
+    plan: opus         # the plan is the decision the rest of the run executes
+    code: haiku        # writing out an agreed plan is the mechanical part
+    fix: opus          # a repair is the step that most needs the better model
+```
+
+The keys are the nodes that call a model, and only those: `plan`, `code` and
+`fix`. `write`, `test`, `review` and `promote` never reach a model — they edit
+files, run your test command, lint, and commit — and `approve` waits for you,
+so belay refuses a key naming one of them rather than accept a setting that
+would do nothing:
+
+```
+agent.models: "test" is not valid (want one of: plan, code, fix)
+```
+
+A misspelled node is refused the same way, which is the point of the closed
+set. Silently ignoring `models.cod` would leave you reading a file that says
+the code step is cheap while every step billed at `agent.model`.
+
+The values are model identifiers, passed to the backend exactly as
+`agent.model` is, so the same aliases and full names work. Every one of them
+is checked against the backend before a run starts, not only `agent.model`:
+`belay run --dry-run` prints one row per node with the model it would use and
+that model's list rate, and a model the backend cannot price or run stops the
+run there, before anything is spent. The rate is per million tokens, and belay
+states no total, because it cannot know how many tokens your goal will take
+and a confident wrong figure is worse than none.
+
+Routing is read from `belay.yaml` on every step, including after a resume. It
+is not pinned in the run's manifest: changing a model between resumes changes
+what the next step costs, and nothing already recorded. Spend is attributed to
+the model that actually ran the step, so `belay timeline` and the budget
+ledger show the cheap node cheap.
+
 <!-- slice:routing -->
 
 ## `graph`

@@ -262,6 +262,8 @@ type Agent struct {
 	Backend string `yaml:"backend"`
 	// Model names the model the backend should use.
 	Model string `yaml:"model"`
+	// Models routes individual nodes to models of their own.
+	Models Models `yaml:"models,omitempty"`
 	// MaxTurns caps the agent turns allowed inside a single node.
 	MaxTurns int `yaml:"max_turns"`
 	// Mode selects live, record or replay execution.
@@ -879,13 +881,23 @@ func (c Config) Snapshot() Snapshot {
 }
 
 // snapshot returns the agent.* settings for [Config.Snapshot].
+//
+// Each routed node contributes a key of its own, agent.models.<node>, rather
+// than one key holding the whole map rendered somehow. Every other setting is
+// one key, a resumed run that reports drift names the setting that drifted,
+// and a node moved to another model is exactly that: one setting changed.
+// A run with no routing adds nothing, so its snapshot is what it always was.
 func (a Agent) snapshot() Snapshot {
-	return Snapshot{
+	s := Snapshot{
 		"agent.backend":   a.Backend,
 		"agent.model":     a.Model,
 		"agent.max_turns": strconv.Itoa(a.MaxTurns),
 		"agent.mode":      string(a.Mode),
 	}
+	for node, model := range a.Models {
+		s["agent.models."+node] = model
+	}
+	return s
 }
 
 // snapshot returns the graph.* settings for [Config.Snapshot].
