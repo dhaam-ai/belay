@@ -139,6 +139,22 @@ type Options struct {
 	// Config is the run's resolved configuration, supplying the graph's
 	// MaxSteps, NodeTimeout and budget ceilings.
 	Config config.Config
+	// Entry is the node a run whose journal is empty starts at. It
+	// defaults to journal.FirstNode, which is "plan", so a caller that
+	// never sets it sees the run it always did.
+	//
+	// It exists for a run whose graph does not begin at the beginning: a
+	// fanout candidate runs code, write, test, fix and review over a plan
+	// its parent has already had approved, and a registry without a plan
+	// node would end such a run on its first step with an unknown node.
+	//
+	// It is ignored the moment the journal holds any record at all.
+	// Where a run with history resumes is journal.ResolveStart's decision
+	// and nothing else's, because the journal is the only thing that knows
+	// which node died and at which attempt; applying Entry over it would
+	// re-run the entry node on every resume, paying again for work the
+	// journal says is done.
+	Entry string
 	// Logger receives the dispatcher's structured log. Defaults to
 	// slog.Default.
 	Logger *slog.Logger
@@ -324,6 +340,13 @@ type Options struct {
 // run again, exactly as a cancelled one does, so that raising the limit and
 // resuming re-runs the step that overran.
 //
+// A node that refuses on the budget ceiling itself — the fanout node,
+// declining to buy N candidates it can see the ceiling will not cover — is
+// treated as the same kind of event rather than as a failure, for the same
+// reason: it is reporting one of those figures, not a verdict on the work.
+// Its attempt is closed as one to run again and the run pauses, so raising
+// the ceiling and resuming re-runs the node against it (see settle).
+//
 // # Before the first write: establish the run
 //
 // Opening the journal writes to a run: journal.Open creates the file and heals
@@ -344,6 +367,7 @@ type Dispatcher struct {
 	store    *state.Store
 	registry *Registry
 	cfg      config.Config
+	entry    string
 	logger   *slog.Logger
 	now      func() time.Time
 	redact   func(string) string
@@ -382,6 +406,7 @@ func NewDispatcher(opts Options) (*Dispatcher, error) {
 		store:    opts.Store,
 		registry: opts.Registry,
 		cfg:      opts.Config,
+		entry:    opts.Entry,
 		logger:   opts.Logger,
 		now:      opts.Now,
 		redact:   opts.Redact,
@@ -463,6 +488,14 @@ func (d *Dispatcher) dispatch(ctx context.Context, resuming bool) (Outcome, erro
 	start, err := journal.ResolveStart(read.Records)
 	if err != nil {
 		return Outcome{ExitCode: ExitFailed}, fmt.Errorf("graph: resolve resume point: %w", err)
+	}
+	// Where a run with any history at all goes next is ResolveStart's
+	// decision: it is the only thing that knows which node died, at which
+	// attempt, and what the last finished node named as its successor.
+	// Options.Entry answers the one question the journal cannot, which is
+	// where a run that has never run anything begins.
+	if d.entry != "" && len(read.Records) == 0 {
+		start.Node = d.entry
 	}
 
 	// Rebuilt, never New: a resumed run must keep accumulating spend from
@@ -811,11 +844,23 @@ func (d *Dispatcher) loop(
 				ExitFailed, current, steps, ErrNoResumePoint.Error(), ErrNoResumePoint)
 		}
 
+		// Resolved here, before the guards, only so the budget guard can
+		// ask what kind of node this is (Unpriced). An unknown name is
+		// still reported below, after the guards: a run that met a limit
+		// pauses at it, exactly as it did before, rather than ending for
+		// good on a wiring bug the pause would have let someone fix.
+		node, nodeErr := d.registry.Get(current)
+		_, unpriced := node.(Unpriced)
+
 		// Both guards run BEFORE the node does, and before any node_started
 		// is appended: a run that is already over budget must not pay for
 		// one more node to discover it, and an aborting run must leave the
 		// journal with nothing open.
-		if err := ledger.Check(d.cfg.Budget); err != nil {
+		//
+		// The ceiling is not checked before a node that cannot spend. It
+		// would stop a run that has already bought its result from
+		// delivering it, and save nothing by doing so; see Unpriced.
+		if err := ledger.Check(d.cfg.Budget); err != nil && !unpriced {
 			cause := fmt.Errorf("graph: budget ceiling reached before %q: %w", current, err)
 			return d.pauseAtLimit(jrnl, man, ledger, current, steps,
 				d.limitNote(cause, "budget.max_usd or budget.max_tokens"), cause)
@@ -835,11 +880,10 @@ func (d *Dispatcher) loop(
 			return d.pauseInterrupted(jrnl, man, ledger, current, steps)
 		}
 
-		node, err := d.registry.Get(current)
-		if err != nil {
+		if nodeErr != nil {
 			return d.endRun(jrnl, man, ledger, journal.EventRunFailed, state.RunStatusFailed,
-				ExitFailed, current, steps, d.note(err.Error()),
-				fmt.Errorf("graph: cannot dispatch: %w", err))
+				ExitFailed, current, steps, d.note(nodeErr.Error()),
+				fmt.Errorf("graph: cannot dispatch: %w", nodeErr))
 		}
 
 		st, err := d.store.LoadState()
@@ -917,12 +961,24 @@ func (d *Dispatcher) loop(
 // contract on Dispatcher: building a node's view of the run is not a durable
 // effect, so a crash while doing it loses nothing and leaves nothing to heal.
 //
-// Config is d.cfg, the configuration this process loaded. On a resume that is
-// read from disk again and can differ from what the run started with. A value
-// that must stay the same for the whole of a run belongs on man, which was
-// written when the run was created, and a field carrying one should be filled
-// from man rather than from d.cfg; internal/nodes states the same rule for
-// the shape of the graph.
+// Config is d.cfg, the configuration this process loaded, with everything
+// this run pinned when it was created overlaid on it
+// (state.Manifest.PinnedConfig). On a resume d.cfg is read from disk again
+// and can differ from what the run started with, and two nodes ask it about
+// the graph's shape on every execution: fanout asks how many candidates
+// there are, join asks which strategy picks the winner. Overlaying once,
+// here, is what makes a pin something a node reads without a node having to
+// remember to ask the manifest — and what makes a node that reads the live
+// value by accident impossible to write.
+//
+// Only the shape is overlaid. The dispatcher's limits — budget.max_usd,
+// graph.max_steps, graph.node_timeout — are deliberately read live, so that
+// raising one and resuming continues a run that met it.
+//
+// The same rule fills Output, ArchiveDir and VCS from man: a value that must
+// stay the same for the whole of a run belongs on man, which was written
+// when the run was created. internal/nodes states the same rule for the
+// shape of the graph.
 //
 // It does not decide which node runs, or check the budget or the step cap:
 // the loop has done all three before a node needs a context.
@@ -931,7 +987,7 @@ func (d *Dispatcher) runContext(
 ) *RunContext {
 	layout := d.store.Layout()
 	return &RunContext{
-		Goal: man.Goal, State: st, Config: d.cfg, Layout: layout,
+		Goal: man.Goal, State: st, Config: man.PinnedConfig(d.cfg), Layout: layout,
 		// Supplied, not derived: six nodes previously reconstructed the
 		// workspace by walking up from the run directory, which yields
 		// belay's own tree for a zero Layout.
@@ -1062,7 +1118,11 @@ func (d *Dispatcher) execute(ctx context.Context, n Node, rc *RunContext) nodeOu
 		nodeCtx = procgroup.WithDir(nodeCtx, dir)
 	}
 	cancel := context.CancelFunc(func() {})
-	if timeout := d.cfg.Graph.NodeTimeout.Duration(); timeout > 0 {
+	// A node that supervises candidate runs is exempt: what it waits on is
+	// already capped, node by node, by this same setting. See Supervisor,
+	// which argues the bound the exemption leaves in place.
+	_, supervises := n.(Supervisor)
+	if timeout := d.cfg.Graph.NodeTimeout.Duration(); timeout > 0 && !supervises {
 		nodeCtx, cancel = context.WithTimeout(nodeCtx, timeout)
 	}
 	defer cancel()
@@ -1128,6 +1188,18 @@ func (d *Dispatcher) settle(
 		return d.terminal(jrnl, man, ledger, node, attempt, steps, exec.elapsed, exec.res.Usage,
 			journal.StatusAborted, journal.EventRunAborted, state.RunStatusAborted, ExitAborted,
 			d.note(err.Error()), err, logger)
+	case errors.Is(exec.err, belay.ErrBudgetExceeded):
+		// A node that refuses because of the ceiling is reporting one of
+		// the dispatcher's own limits, not a verdict on the work: the
+		// fanout node refusing to buy N candidates it can see the budget
+		// will not cover is the case this exists for. Ending the run for
+		// that would put the money and the work already done out of reach,
+		// leaving a new run from nothing as the only way on — the mistake
+		// the dispatcher's own guards stopped making. So it pauses, with
+		// the setting to raise in its note, and a resume re-runs the node
+		// against the ceiling as it is then.
+		return d.pauseInsideNode(jrnl, man, ledger, node, attempt, steps, exec.elapsed, exec.res.Usage,
+			d.limitNote(exec.err, "budget.max_usd or budget.max_tokens"), exec.err, logger)
 	case exec.err != nil:
 		return d.terminal(jrnl, man, ledger, node, attempt, steps, exec.elapsed, exec.res.Usage,
 			journal.StatusFailed, journal.EventRunFailed, state.RunStatusFailed, ExitFailed,

@@ -378,6 +378,91 @@ func TestDispatcher_FixLoop(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
+// Entry: where a run with no history starts.
+// ---------------------------------------------------------------------------
+
+// entryDispatcher wires nodes into a Dispatcher that starts a run with an
+// empty journal at entry rather than at journal.FirstNode.
+func (h *harness) entryDispatcher(t *testing.T, entry string, nodes ...graph.Node) *graph.Dispatcher {
+	t.Helper()
+	reg := graph.NewRegistry()
+	reg.MustRegister(nodes...)
+	d, err := graph.NewDispatcher(graph.Options{
+		Store: h.store, Registry: reg, Config: h.cfg, Entry: entry,
+		Now: func() time.Time { return time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC) },
+	})
+	if err != nil {
+		t.Fatalf("NewDispatcher() error = %v", err)
+	}
+	return d
+}
+
+// TestDispatcher_StartsAnEmptyJournalAtEntry covers the run a fanout
+// candidate performs: a graph of code, write, test, fix and review, with no
+// plan node and no approve gate, because the parent has already planned and
+// been approved. journal.FirstNode is "plan", so without Entry such a run
+// ends on its first step with an unknown node.
+func TestDispatcher_StartsAnEmptyJournalAtEntry(t *testing.T) {
+	h := newRun(t, config.Default(), "start where the caller says")
+	code := ok(graph.NodeCode, graph.NodeTest)
+	testNode := ok(graph.NodeTest, graph.End)
+
+	out, err := h.entryDispatcher(t, graph.NodeCode, code, testNode).Run(context.Background())
+	if err != nil {
+		t.Fatalf("Run() error = %v, want nil", err)
+	}
+	if out.Status != state.RunStatusCompleted || out.ExitCode != graph.ExitOK {
+		t.Fatalf("Outcome = {%v, exit %d}, want {completed, exit %d} (note %q)",
+			out.Status, out.ExitCode, graph.ExitOK, out.Note)
+	}
+	want := []string{
+		"run_started",
+		"code#1 started", "code#1 finished ok -> test",
+		"test#1 started", "test#1 finished ok -> END",
+		"run_completed",
+	}
+	if got := h.timeline(t); !equalStrings(got, want) {
+		t.Errorf("timeline =\n  %v\nwant\n  %v", got, want)
+	}
+	if code.attempts[0] != 1 {
+		t.Errorf("the entry node ran at attempt %d, want 1", code.attempts[0])
+	}
+}
+
+// TestDispatcher_EntryNeverOverridesAJournalWithHistory is the other half:
+// where a run with history resumes is journal.ResolveStart's decision alone.
+// Applying Entry unconditionally would re-run the entry node on every resume
+// of every candidate, paying for work the journal says is already done.
+func TestDispatcher_EntryNeverOverridesAJournalWithHistory(t *testing.T) {
+	h := newRun(t, config.Default(), "resume where the journal says")
+	h.seedJournal(t,
+		journal.Record{Event: journal.EventRunStarted},
+		journal.Record{Event: journal.EventNodeStarted, Node: graph.NodeCode, Attempt: 1},
+		journal.Record{
+			Event: journal.EventNodeFinished, Node: graph.NodeCode, Attempt: 1,
+			Status: journal.StatusOK, Next: graph.NodeTest,
+		},
+	)
+
+	code := ok(graph.NodeCode, graph.NodeTest)
+	testNode := ok(graph.NodeTest, graph.End)
+
+	out, err := h.entryDispatcher(t, graph.NodeCode, code, testNode).Run(context.Background())
+	if err != nil {
+		t.Fatalf("Run() error = %v, want nil", err)
+	}
+	if out.Status != state.RunStatusCompleted {
+		t.Fatalf("Outcome.Status = %v, want completed (note %q)", out.Status, out.Note)
+	}
+	if code.calls != 0 {
+		t.Errorf("the entry node ran %d times, want 0: the journal already records it finished", code.calls)
+	}
+	if testNode.calls != 1 {
+		t.Errorf("test ran %d times, want 1", testNode.calls)
+	}
+}
+
+// ---------------------------------------------------------------------------
 // Crash / resume. The product's headline claim.
 // ---------------------------------------------------------------------------
 
@@ -827,6 +912,155 @@ func TestDispatcher_BudgetExceededStopsTheRunBeforeTheNodeRuns(t *testing.T) {
 	// The note names the settings to raise, for anyone reading the journal.
 	if !strings.Contains(out.Note, "budget.max_usd") {
 		t.Errorf("Outcome.Note = %q, want it to name the setting to raise", out.Note)
+	}
+}
+
+// unpricedNode is a fakeNode that calls no agent, so the run's budget
+// ceiling has nothing to say about it.
+type unpricedNode struct{ *fakeNode }
+
+func (unpricedNode) SpendsNothing() {}
+
+// TestDispatcher_JoinAndPromoteRunAfterTheCeilingIsCrossed is the fanout
+// scenario: three candidates split a $3.00 ceiling, two of them cross their
+// envelopes, and the parent ledger settles above max_usd with a winner
+// already selected and already paid for. The nodes that deliver it — join,
+// which compares numbers other nodes produced, and promote, which runs git —
+// cannot spend anything, so stopping them at the ceiling saves nothing and
+// throws the work away.
+func TestDispatcher_JoinAndPromoteRunAfterTheCeilingIsCrossed(t *testing.T) {
+	tests := []struct {
+		name       string
+		unpriced   bool
+		wantStatus state.RunStatus
+		wantCalls  int
+		wantErr    error
+		wantSteps  []string
+	}{
+		{
+			name:       "a run holding a paid-for winner delivers it",
+			unpriced:   true,
+			wantStatus: state.RunStatusCompleted,
+			wantCalls:  1,
+			wantSteps: []string{
+				"run_started",
+				"join#1 started", "join#1 finished ok -> promote",
+				"promote#1 started", "promote#1 finished ok -> END",
+				"run_completed",
+			},
+		},
+		{
+			name:       "a node that could spend is still stopped at the ceiling",
+			unpriced:   false,
+			wantStatus: state.RunStatusPaused,
+			wantCalls:  0,
+			wantErr:    belay.ErrBudgetExceeded,
+			wantSteps:  []string{"run_started", "run_paused"},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			h := newRun(t, budgetCfg(3.00, 0), "deliver the winner")
+			man := h.manifest(t)
+			man.Budget = state.Budget{LimitUSD: 3.00, SpentUSD: 3.10, TokensIn: 100, TokensOut: 50}
+			if err := h.store.SaveManifest(man); err != nil {
+				t.Fatalf("SaveManifest() error = %v", err)
+			}
+
+			join := ok(graph.NodeJoin, graph.NodePromote)
+			promote := ok(graph.NodePromote, graph.End)
+			nodes := []graph.Node{join, promote}
+			if tt.unpriced {
+				nodes = []graph.Node{unpricedNode{fakeNode: join}, unpricedNode{fakeNode: promote}}
+			}
+
+			out, err := h.entryDispatcher(t, graph.NodeJoin, nodes...).Run(context.Background())
+
+			if tt.wantErr == nil && err != nil {
+				t.Fatalf("Run() error = %v, want nil", err)
+			}
+			if tt.wantErr != nil && !errors.Is(err, tt.wantErr) {
+				t.Fatalf("Run() error = %v, want one wrapping %v", err, tt.wantErr)
+			}
+			if out.Status != tt.wantStatus {
+				t.Errorf("Outcome.Status = %v, want %v (note %q)", out.Status, tt.wantStatus, out.Note)
+			}
+			if join.calls != tt.wantCalls || promote.calls != tt.wantCalls {
+				t.Errorf("join ran %d times and promote %d, want %d each",
+					join.calls, promote.calls, tt.wantCalls)
+			}
+			if got := h.timeline(t); !equalStrings(got, tt.wantSteps) {
+				t.Errorf("timeline =\n  %v\nwant\n  %v", got, tt.wantSteps)
+			}
+			// Whatever the ceiling did, the run's spend is reported as it
+			// stands: an unpriced node adds nothing to it and hides nothing.
+			if !closeTo(out.Usage.USD, 3.10) {
+				t.Errorf("Outcome.Usage.USD = %v, want 3.10", out.Usage.USD)
+			}
+		})
+	}
+}
+
+// TestDispatcher_ANodeRefusingOnTheBudgetCeilingPausesTheRun covers the one
+// place a node refuses because of money rather than because of the work: the
+// fanout node's pre-check, which refuses to buy N candidates it can see the
+// ceiling will not cover. Ending the run for that would be the mistake the
+// dispatcher's own guards stopped making — the money already spent and the
+// work already done would be out of reach, and the only way on a new run
+// from nothing, spending it all again.
+func TestDispatcher_ANodeRefusingOnTheBudgetCeilingPausesTheRun(t *testing.T) {
+	h := newRun(t, budgetCfg(1.00, 0), "refuse what you cannot pay for")
+
+	refused := &belay.BudgetError{SpentUSD: 0.40, LimitUSD: 1.00}
+	fanoutNode := &fakeNode{name: graph.NodeFanout, steps: []nodeStep{
+		{
+			// It had already spent something before it refused, and
+			// money a backend reported is gone whatever the verdict.
+			res: Result{Usage: belay.Usage{InputTokens: 80, OutputTokens: 20, USD: 0.40}},
+			err: fmt.Errorf("fanout: 3 candidates need $3.00: %w", refused),
+		},
+		{res: Result{Next: graph.End, Status: journal.StatusOK}},
+	}}
+
+	out, err := h.entryDispatcher(t, graph.NodeFanout, fanoutNode).Run(context.Background())
+
+	if !errors.Is(err, belay.ErrBudgetExceeded) {
+		t.Fatalf("Run() error = %v, want one wrapping belay.ErrBudgetExceeded", err)
+	}
+	// Paused rather than failed, and stopped by a limit rather than by the
+	// graph, so the exit code is the one every other limit uses.
+	if out.Status != state.RunStatusPaused || out.ExitCode != graph.ExitAborted {
+		t.Errorf("Outcome = {%v, exit %d}, want {paused, exit %d}", out.Status, out.ExitCode, graph.ExitAborted)
+	}
+	if !strings.Contains(out.Note, "budget.max_usd") {
+		t.Errorf("Outcome.Note = %q, want it to name the setting to raise", out.Note)
+	}
+	// The attempt is closed as one to run again — it names its own node —
+	// so resuming re-runs it rather than resolving to no node at all.
+	want := []string{"run_started", "fanout#1 started", "fanout#1 finished aborted -> fanout", "run_paused"}
+	if got := h.timeline(t); !equalStrings(got, want) {
+		t.Errorf("timeline =\n  %v\nwant\n  %v", got, want)
+	}
+	if got := h.lastNodeFinished(t); got.Usage == nil || !closeTo(got.Usage.USD, 0.40) {
+		t.Errorf("the journalled usage is %+v, want the $0.40 the node reported spending", got.Usage)
+	}
+
+	// Raising the ceiling and resuming continues this run, keeping what it
+	// has already spent: limits are re-read on the resume.
+	h.cfg = budgetCfg(10.00, 0)
+	out, err = h.entryDispatcher(t, graph.NodeFanout, fanoutNode).Resume(context.Background())
+	if err != nil {
+		t.Fatalf("Resume() error = %v, want nil", err)
+	}
+	if out.Status != state.RunStatusCompleted {
+		t.Fatalf("Outcome.Status after resume = %v, want completed (note %q)", out.Status, out.Note)
+	}
+	if fanoutNode.attempts[1] != 2 {
+		t.Errorf("the re-run ran at attempt %d, want 2", fanoutNode.attempts[1])
+	}
+	if !closeTo(out.Usage.USD, 0.40) {
+		t.Errorf("Outcome.Usage.USD after resume = %v, want the 0.40 the refused attempt spent", out.Usage.USD)
 	}
 }
 
@@ -1301,6 +1535,82 @@ func TestDispatcher_NodeTimeoutPausesTheRun(t *testing.T) {
 	}
 	if !strings.Contains(out.Note, "graph.node_timeout") {
 		t.Errorf("Outcome.Note = %q, want a clear timeout explanation naming the setting", out.Note)
+	}
+}
+
+// supervisingNode is a fakeNode that supervises candidate runs, so
+// graph.node_timeout does not apply to it.
+type supervisingNode struct{ *fakeNode }
+
+func (supervisingNode) SupervisesCandidates() {}
+
+// TestDispatcher_NodeTimeoutDoesNotApplyToASupervisor pins the exemption a
+// fanout node needs. graph.node_timeout caps one node's own work; a node
+// that supervises candidate runs is waiting on runs whose every node is
+// already capped by that same setting, so applying it a second time at the
+// parent would kill N candidates in the middle of paid work the moment the
+// fanout as a whole outlived a single node's limit.
+func TestDispatcher_NodeTimeoutDoesNotApplyToASupervisor(t *testing.T) {
+	tests := []struct {
+		name       string
+		supervises bool
+		wantErr    error
+		wantStatus state.RunStatus
+		wantSteps  []string
+	}{
+		{
+			name:       "a node that supervises candidate runs outlives the cap",
+			supervises: true,
+			wantStatus: state.RunStatusCompleted,
+			wantSteps: []string{
+				"run_started", "fanout#1 started", "fanout#1 finished ok -> END", "run_completed",
+			},
+		},
+		{
+			name:       "a plain node in the same position is still capped",
+			supervises: false,
+			wantErr:    graph.ErrNodeTimeout,
+			wantStatus: state.RunStatusPaused,
+			wantSteps: []string{
+				"run_started", "fanout#1 started", "fanout#1 finished aborted -> fanout", "run_paused",
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := config.Default()
+			cfg.Graph.NodeTimeout = config.NewDuration(50 * time.Millisecond)
+			h := newRun(t, cfg, "wait for the candidates")
+
+			// It ignores its context, as a node waiting on candidate runs
+			// that each watch their own does: the cap must be absent,
+			// not merely unobserved.
+			slow := &fakeNode{name: graph.NodeFanout, steps: []nodeStep{{
+				res:       Result{Next: graph.End, Status: journal.StatusOK},
+				sleep:     200 * time.Millisecond,
+				ignoreCtx: true,
+			}}}
+			node := graph.Node(slow)
+			if tt.supervises {
+				node = supervisingNode{fakeNode: slow}
+			}
+
+			out, err := h.entryDispatcher(t, graph.NodeFanout, node).Run(context.Background())
+
+			if tt.wantErr == nil && err != nil {
+				t.Fatalf("Run() error = %v, want nil", err)
+			}
+			if tt.wantErr != nil && !errors.Is(err, tt.wantErr) {
+				t.Fatalf("Run() error = %v, want one wrapping %v", err, tt.wantErr)
+			}
+			if out.Status != tt.wantStatus {
+				t.Errorf("Outcome.Status = %v, want %v (note %q)", out.Status, tt.wantStatus, out.Note)
+			}
+			if got := h.timeline(t); !equalStrings(got, tt.wantSteps) {
+				t.Errorf("timeline =\n  %v\nwant\n  %v", got, tt.wantSteps)
+			}
+		})
 	}
 }
 

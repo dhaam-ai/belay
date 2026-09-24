@@ -139,6 +139,44 @@ type Node interface {
 	Run(ctx context.Context, rc *RunContext) (Result, error)
 }
 
+// Supervisor marks a node whose work is other runs' work, so that
+// config.Graph.NodeTimeout does not apply to it. Only the fanout node, which
+// waits on its candidate runs, implements it.
+//
+// The exemption is not a node given unlimited time. graph.node_timeout caps
+// what one node does itself, and a supervisor does nothing itself: every
+// node of every candidate run is capped by that same setting, and every
+// candidate run is capped by graph.max_steps and by its own budget
+// envelope. The wait is therefore bounded by
+// max_steps × node_timeout × ceil(N/concurrency), and a cancelled context
+// still stops it at once — Ctrl-C pauses the parent and every candidate.
+//
+// Applying the cap at the parent as well would not make the run safer, it
+// would make it wrong: the default node_timeout is 15 minutes, so any
+// fanout worth running would cross it, and crossing it would kill N
+// candidates in the middle of work already paid for. A run's total time is
+// what graph.max_steps and the budget ceiling bound, node by node, and that
+// is where the bound belongs.
+type Supervisor interface{ SupervisesCandidates() }
+
+// Unpriced marks a node that calls no agent and so cannot add to the run's
+// bill. The dispatcher does not check the budget ceiling before running one.
+//
+// It is not an exemption from the ceiling — it is the observation that the
+// ceiling has nothing to say about a node that cannot spend. join compares
+// numbers other nodes produced; promote runs git. Stopping either at the
+// ceiling does not save a penny, and it costs the run the delivery of work
+// already bought, which is the opposite of what ADR-0007 exists for: a
+// fanout whose candidates spent the ceiling would otherwise leave its winner
+// selected, paid for, and undeliverable until someone raised a limit in
+// belay.yaml.
+//
+// A node implementing it must really spend nothing, because the check it
+// skips is the only thing standing before it. Everything such a node spends
+// is still recorded, as every node's is: the marker changes what is checked,
+// never what is counted.
+type Unpriced interface{ SpendsNothing() }
+
 // RunContext is everything a node is allowed to see. The dispatcher builds one
 // per node execution.
 //
@@ -232,6 +270,17 @@ type RunContext struct {
 	// internal/graph has no build tag and the git package runs git through
 	// internal/exec, which builds only on unix; see internal/vcs.
 	VCS vcs.Repository
+
+	// CandidateRuns executes this run's fanout candidates, one full run
+	// each. It is how a node reaches the one capability a node may not
+	// have — goroutines, child stores, durable writes — without holding
+	// any of it: see CandidateRunner.
+	//
+	// It is nil for every run that does not fan out, and for every run
+	// belay performs today, because nothing builds a runner yet. A node
+	// that needs it and finds it nil refuses with ErrNoCandidateRunner,
+	// like any other missing adapter.
+	CandidateRuns CandidateRunner
 }
 
 // WriteArtifact writes a run artifact — plan.md, review.json, a diff — and

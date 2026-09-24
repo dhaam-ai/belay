@@ -171,6 +171,16 @@ that only `pkg/belay` carries a compatibility promise. Everything under
 
 ### Fixed
 
+- **A step that stops because of the budget ceiling now pauses the run, like
+  every other limit.** belay's own guards pause a run that reaches
+  `budget.max_usd`, so raising the ceiling and resuming continues it and keeps
+  what it has already spent. A step that refused for the same reason — it
+  could see the ceiling would not cover what it was about to buy — ended the
+  run instead, although belay then told you to raise the setting and resume,
+  which could not work. Such a step now pauses the run and is run again on
+  `belay resume`, against the ceiling as it is then. The exit code is
+  unchanged: the invocation still exits 3.
+
 - **`belay runs` says "needs plan approval" only when the plan gate asked.**
   A run stopped by Ctrl-C while the gate was running, or by one of belay's
   own limits just before it, is paused at the same step and looked the same
