@@ -478,3 +478,29 @@ func ordinal(n int) string {
 }
 
 var _ belay.AgentBackend = (*Backend)(nil)
+
+// ListPrice implements belay.ModelPricer by asking the backend that would
+// really run the request, which is the only one whose answer is worth having.
+//
+// Every live and recording run is wrapped in one of these, so a caller
+// pricing a run's models is holding a Backend rather than the backend itself;
+// answering here instead of forwarding would price every model at nothing.
+//
+// Two cases have no answer, and both report belay.ErrUnsupported rather than
+// a rate or a failure. In ModeReplay there is no inner backend at all and
+// nothing is spent, so there is nothing to price; a run must not be refused
+// for it. An inner backend that does not implement belay.ModelPricer is the
+// same situation from the other side: it has not said it cannot run the
+// model, only that it will not say what the model costs.
+func (b *Backend) ListPrice(model string) (belay.ModelRate, error) {
+	if b.mode == ModeReplay || b.inner == nil {
+		return belay.ModelRate{}, fmt.Errorf(
+			"replay: %s mode calls no backend, so it prices no model: %w", b.mode, belay.ErrUnsupported)
+	}
+	pricer, ok := b.inner.(belay.ModelPricer)
+	if !ok {
+		return belay.ModelRate{}, fmt.Errorf(
+			"replay: the %s backend does not price models: %w", b.inner.Name(), belay.ErrUnsupported)
+	}
+	return pricer.ListPrice(model)
+}

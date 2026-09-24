@@ -281,3 +281,28 @@ func usageOf(res result, requestModel string, table map[string]Price) (belay.Usa
 	}
 	return out, nil
 }
+
+// ListPrice implements belay.ModelPricer: it reports what model lists at, in
+// USD per million tokens, before anything has been spent on it.
+//
+// It reads the same table, through the same lookup, that usageOf prices a
+// finished call with, so the rate a dry run shows for a node and the rate its
+// spend is estimated at cannot come apart. A model that is not in the table
+// is an error wrapping ErrUnknownModel rather than a zero rate, for the
+// reason ErrUnknownModel exists: a silent zero is a budget that cannot be
+// enforced.
+//
+// What this proves is narrower than "the CLI will accept this model", and the
+// difference matters to whoever reads a refusal. The table is belay's own
+// knowledge of Claude models, so a genuine model released after this version
+// is refused here although the CLI would run it. That is the safe direction:
+// belay could not have held such a run to its ceiling anyway, because it
+// could not price the tokens if the CLI stopped reporting a cost. The remedy
+// is a belay that knows the model, and the error says which one it did not.
+func (b *Backend) ListPrice(model string) (belay.ModelRate, error) {
+	p, ok := lookupPrice(b.prices(), model)
+	if !ok {
+		return belay.ModelRate{}, fmt.Errorf("%w %q", ErrUnknownModel, model)
+	}
+	return belay.ModelRate{Input: p.Input, Output: p.Output}, nil
+}

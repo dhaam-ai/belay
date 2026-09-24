@@ -4,6 +4,7 @@ package claude
 
 import (
 	"errors"
+	"strings"
 	"testing"
 
 	"github.com/dhaam-ai/belay/pkg/belay"
@@ -307,4 +308,58 @@ func TestEveryPriceIsPositive(t *testing.T) {
 				model, p.Output, p.Input)
 		}
 	}
+}
+
+// A model is the backend's business: only whatever will run the request knows
+// which names it accepts and what they cost. The CLI asks this before a run
+// starts, for every node's model and not just agent.model, so a name that
+// cannot be run or priced stops the run before it spends rather than in the
+// middle of it.
+func TestListPriceAnswersForAModelTheBackendCanRun(t *testing.T) {
+	t.Parallel()
+	b := New(nil)
+
+	tests := []struct {
+		name            string
+		model           string
+		wantIn, wantOut float64
+	}{
+		{"an alias the CLI accepts", "haiku", 1, 5},
+		{"a full identifier", "claude-sonnet-5", 2, 10},
+		{"belay's own default", "sonnet", 2, 10},
+		{"a dated snapshot normalises", "claude-opus-5@20251101", 5, 25},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			rate, err := b.ListPrice(tt.model)
+			if err != nil {
+				t.Fatalf("ListPrice(%q) = %v", tt.model, err)
+			}
+			if rate.Input != tt.wantIn || rate.Output != tt.wantOut {
+				t.Errorf("ListPrice(%q) = %v per million, want input %v output %v",
+					tt.model, rate, tt.wantIn, tt.wantOut)
+			}
+		})
+	}
+}
+
+// An unknown model must be a loud refusal naming the model, not a zero rate.
+// A zero rate would print "$0.00 per million tokens" in the dry run and let
+// the run start on a model the backend may not even accept.
+func TestListPriceRefusesAModelItCannotPrice(t *testing.T) {
+	t.Parallel()
+
+	_, err := New(nil).ListPrice("claude-opus-9")
+	if !errors.Is(err, ErrUnknownModel) {
+		t.Fatalf("ListPrice = %v, want an error wrapping ErrUnknownModel", err)
+	}
+	if !strings.Contains(err.Error(), "claude-opus-9") {
+		t.Errorf("error %q does not name the model", err)
+	}
+}
+
+// The backend belay wires in must be the one it asks about models, or the
+// dry run prices a table the run does not use.
+func TestBackendIsAModelPricer(t *testing.T) {
+	var _ belay.ModelPricer = (*Backend)(nil)
 }
