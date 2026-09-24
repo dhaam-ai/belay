@@ -3,6 +3,7 @@ package state
 import (
 	"path/filepath"
 
+	"github.com/dhaam-ai/belay/internal/config"
 	"github.com/dhaam-ai/belay/pkg/belay"
 )
 
@@ -202,4 +203,36 @@ func NewCandidateRunLayout(parent Layout, id string) (Layout, error) {
 		return Layout{}, err
 	}
 	return Layout{workspace: parent.workspace, root: root}, nil
+}
+
+// PinnedConfig returns cfg with every value this run pinned when it was
+// created overlaid on it: the configuration this run's nodes must read.
+//
+// It exists because pinning the registry is not enough. A node reads
+// rc.Config, which the dispatcher fills from the file as this process loaded
+// it, so a node that asks whether fanout is enabled, or which selection
+// strategy to use, would get the answer belay.yaml gives today rather than
+// the one the run was started with. Overlaying once, where the RunContext is
+// assembled, means no node has to remember to ask the manifest, and a node
+// that reads the live value by accident cannot be written.
+//
+// It overlays the graph's SHAPE and nothing else. The dispatcher's limits —
+// budget.max_usd, budget.max_tokens, graph.max_steps and graph.node_timeout
+// — are deliberately read live, so that raising one and resuming continues a
+// run that met it, and they are not touched here. Neither is
+// fanout.isolator, which is not shape but how a workspace is made, and which
+// the CLI has already resolved into the isolator itself.
+//
+// cfg is taken and returned by value, so the caller's configuration is never
+// the thing that gets pinned.
+func (m Manifest) PinnedConfig(cfg config.Config) config.Config {
+	if m.Fanout != nil {
+		cfg.Fanout.Enabled = true
+		cfg.Fanout.Candidates = m.Fanout.Candidates
+		// Carried through as written, even when this belay does not know the
+		// strategy: reporting an unknown name is join's to do, in one place,
+		// and a default guessed here would silently pick a different winner.
+		cfg.Fanout.Select = config.SelectStrategy(m.Fanout.Select)
+	}
+	return cfg
 }

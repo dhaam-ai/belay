@@ -356,3 +356,114 @@ func TestProvisionPendingIsTheZeroValue(t *testing.T) {
 		t.Errorf("a candidate block with no provision key decoded as %q, want pending", c.Provision)
 	}
 }
+
+// TestPinnedConfigOverlaysTheFanoutPinAndNotTheLimits is the rule that
+// decides what a node reads. The graph's shape is pinned when the run is
+// created, so a node cannot be written that reads the live fanout settings
+// by accident; the dispatcher's limits are deliberately left live, because
+// the settled rule is that a person may raise one and resume a run that met
+// it.
+func TestPinnedConfigOverlaysTheFanoutPinAndNotTheLimits(t *testing.T) {
+	live := config.Default()
+	live.Fanout = config.Fanout{
+		Enabled:    false,
+		Candidates: 5,
+		Isolator:   config.IsolatorDircopy,
+		Select:     config.SelectFastest,
+	}
+	live.Budget = config.Budget{MaxUSD: 50, MaxTokens: 900000, OnExceed: config.OnExceedWarn}
+	live.Graph.MaxSteps = 99
+	live.Graph.NodeTimeout = config.NewDuration(42 * time.Minute)
+
+	tests := []struct {
+		name       string
+		pin        *FanoutPin
+		wantFanout config.Fanout
+	}{
+		{
+			name:       "no pin leaves the configuration alone",
+			pin:        nil,
+			wantFanout: live.Fanout,
+		},
+		{
+			name: "a pin decides enabled, candidates and select",
+			pin:  &FanoutPin{Candidates: 3, Select: string(config.SelectFewestIssues)},
+			wantFanout: config.Fanout{
+				Enabled:    true,
+				Candidates: 3,
+				// The isolator is not part of the graph's shape: it is how a
+				// workspace is made, and the CLI has already resolved it.
+				Isolator: config.IsolatorDircopy,
+				Select:   config.SelectFewestIssues,
+			},
+		},
+		{
+			name: "fanout.enabled turned off under a pinned run does not unpin it",
+			pin:  &FanoutPin{Candidates: 2, Select: string(config.SelectFirstPass)},
+			wantFanout: config.Fanout{
+				Enabled:    true,
+				Candidates: 2,
+				Isolator:   config.IsolatorDircopy,
+				Select:     config.SelectFirstPass,
+			},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			m := NewManifest(time.Now(), "run-1", "/work", "goal", config.Default())
+			if tt.pin != nil {
+				m.SetFanout(*tt.pin)
+			}
+
+			got := m.PinnedConfig(live)
+
+			if diff := cmp.Diff(tt.wantFanout, got.Fanout); diff != "" {
+				t.Errorf("Fanout (-want +got):\n%s", diff)
+			}
+			if diff := cmp.Diff(live.Budget, got.Budget); diff != "" {
+				t.Errorf("budget.* must stay live so a raised ceiling reaches a resumed run (-live +got):\n%s", diff)
+			}
+			if got.Graph.MaxSteps != live.Graph.MaxSteps {
+				t.Errorf("graph.max_steps = %d, want the live %d", got.Graph.MaxSteps, live.Graph.MaxSteps)
+			}
+			if got.Graph.NodeTimeout.Duration() != live.Graph.NodeTimeout.Duration() {
+				t.Errorf("graph.node_timeout = %v, want the live %v",
+					got.Graph.NodeTimeout.Duration(), live.Graph.NodeTimeout.Duration())
+			}
+		})
+	}
+}
+
+// TestPinnedConfigDoesNotMutateTheConfigItIsGiven: the dispatcher holds one
+// Config for the process and calls this once per node. Overlaying in place
+// would pin the live configuration itself, and every later reader — a second
+// run in the same process, `belay runs` — would see a fanout nobody asked
+// for.
+func TestPinnedConfigDoesNotMutateTheConfigItIsGiven(t *testing.T) {
+	live := config.Default()
+	before := live
+
+	m := NewManifest(time.Now(), "run-1", "/work", "goal", config.Default())
+	m.SetFanout(FanoutPin{Candidates: 4, Select: string(config.SelectFewestIssues)})
+	_ = m.PinnedConfig(live)
+
+	if diff := cmp.Diff(before.Fanout, live.Fanout); diff != "" {
+		t.Errorf("PinnedConfig changed the configuration it was given (-before +after):\n%s", diff)
+	}
+}
+
+// TestPinnedConfigCarriesAStrategyThisBelayDoesNotKnow: the pin is a string
+// so that a manifest written by a newer belay names its strategy rather than
+// failing to decode. Overlaying it unchanged is what lets join report an
+// unknown strategy itself, in one place, instead of this function guessing a
+// default and silently picking a different winner.
+func TestPinnedConfigCarriesAStrategyThisBelayDoesNotKnow(t *testing.T) {
+	m := NewManifest(time.Now(), "run-1", "/work", "goal", config.Default())
+	m.SetFanout(FanoutPin{Candidates: 3, Select: "cheapest"})
+
+	got := m.PinnedConfig(config.Default())
+
+	if got.Fanout.Select != config.SelectStrategy("cheapest") {
+		t.Errorf("Select = %q, want it carried through as written", got.Fanout.Select)
+	}
+}
