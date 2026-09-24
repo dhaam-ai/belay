@@ -271,24 +271,30 @@ type Agent struct {
 }
 
 // ModelFor returns the model the backend is told to use when the node named
-// node calls the agent. Today that is a.Model for every node.
+// node calls the agent: the one agent.models routes it to, or agent.model.
 //
 // It exists so that routing, sending different nodes of one run to
 // different models, has exactly one place to live. Every node that builds an
-// agent request asks here instead of reading a.Model itself, so routing will
-// change this body and no node. It takes the node's name rather than a graph
+// agent request asks here instead of reading a.Model itself, so routing
+// changed this body and no node. It takes the node's name rather than a graph
 // type because internal/graph imports this package; callers pass the
 // graph.Node* constants.
 //
 // It deliberately does not validate node. An unknown name, the empty string
 // included, gets a.Model like any other rather than an empty model, which is
 // how an agent request asks for the backend's own default: a model the user
-// never chose, and one the cost estimator has no name to price by. The
-// result depends only on a and node, so a node the dispatcher re-runs on
-// resume asks for the same model the interrupted attempt did.
+// never chose, and one the cost estimator has no name to price by. The name
+// belay cannot route has already been refused by [Config.Validate], before
+// the run started; failing here instead would fail it mid-run, after the
+// steps before this one had been paid for.
 //
-//nolint:revive // node is unused until routing lands; it is the seam's whole point, so it stays named.
+// The result depends only on a and node, so a node the dispatcher re-runs on
+// resume asks for the same model the interrupted attempt did, and two nodes
+// of one run may hold different answers at the same time.
 func (a Agent) ModelFor(node string) string {
+	if model := a.Models[node]; model != "" {
+		return model
+	}
 	return a.Model
 }
 
