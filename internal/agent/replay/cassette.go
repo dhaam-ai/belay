@@ -266,6 +266,16 @@ const sessionIDPlaceholder = "<resumed>"
 // additionally canonicalized (see canonicalJSON) so that two JSON
 // documents differing only in formatting normalize identically.
 //
+// Scope is the one field that comes from nowhere in belay.AgentRequest.
+// It is the decorator's own qualifier, set by Backend.Scoped and empty
+// for every other Backend, and it exists because two fanout candidates
+// running one goal produce byte-identical requests in every field above
+// (see Backend.Scoped). It is deliberately LAST in the encoding and
+// omitted when empty: an unscoped request therefore encodes to exactly
+// the bytes it encoded to before Scope existed, so every cassette already
+// recorded stays valid. That property is load-bearing rather than
+// incidental, and replay/scope_test.go pins it with literal digests.
+//
 // NormalizedRequest has custom MarshalJSON/UnmarshalJSON methods (see
 // normalizedRequestOnDisk) rather than the struct tags a reader might
 // expect: MCPConfig is nested JSON, and for the same reason given on
@@ -280,6 +290,7 @@ type NormalizedRequest struct {
 	Model        string
 	SessionID    string
 	MCPConfig    json.RawMessage
+	Scope        string
 }
 
 // normalizedRequestOnDisk is NormalizedRequest's JSON shape. MCPConfig is
@@ -294,6 +305,7 @@ type normalizedRequestOnDisk struct {
 	Model        string   `json:"model,omitempty"`
 	SessionID    string   `json:"session_id,omitempty"`
 	MCPConfig    string   `json:"mcp_config,omitempty"`
+	Scope        string   `json:"scope,omitempty"`
 }
 
 // MarshalJSON implements json.Marshaler. It is also what Fingerprint
@@ -310,6 +322,7 @@ func (n NormalizedRequest) MarshalJSON() ([]byte, error) {
 		Model:        n.Model,
 		SessionID:    n.SessionID,
 		MCPConfig:    string(n.MCPConfig),
+		Scope:        n.Scope,
 	})
 }
 
@@ -326,6 +339,7 @@ func (n *NormalizedRequest) UnmarshalJSON(data []byte) error {
 	n.MaxTurns = d.MaxTurns
 	n.Model = d.Model
 	n.SessionID = d.SessionID
+	n.Scope = d.Scope
 	if d.MCPConfig != "" {
 		n.MCPConfig = json.RawMessage(d.MCPConfig)
 	} else {
@@ -412,6 +426,11 @@ func canonicalJSON(raw json.RawMessage) json.RawMessage {
 // those two) and MCPConfig canonicalized. Every other field (Prompt,
 // SystemPrompt, AllowedTools, MaxTurns, Model) is hashed exactly as
 // given.
+//
+// Fingerprint itself computes the UNSCOPED digest, since a
+// belay.AgentRequest carries no scope. A Backend qualifies it with its
+// own (see Backend.Scoped); Backend.Seen reports what a Backend actually
+// computed, which is what DetectDrift compares against.
 //
 // # Why this is deterministic
 //
