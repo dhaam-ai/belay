@@ -360,6 +360,4 @@ func TestListPriceRefusesAModelItCannotPrice(t *testing.T) {
 
 // The backend belay wires in must be the one it asks about models, or the
 // dry run prices a table the run does not use.
-func TestBackendIsAModelPricer(t *testing.T) {
-	var _ belay.ModelPricer = (*Backend)(nil)
-}
+var _ belay.ModelPricer = (*Backend)(nil)

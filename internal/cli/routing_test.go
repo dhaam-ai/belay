@@ -85,7 +85,7 @@ func TestAModelTheBackendCannotPriceStopsTheRunBeforeItSpends(t *testing.T) {
 		want   []string
 	}{
 		{
-			name: "a routed node's model",
+			name:   "a routed node's model",
 			config: "version: 1\nagent:\n  model: sonnet\n  models:\n    code: claude-unobtainium-9\n",
 			want:   []string{"agent.models.code", "claude-unobtainium-9"},
 		},
