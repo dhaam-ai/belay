@@ -340,6 +340,13 @@ type Options struct {
 // run again, exactly as a cancelled one does, so that raising the limit and
 // resuming re-runs the step that overran.
 //
+// A node that refuses on the budget ceiling itself — the fanout node,
+// declining to buy N candidates it can see the ceiling will not cover — is
+// treated as the same kind of event rather than as a failure, for the same
+// reason: it is reporting one of those figures, not a verdict on the work.
+// Its attempt is closed as one to run again and the run pauses, so raising
+// the ceiling and resuming re-runs the node against it (see settle).
+//
 // # Before the first write: establish the run
 //
 // Opening the journal writes to a run: journal.Open creates the file and heals
@@ -1169,6 +1176,18 @@ func (d *Dispatcher) settle(
 		return d.terminal(jrnl, man, ledger, node, attempt, steps, exec.elapsed, exec.res.Usage,
 			journal.StatusAborted, journal.EventRunAborted, state.RunStatusAborted, ExitAborted,
 			d.note(err.Error()), err, logger)
+	case errors.Is(exec.err, belay.ErrBudgetExceeded):
+		// A node that refuses because of the ceiling is reporting one of
+		// the dispatcher's own limits, not a verdict on the work: the
+		// fanout node refusing to buy N candidates it can see the budget
+		// will not cover is the case this exists for. Ending the run for
+		// that would put the money and the work already done out of reach,
+		// leaving a new run from nothing as the only way on — the mistake
+		// the dispatcher's own guards stopped making. So it pauses, with
+		// the setting to raise in its note, and a resume re-runs the node
+		// against the ceiling as it is then.
+		return d.pauseInsideNode(jrnl, man, ledger, node, attempt, steps, exec.elapsed, exec.res.Usage,
+			d.limitNote(exec.err, "budget.max_usd or budget.max_tokens"), exec.err, logger)
 	case exec.err != nil:
 		return d.terminal(jrnl, man, ledger, node, attempt, steps, exec.elapsed, exec.res.Usage,
 			journal.StatusFailed, journal.EventRunFailed, state.RunStatusFailed, ExitFailed,

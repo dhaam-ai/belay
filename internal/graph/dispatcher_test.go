@@ -1002,6 +1002,68 @@ func TestDispatcher_JoinAndPromoteRunAfterTheCeilingIsCrossed(t *testing.T) {
 	}
 }
 
+// TestDispatcher_ANodeRefusingOnTheBudgetCeilingPausesTheRun covers the one
+// place a node refuses because of money rather than because of the work: the
+// fanout node's pre-check, which refuses to buy N candidates it can see the
+// ceiling will not cover. Ending the run for that would be the mistake the
+// dispatcher's own guards stopped making — the money already spent and the
+// work already done would be out of reach, and the only way on a new run
+// from nothing, spending it all again.
+func TestDispatcher_ANodeRefusingOnTheBudgetCeilingPausesTheRun(t *testing.T) {
+	h := newRun(t, budgetCfg(1.00, 0), "refuse what you cannot pay for")
+
+	refused := &belay.BudgetError{SpentUSD: 0.40, LimitUSD: 1.00}
+	fanoutNode := &fakeNode{name: graph.NodeFanout, steps: []nodeStep{
+		{
+			// It had already spent something before it refused, and
+			// money a backend reported is gone whatever the verdict.
+			res: Result{Usage: belay.Usage{InputTokens: 80, OutputTokens: 20, USD: 0.40}},
+			err: fmt.Errorf("fanout: 3 candidates need $3.00: %w", refused),
+		},
+		{res: Result{Next: graph.End, Status: journal.StatusOK}},
+	}}
+
+	out, err := h.entryDispatcher(t, graph.NodeFanout, fanoutNode).Run(context.Background())
+
+	if !errors.Is(err, belay.ErrBudgetExceeded) {
+		t.Fatalf("Run() error = %v, want one wrapping belay.ErrBudgetExceeded", err)
+	}
+	// Paused rather than failed, and stopped by a limit rather than by the
+	// graph, so the exit code is the one every other limit uses.
+	if out.Status != state.RunStatusPaused || out.ExitCode != graph.ExitAborted {
+		t.Errorf("Outcome = {%v, exit %d}, want {paused, exit %d}", out.Status, out.ExitCode, graph.ExitAborted)
+	}
+	if !strings.Contains(out.Note, "budget.max_usd") {
+		t.Errorf("Outcome.Note = %q, want it to name the setting to raise", out.Note)
+	}
+	// The attempt is closed as one to run again — it names its own node —
+	// so resuming re-runs it rather than resolving to no node at all.
+	want := []string{"run_started", "fanout#1 started", "fanout#1 finished aborted -> fanout", "run_paused"}
+	if got := h.timeline(t); !equalStrings(got, want) {
+		t.Errorf("timeline =\n  %v\nwant\n  %v", got, want)
+	}
+	if got := h.lastNodeFinished(t); got.Usage == nil || !closeTo(got.Usage.USD, 0.40) {
+		t.Errorf("the journalled usage is %+v, want the $0.40 the node reported spending", got.Usage)
+	}
+
+	// Raising the ceiling and resuming continues this run, keeping what it
+	// has already spent: limits are re-read on the resume.
+	h.cfg = budgetCfg(10.00, 0)
+	out, err = h.entryDispatcher(t, graph.NodeFanout, fanoutNode).Resume(context.Background())
+	if err != nil {
+		t.Fatalf("Resume() error = %v, want nil", err)
+	}
+	if out.Status != state.RunStatusCompleted {
+		t.Fatalf("Outcome.Status after resume = %v, want completed (note %q)", out.Status, out.Note)
+	}
+	if fanoutNode.attempts[1] != 2 {
+		t.Errorf("the re-run ran at attempt %d, want 2", fanoutNode.attempts[1])
+	}
+	if !closeTo(out.Usage.USD, 0.40) {
+		t.Errorf("Outcome.Usage.USD after resume = %v, want the 0.40 the refused attempt spent", out.Usage.USD)
+	}
+}
+
 // TestDispatcher_ResumeContinuesTheLedgerRatherThanResettingIt is acceptance
 // criterion 4: a resumed run must keep spending from where the crash left off.
 // A fresh ledger would let every crash hand the run a full ceiling again.
