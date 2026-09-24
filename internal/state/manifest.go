@@ -240,6 +240,15 @@ type Manifest struct {
 	// completes: the directory NewManifest pins from plan.archive and
 	// plan.archive_dir, and, once the plan is there, the file itself.
 	ArchivedPlan ArchivedPlan `json:"archived_plan"`
+	// Fanout is the shape of this run's fanout, pinned when the run was
+	// created, or nil for a run that does not fan out — which is what every
+	// manifest written before this field existed decodes as. Set it with
+	// SetFanout; see CapabilityFanoutCandidateRuns.
+	Fanout *FanoutPin `json:"fanout,omitempty"`
+	// Candidate is what makes this run one fanout candidate's own run: its
+	// place in the parent run, its workspace and its spend envelope. Nil for
+	// every run a person started. Set it with SetCandidate.
+	Candidate *CandidateRun `json:"candidate,omitempty"`
 }
 
 // ArchivedPlan is where a run files its approved plan once it completes
@@ -742,12 +751,23 @@ func (l Layout) NodeDir(seq int, name string) (string, error) {
 	return joinSafe("node name", l.NodesDir(), fmt.Sprintf("%03d-%s", seq, name))
 }
 
-// CandidatesDir returns the run's candidates/ directory.
+// CandidatesDir returns the run's candidates/ directory, which is the root
+// the CLI builds this run's isolator at, so every candidate workspace it
+// creates belongs to this run and no other.
 func (l Layout) CandidatesDir() string { return filepath.Join(l.root, "candidates") }
 
 // CandidateDir returns the path to one best-of-N fanout candidate's
-// directory, candidates/<id>/, which holds its own workspace/, state.json
-// and journal.ndjson. It rejects an id that could escape candidates/.
+// workspace, candidates/<id>/. It rejects an id that could escape
+// candidates/.
+//
+// The directory is the workspace itself — the tree the candidate's agent
+// edits and its tests run in — and not a container holding one. The CLI
+// roots both isolators at CandidatesDir (internal/cli's runPlan.isolator),
+// so Isolator.Create(src, id) puts the copy or the git worktree exactly
+// here. A candidate's own run files — manifest, blackboard, journal,
+// snapshots and node evidence — are not under here at all: they live under
+// CandidateRunsDir, so that destroying a workspace cannot take the record of
+// what was spent making it.
 func (l Layout) CandidateDir(id string) (string, error) {
 	if err := l.check(); err != nil {
 		return "", err
