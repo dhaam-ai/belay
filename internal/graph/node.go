@@ -139,6 +139,26 @@ type Node interface {
 	Run(ctx context.Context, rc *RunContext) (Result, error)
 }
 
+// Supervisor marks a node whose work is other runs' work, so that
+// config.Graph.NodeTimeout does not apply to it. Only the fanout node, which
+// waits on its candidate runs, implements it.
+//
+// The exemption is not a node given unlimited time. graph.node_timeout caps
+// what one node does itself, and a supervisor does nothing itself: every
+// node of every candidate run is capped by that same setting, and every
+// candidate run is capped by graph.max_steps and by its own budget
+// envelope. The wait is therefore bounded by
+// max_steps × node_timeout × ceil(N/concurrency), and a cancelled context
+// still stops it at once — Ctrl-C pauses the parent and every candidate.
+//
+// Applying the cap at the parent as well would not make the run safer, it
+// would make it wrong: the default node_timeout is 15 minutes, so any
+// fanout worth running would cross it, and crossing it would kill N
+// candidates in the middle of work already paid for. A run's total time is
+// what graph.max_steps and the budget ceiling bound, node by node, and that
+// is where the bound belongs.
+type Supervisor interface{ SupervisesCandidates() }
+
 // RunContext is everything a node is allowed to see. The dispatcher builds one
 // per node execution.
 //

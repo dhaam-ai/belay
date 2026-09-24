@@ -1389,6 +1389,82 @@ func TestDispatcher_NodeTimeoutPausesTheRun(t *testing.T) {
 	}
 }
 
+// supervisingNode is a fakeNode that supervises child runs, so
+// graph.node_timeout does not apply to it.
+type supervisingNode struct{ *fakeNode }
+
+func (supervisingNode) SupervisesCandidates() {}
+
+// TestDispatcher_NodeTimeoutDoesNotApplyToASupervisor pins the exemption a
+// fanout node needs. graph.node_timeout caps one node's own work; a node
+// that supervises candidate runs is waiting on runs whose every node is
+// already capped by that same setting, so applying it a second time at the
+// parent would kill N candidates in the middle of paid work the moment the
+// fanout as a whole outlived a single node's limit.
+func TestDispatcher_NodeTimeoutDoesNotApplyToASupervisor(t *testing.T) {
+	tests := []struct {
+		name       string
+		supervises bool
+		wantErr    error
+		wantStatus state.RunStatus
+		wantSteps  []string
+	}{
+		{
+			name:       "a node that supervises candidate runs outlives the cap",
+			supervises: true,
+			wantStatus: state.RunStatusCompleted,
+			wantSteps: []string{
+				"run_started", "fanout#1 started", "fanout#1 finished ok -> END", "run_completed",
+			},
+		},
+		{
+			name:       "a plain node in the same position is still capped",
+			supervises: false,
+			wantErr:    graph.ErrNodeTimeout,
+			wantStatus: state.RunStatusPaused,
+			wantSteps: []string{
+				"run_started", "fanout#1 started", "fanout#1 finished aborted -> fanout", "run_paused",
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := config.Default()
+			cfg.Graph.NodeTimeout = config.NewDuration(50 * time.Millisecond)
+			h := newRun(t, cfg, "wait for the candidates")
+
+			// It ignores its context, as a node waiting on child runs
+			// that each watch their own does: the cap must be absent,
+			// not merely unobserved.
+			slow := &fakeNode{name: graph.NodeFanout, steps: []nodeStep{{
+				res:       Result{Next: graph.End, Status: journal.StatusOK},
+				sleep:     200 * time.Millisecond,
+				ignoreCtx: true,
+			}}}
+			node := graph.Node(slow)
+			if tt.supervises {
+				node = supervisingNode{fakeNode: slow}
+			}
+
+			out, err := h.entryDispatcher(t, graph.NodeFanout, node).Run(context.Background())
+
+			if tt.wantErr == nil && err != nil {
+				t.Fatalf("Run() error = %v, want nil", err)
+			}
+			if tt.wantErr != nil && !errors.Is(err, tt.wantErr) {
+				t.Fatalf("Run() error = %v, want one wrapping %v", err, tt.wantErr)
+			}
+			if out.Status != tt.wantStatus {
+				t.Errorf("Outcome.Status = %v, want %v (note %q)", out.Status, tt.wantStatus, out.Note)
+			}
+			if got := h.timeline(t); !equalStrings(got, tt.wantSteps) {
+				t.Errorf("timeline =\n  %v\nwant\n  %v", got, tt.wantSteps)
+			}
+		})
+	}
+}
+
 func TestDispatcher_NodeErrorAndInvalidResult(t *testing.T) {
 	tests := []struct {
 		name       string

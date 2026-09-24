@@ -1088,7 +1088,11 @@ func (d *Dispatcher) execute(ctx context.Context, n Node, rc *RunContext) nodeOu
 		nodeCtx = procgroup.WithDir(nodeCtx, dir)
 	}
 	cancel := context.CancelFunc(func() {})
-	if timeout := d.cfg.Graph.NodeTimeout.Duration(); timeout > 0 {
+	// A node that supervises candidate runs is exempt: what it waits on is
+	// already capped, node by node, by this same setting. See Supervisor,
+	// which argues the bound the exemption leaves in place.
+	_, supervises := n.(Supervisor)
+	if timeout := d.cfg.Graph.NodeTimeout.Duration(); timeout > 0 && !supervises {
 		nodeCtx, cancel = context.WithTimeout(nodeCtx, timeout)
 	}
 	defer cancel()
