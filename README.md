@@ -222,6 +222,12 @@ the most it could spend
   $5.00 or 2,000,000 tokens, whichever comes first
   belay stops the run before the next step
 
+what each step would cost
+  plan sonnet $2.00 in / $10.00 out per million tokens
+  code sonnet $2.00 in / $10.00 out per million tokens
+  fix  sonnet $2.00 in / $10.00 out per million tokens
+  list rates: belay cannot know how many tokens your goal will take, so it says the rate and not a total
+
 settings it would use
   read from    /path/to/your/project/belay.yaml
   agent        claude-code, model sonnet, calling the agent for real, up to 30 turns per step

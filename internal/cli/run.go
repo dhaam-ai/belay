@@ -931,6 +931,13 @@ func dryRunSections(u *ui, plan *runPlan, want, resuming string) []dryRunSection
 		dryRunSection{title: "where belay would work", lines: []string{plan.workspace, projectLine(plan.projects)}},
 		dryRunOutput(plan),
 		dryRunSpend(u, plan),
+	)
+	// A run whose graph could not be assembled has no nodes to price, and an
+	// empty section is a heading over nothing.
+	if models := dryRunModels(plan); len(models.lines) > 0 {
+		sections = append(sections, models)
+	}
+	sections = append(sections,
 		dryRunSettings(plan),
 		dryRunRoute(plan),
 		dryRunCreates(plan, want, resuming != ""),
@@ -966,6 +973,57 @@ func dryRunSpend(u *ui, plan *runPlan) dryRunSection {
 		u.emph(budgetCeiling(plan.config.Budget)),
 		budgetOnExceed(plan.config.Budget),
 	}}
+}
+
+// dryRunModels is what each step that calls a model would be sent, and what
+// that model lists at.
+//
+// It states rates and never a total, which is the whole discipline of this
+// section. belay cannot know how many tokens a goal will take -- that is what
+// the run is for -- so any dollar figure it printed here would be a guess
+// dressed as an estimate, and a person would budget against it. A rate is
+// something belay actually knows, and the ceiling above says where the run
+// stops regardless.
+//
+// One row per node, including the nodes sent agent.model, because "which
+// model runs this step" is the question, and answering it only for the nodes
+// somebody overrode would make routing look like it applies to some steps and
+// not others. The rows line up so the models can be compared down the column,
+// which is how a person sees that the expensive one is on the step they
+// meant.
+func dryRunModels(plan *runPlan) dryRunSection {
+	if len(plan.models) == 0 {
+		return dryRunSection{}
+	}
+	var nodeWidth, modelWidth int
+	for _, m := range plan.models {
+		nodeWidth = max(nodeWidth, len(m.node))
+		modelWidth = max(modelWidth, len(m.model))
+	}
+
+	var (
+		lines  []string
+		priced bool
+	)
+	for _, m := range plan.models {
+		row := fmt.Sprintf("%-*s %-*s", nodeWidth, m.node, modelWidth, m.model)
+		switch {
+		case m.priced:
+			priced = true
+			row += fmt.Sprintf(" %s in / %s out per million tokens", dollars(m.rate.Input), dollars(m.rate.Output))
+		case m.note != "":
+			row += " " + m.note
+		}
+		lines = append(lines, strings.TrimRight(row, " "))
+	}
+	switch {
+	case priced:
+		lines = append(lines, "list rates: belay cannot know how many tokens your goal will take, so it says "+
+			"the rate and not a total")
+	case plan.modelNote != "":
+		lines = append(lines, plan.modelNote)
+	}
+	return dryRunSection{title: "what each step would cost", lines: lines}
 }
 
 // dryRunSettings is where the settings came from and the tools they chose.

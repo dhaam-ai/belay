@@ -180,6 +180,7 @@ var documentedTypes = map[string]func(reflect.Type) bool{
 	"String (duration)": func(t reflect.Type) bool { return t == reflect.TypeFor[Duration]() },
 	"List of strings":   sliceOf(reflect.String),
 	"List of rules":     sliceOf(reflect.Struct),
+	"Map of strings":    mapOf(reflect.String, reflect.String),
 }
 
 // kindIs matches a type whose kind is one of kinds.
@@ -190,6 +191,15 @@ func kindIs(kinds ...reflect.Kind) func(reflect.Type) bool {
 // sliceOf matches a list whose elements are of kind elem.
 func sliceOf(elem reflect.Kind) func(reflect.Type) bool {
 	return func(t reflect.Type) bool { return t.Kind() == reflect.Slice && t.Elem().Kind() == elem }
+}
+
+// mapOf matches a mapping whose keys are of kind key and values of kind elem.
+// A named map type such as Models matches: what a reader writes in the file
+// is a mapping of one scalar to another, whatever the Go type is called.
+func mapOf(key, elem reflect.Kind) func(reflect.Type) bool {
+	return func(t reflect.Type) bool {
+		return t.Kind() == reflect.Map && t.Key().Kind() == key && t.Elem().Kind() == elem
+	}
 }
 
 // configPaths walks Config and returns every leaf setting by its dotted yaml

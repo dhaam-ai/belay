@@ -10,6 +10,22 @@ that only `pkg/belay` carries a compatibility promise. Everything under
 
 ### Added
 
+- **Each step can call a model of its own.** `agent.models` routes a node to
+  a model, so the strong one writes the plan and repairs a failure while the
+  cheap one does the mechanical middle, and the same `budget.max_usd` buys a
+  longer run. A node with no entry is sent `agent.model`, so a configuration
+  without it costs exactly what it did. Only the nodes that call a model may
+  be keyed — `plan`, `code` and `fix` — and any other name is refused when
+  the configuration loads, by name and with the names it could have been: a
+  typo that quietly sent the whole run to one model is the failure that would
+  make routing not worth having. `belay run --dry-run` prints a row per node
+  with the model it would use and that model’s list rate, and states no
+  total, because belay cannot know how many tokens a goal will take and a
+  wrong dollar projection is worse than none. Every model a run would use is
+  checked against the backend before the run starts, not just `agent.model`,
+  so one the backend cannot price stops the run before it spends rather than
+  in the middle of it. Spend is recorded against the model that actually ran
+  each step, so `belay timeline` shows the cheap step cheap.
 - **A run works on its own branch and never edits your checkout.** In a git
   repository, `belay run` now creates `belay/<run-id>` at the commit you are
   on, checks it out in its own worktree under `.belay/runs/<run-id>/`, and

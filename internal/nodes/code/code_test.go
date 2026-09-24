@@ -9,6 +9,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/dhaam-ai/belay/internal/config"
 	"github.com/dhaam-ai/belay/internal/graph"
 	"github.com/dhaam-ai/belay/internal/journal"
 	"github.com/dhaam-ai/belay/internal/nodes/code"
@@ -92,8 +93,8 @@ func TestRunSendsThePlanAndGoalToTheBackend(t *testing.T) {
 	if req.MaxTurns != f.rc.Config.Agent.MaxTurns {
 		t.Errorf("MaxTurns = %d, want config value %d", req.MaxTurns, f.rc.Config.Agent.MaxTurns)
 	}
-	if req.Model != f.rc.Config.Agent.Model {
-		t.Errorf("Model = %q, want config value %q", req.Model, f.rc.Config.Agent.Model)
+	if want := f.rc.Config.Agent.ModelFor(graph.NodeCode); req.Model != want {
+		t.Errorf("Model = %q, want the model this node is routed to, %q", req.Model, want)
 	}
 	assertTools(t, req.AllowedTools)
 }
@@ -461,5 +462,26 @@ func TestRunCarriesTheBackendsSpendOnAnAgentFailure(t *testing.T) {
 	}
 	if res.Usage != spent {
 		t.Errorf("Result.Usage = %+v, want %+v: the spend the backend reported was dropped", res.Usage, spent)
+	}
+}
+
+// Routing only saves anything if the model reaches the request. The node asks
+// config which model it is routed to, so this is the seam between a line in
+// belay.yaml and the model that is actually billed -- and the budget ledger
+// is fed by whatever the backend charges for the model named here.
+func TestTheModelTheNodeIsRoutedToReachesTheRequest(t *testing.T) {
+	f := newFixture(t, belay.AgentResponse{Text: "done"})
+	f.rc.Config.Agent.Model = "the-default-model"
+	f.rc.Config.Agent.Models = config.Models{graph.NodeCode: "the-cheap-model"}
+
+	if _, err := code.New().Run(context.Background(), f.rc); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	calls := f.agent.Calls()
+	if len(calls) != 1 {
+		t.Fatalf("CallCount = %d, want exactly 1", len(calls))
+	}
+	if got, want := calls[0].Model, "the-cheap-model"; got != want {
+		t.Errorf("Model = %q, want %q: agent.models.code never reached the backend", got, want)
 	}
 }

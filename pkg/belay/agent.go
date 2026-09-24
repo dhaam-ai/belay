@@ -169,3 +169,42 @@ type Usage struct {
 	// should just log that it did.
 	Estimated bool `json:"estimated"`
 }
+
+// ModelRate is a model's published list price, in US dollars per million
+// tokens.
+//
+// It is a rate, not a cost. belay states rates and never multiplies one by a
+// token volume to project what a run will cost, because it cannot know how
+// many tokens a goal will take: a projected figure that is wrong is worse
+// than no figure, since a person budgets against it. What a run really spent
+// is Usage, reported per invocation by the backend that made it.
+type ModelRate struct {
+	// Input is the rate for input tokens, USD per million.
+	Input float64 `json:"input"`
+	// Output is the rate for output tokens, USD per million.
+	Output float64 `json:"output"`
+}
+
+// ModelPricer is the optional half of an AgentBackend that answers, before
+// anything is spent, the two questions about a model that only the thing
+// about to run it can answer: whether this backend can run it, and what it
+// lists at.
+//
+// It is optional because a backend may legitimately have neither answer — one
+// replaying a recording spends nothing and prices nothing — and because
+// AgentBackend is a contract third parties implement, which this must not
+// break by growing a method. A caller type-asserts for it and treats a
+// backend that does not implement it, or one that returns an error wrapping
+// [ErrUnsupported], as declining to price rather than as a failure.
+//
+// Model selection is per node (belay routes plan, code and fix separately),
+// so a caller asks once per distinct model a run could use, not once per run.
+type ModelPricer interface {
+	// ListPrice returns model's published rate.
+	//
+	// A model the backend cannot run or cannot price is an error, never a
+	// zero rate: a zero would read as "free" in anything that printed it,
+	// and would let a run start against a ceiling that could not be
+	// enforced. The error should name the model.
+	ListPrice(model string) (ModelRate, error)
+}

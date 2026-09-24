@@ -108,6 +108,7 @@ func (c Config) Validate() error {
 		}
 	}
 	errs = append(errs, c.agentErrors()...)
+	errs = append(errs, c.modelErrors()...)
 	errs = append(errs, c.graphErrors()...)
 	errs = append(errs, c.testErrors()...)
 	errs = append(errs, c.reviewErrors()...)

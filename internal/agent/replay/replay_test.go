@@ -473,3 +473,73 @@ func TestReplay_RejectsNilAndBadVersion(t *testing.T) {
 		t.Errorf("errors.Is(err, ErrUnsupportedFormat) = false, err = %v", err)
 	}
 }
+
+// pricingAgent is a fake backend that also prices models, which
+// belaytest.FakeAgent does not: the point of these tests is what Backend does
+// with an inner backend that can answer about a model, and one that cannot.
+type pricingAgent struct {
+	*belaytest.FakeAgent
+	rate belay.ModelRate
+	err  error
+}
+
+func (p *pricingAgent) ListPrice(string) (belay.ModelRate, error) { return p.rate, p.err }
+
+// Every live or recording run is wrapped in a replay.Backend, so belay asks
+// the wrapper what a model costs and the wrapper has to pass the question to
+// the backend that would really run it. A wrapper that answered for itself
+// would price every model at nothing.
+func TestBackend_ListPrice_ForwardsToTheBackendThatWouldRun(t *testing.T) {
+	t.Parallel()
+
+	inner := &pricingAgent{
+		FakeAgent: &belaytest.FakeAgent{NameValue: "fake-agent"},
+		rate:      belay.ModelRate{Input: 3, Output: 15},
+	}
+	for _, tt := range []struct {
+		mode string
+		b    *replay.Backend
+	}{
+		{"live", replay.Live(inner)},
+		{"record", replay.Record(inner, replay.Provenance{})},
+	} {
+		t.Run(tt.mode, func(t *testing.T) {
+			got, err := tt.b.ListPrice("some-model")
+			if err != nil {
+				t.Fatalf("ListPrice() = %v", err)
+			}
+			if got != inner.rate {
+				t.Errorf("ListPrice() = %v, want the inner backend's %v", got, inner.rate)
+			}
+		})
+	}
+}
+
+// A replayed run answers from a cassette and calls no backend, so there is
+// nothing to price and nothing to spend. That is not a failure: it is the one
+// case where belay has no rate to show and must not refuse the run over it.
+// The same is true of an inner backend that prices nothing.
+func TestBackend_ListPrice_IsUnsupportedWhenNothingWouldBeSpent(t *testing.T) {
+	t.Parallel()
+
+	replayed, err := replay.Replay(&replay.Cassette{
+		FormatVersion: replay.FormatVersion,
+		Provenance:    replay.Provenance{Backend: "claude-code"},
+	})
+	if err != nil {
+		t.Fatalf("Replay() = %v", err)
+	}
+	for _, tt := range []struct {
+		name string
+		b    *replay.Backend
+	}{
+		{"replaying a cassette", replayed},
+		{"an inner backend that does not price", replay.Live(&belaytest.FakeAgent{NameValue: "fake-agent"})},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			if _, err := tt.b.ListPrice("some-model"); !errors.Is(err, belay.ErrUnsupported) {
+				t.Errorf("ListPrice() = %v, want an error wrapping belay.ErrUnsupported", err)
+			}
+		})
+	}
+}

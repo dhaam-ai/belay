@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"time"
 
@@ -106,7 +107,13 @@ type runPlan struct {
 	// run's manifest.
 	goal string
 
-	agent    belay.AgentBackend
+	agent belay.AgentBackend
+	// models is what each node that calls a model would be sent, in route
+	// order, with what that model lists at. modelNote is why none of them
+	// has a rate, when the backend prices nothing at all.
+	models    []nodeModel
+	modelNote string
+
 	runner   belay.TestRunner
 	linter   belay.Linter
 	reviewer belay.Reviewer
@@ -289,6 +296,7 @@ func resolve(req resolveRequest) (*runPlan, error) {
 	p.resolveOutput(req.ctx())
 	p.resolvePullRequest(req.ctx(), runFlags.pullRequest, lookGh)
 	p.resolveRegistry()
+	p.resolveModels()
 	p.warnAboutFanout()
 
 	return p, nil
@@ -632,6 +640,104 @@ func (p *runPlan) resolveRegistry() {
 		return
 	}
 	p.registry = registry
+}
+
+// nodeModel is one node of the route, the model it would be sent, and what
+// that model lists at.
+type nodeModel struct {
+	// node is the node's name and model is what [config.Agent.ModelFor]
+	// routes it to.
+	node, model string
+	// rate is the model's list price, valid only when priced is true.
+	rate   belay.ModelRate
+	priced bool
+	// note is why this row has no rate, when the backend priced every other
+	// model but not this one.
+	note string
+}
+
+// resolveModels works out which model each node would be sent and asks the
+// backend what each one costs, so that a model belay cannot price stops the
+// run here rather than in the middle of it.
+//
+// It walks the route, not agent.models, and that is the whole difference
+// between a check and an obstruction. A model routed to a node this run never
+// reaches costs nothing, and refusing to start over it would be belay
+// enforcing a rule about a step that is not going to happen. Walking the
+// route also means every node is checked, including the ones sent agent.model
+// by default: before routing there was one model to get wrong, and now there
+// are as many as there are nodes that spend.
+//
+// Pricing is the backend's answer, never belay's. A backend that does not
+// implement belay.ModelPricer, or one that reports belay.ErrUnsupported, has
+// not refused the model: it has declined to say, which is what a replayed run
+// does because it spends nothing. Those runs show models with no rates and
+// are not blocked. Only a backend that answers with an error of its own
+// blocks, and then once per distinct model, because three nodes sharing one
+// bad agent.model is one thing to fix, not three.
+func (p *runPlan) resolveModels() {
+	pricer, _ := p.agent.(belay.ModelPricer)
+	routable := config.RoutableNodes()
+	blocked := map[string]bool{}
+
+	for _, node := range p.route {
+		if !slices.Contains(routable, node) {
+			continue
+		}
+		entry := nodeModel{node: node, model: p.config.Agent.ModelFor(node)}
+		switch rate, err := p.listPrice(pricer, entry.model); {
+		case pricer == nil:
+			// Nothing to ask: resolveAgent has already blocked, or the
+			// backend prices nothing.
+		case err == nil:
+			entry.rate, entry.priced = rate, true
+		case errors.Is(err, belay.ErrUnsupported):
+			p.modelNote = "this run answers from a recording, so it calls no model and spends nothing"
+		default:
+			entry.note = "belay does not know this model"
+			if !blocked[entry.model] {
+				blocked[entry.model] = true
+				p.blockModel(node, entry.model, err)
+			}
+		}
+		p.models = append(p.models, entry)
+	}
+}
+
+// listPrice asks pricer about model, tolerating a nil pricer so that
+// resolveModels reads as one switch rather than a nest of them.
+func (p *runPlan) listPrice(pricer belay.ModelPricer, model string) (belay.ModelRate, error) {
+	if pricer == nil {
+		return belay.ModelRate{}, nil
+	}
+	return pricer.ListPrice(model)
+}
+
+// blockModel refuses a run over a model the backend will not price, naming
+// the setting that holds it.
+//
+// Naming the setting is the point. Routing gives a run four places a model
+// can come from -- agent.model and one key per node -- so "the model is
+// wrong" would leave a person reading their whole belay.yaml to find which.
+// The backend's own words are quoted rather than paraphrased: whether a model
+// exists is its knowledge, not belay's, and belay guessing at the reason is
+// how a wrong explanation gets printed confidently.
+func (p *runPlan) blockModel(node, model string, err error) {
+	setting := "agent.model"
+	if p.config.Agent.Models[node] != "" {
+		setting = "agent.models." + node
+	}
+	backend := p.config.Agent.Backend
+	if p.agent != nil {
+		backend = p.agent.Name()
+	}
+	fix := fmt.Sprintf("set %s to a model %s can run", setting, backend)
+	if setting != "agent.model" {
+		fix += ", or remove it so " + node + " uses agent.model"
+	}
+	fix += "; docs/config.md lists what agent.model accepts"
+	p.block(fmt.Sprintf("%s names the model %q, which the %s backend cannot price, so belay could not hold "+
+		"this run to budget.max_usd: %v", setting, model, backend, err), fix)
 }
 
 // saveCassette persists a record-mode run's conversation, and reports what it
