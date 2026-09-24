@@ -467,3 +467,75 @@ func TestPinnedConfigCarriesAStrategyThisBelayDoesNotKnow(t *testing.T) {
 		t.Errorf("Select = %q, want it carried through as written", got.Fanout.Select)
 	}
 }
+
+// TestSeedCandidateStateCarriesOnlyGoalAndPlan pins what a candidate run
+// starts from. A candidate re-does the work from the plan, so it gets the
+// goal and the plan and nothing else: a naive copy would hand every
+// candidate the parent's agent session — making N candidates continue one
+// conversation, and one another's — and would seed each with the parent's
+// test and review results, which belong to code no candidate wrote.
+func TestSeedCandidateStateCarriesOnlyGoalAndPlan(t *testing.T) {
+	parent := NewState("ship the widget")
+	parent.Plan = Plan{Path: "plan.md", Approved: true, Digest: "sha256:aaa"}
+	parent.Code = Code{SessionID: "sess-1", LastDiff: "artifacts/diff-0001.patch", ChangedFiles: []string{"a.go"}}
+	parent.Test = NewTest(belay.TestReport{Total: 5, Passed: 5}, "artifacts/test.json")
+	parent.Review = NewReview(belay.QualityReport{Source: "golangci-lint", Gate: belay.GatePass}, "")
+	parent.Fix = Fix{Attempts: 2}
+	parent.Candidates = []Candidate{{ID: "cand-01"}}
+	parent.Winner = "cand-01"
+	parent.Promotion = Promotion{Branch: "belay/run-1", Commit: "abc123"}
+	parent.History = []HistoryEntry{{Seq: 1, Node: "plan", Attempt: 1, Status: "ok"}}
+
+	seed := SeedCandidateState(parent)
+
+	want := NewState("ship the widget")
+	want.Plan = Plan{Path: "plan.md", Approved: true, Digest: "sha256:aaa"}
+	if diff := cmp.Diff(want, seed); diff != "" {
+		t.Errorf("SeedCandidateState (-want +got):\n%s", diff)
+	}
+	if seed.Code.SessionID != "" {
+		t.Errorf("Code.SessionID = %q, want the parent's agent session left behind", seed.Code.SessionID)
+	}
+}
+
+// TestSeedCandidateStateDropsAnUnservedPlanRequest: a candidate run has no
+// plan node and no approve gate, so a request for a new plan carried into
+// one could never be served — and the run would declare a capability for a
+// field nothing in it reads.
+func TestSeedCandidateStateDropsAnUnservedPlanRequest(t *testing.T) {
+	parent := NewState("ship the widget")
+	parent.Plan = Plan{Path: "plan.md", Approved: true, Digest: "sha256:aaa"}
+	parent.SetRegeneration(Regeneration{Request: 2, Guidance: "fewer steps", Served: 1})
+
+	seed := SeedCandidateState(parent)
+
+	if seed.Plan.Regenerate.Pending() {
+		t.Errorf("the seed carries a pending request for a new plan: %+v", seed.Plan.Regenerate)
+	}
+	if diff := cmp.Diff([]string{}, seed.Requires); diff != "" {
+		t.Errorf("Requires (-want +got):\n%s", diff)
+	}
+}
+
+// TestSeedCandidateStateIsAValidNewDocument: the seed is written straight to
+// a candidate run's state.json, so it has to be what NewState would produce
+// — current schema, and empty lists rather than nulls.
+func TestSeedCandidateStateIsAValidNewDocument(t *testing.T) {
+	seed := SeedCandidateState(NewState("ship the widget"))
+
+	if seed.SchemaVersion != StateSchemaVersion {
+		t.Errorf("SchemaVersion = %d, want %d", seed.SchemaVersion, StateSchemaVersion)
+	}
+	for name, list := range map[string]int{
+		"Requires":   len(seed.Requires),
+		"Candidates": len(seed.Candidates),
+		"History":    len(seed.History),
+	} {
+		if list != 0 {
+			t.Errorf("%s = %d entries, want none", name, list)
+		}
+	}
+	if seed.Requires == nil || seed.Candidates == nil || seed.History == nil {
+		t.Errorf("a nil list would write null where every other run writes []: %+v", seed)
+	}
+}

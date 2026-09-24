@@ -236,3 +236,29 @@ func (m Manifest) PinnedConfig(cfg config.Config) config.Config {
 	}
 	return cfg
 }
+
+// SeedCandidateState returns the blackboard a candidate run starts from: a
+// new one, carrying the parent's goal and the plan it approved, and nothing
+// else.
+//
+// Everything left behind is left behind on purpose. Code.SessionID would
+// have N candidates continue the parent's one agent conversation, and so
+// each other's. Test, Review and Fix describe code no candidate wrote, and
+// seeding them would let a candidate's first gate pass on the parent's
+// results. Candidates and Winner would make a candidate look like a fanout,
+// which it must never be. History belongs to a journal this run does not
+// have.
+//
+// Plan.Regenerate is dropped as well: a candidate run has no plan node and
+// no approve gate, so a request carried into one could never be served, and
+// the run would declare a capability (CapabilityPlanRegenerate) for a field
+// nothing in it reads.
+func SeedCandidateState(parent State) State {
+	seed := NewState(parent.Goal)
+	seed.Plan = Plan{
+		Path:     parent.Plan.Path,
+		Approved: parent.Plan.Approved,
+		Digest:   parent.Plan.Digest,
+	}
+	return seed
+}
