@@ -731,10 +731,11 @@ func (p *runPlan) blockModel(node, model string, err error) {
 	if p.agent != nil {
 		backend = p.agent.Name()
 	}
-	fix := fmt.Sprintf("set %s to a model %s can run; docs/config.md lists what agent.model accepts", setting, backend)
+	fix := fmt.Sprintf("set %s to a model %s can run", setting, backend)
 	if setting != "agent.model" {
 		fix += ", or remove it so " + node + " uses agent.model"
 	}
+	fix += "; docs/config.md lists what agent.model accepts"
 	p.block(fmt.Sprintf("%s names the model %q, which the %s backend cannot price, so belay could not hold "+
 		"this run to budget.max_usd: %v", setting, model, backend, err), fix)
 }
