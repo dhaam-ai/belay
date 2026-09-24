@@ -49,8 +49,9 @@ func (e *CapabilityError) Unwrap() error { return ErrUnknownCapability }
 // does — adds its name here, and sets it in requires on every document
 // whose run depends on the field.
 var knownCapabilities = map[string]bool{
-	CapabilityOutputBranch:   true,
-	CapabilityPlanRegenerate: true,
+	CapabilityOutputBranch:        true,
+	CapabilityPlanRegenerate:      true,
+	CapabilityFanoutCandidateRuns: true,
 }
 
 // CapabilityPlanRegenerate is the capability a run declares, in its

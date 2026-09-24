@@ -240,6 +240,15 @@ type Manifest struct {
 	// completes: the directory NewManifest pins from plan.archive and
 	// plan.archive_dir, and, once the plan is there, the file itself.
 	ArchivedPlan ArchivedPlan `json:"archived_plan"`
+	// Fanout is the shape of this run's fanout, pinned when the run was
+	// created, or nil for a run that does not fan out — which is what every
+	// manifest written before this field existed decodes as. Set it with
+	// SetFanout; see CapabilityFanoutCandidateRuns.
+	Fanout *FanoutPin `json:"fanout,omitempty"`
+	// Candidate is what makes this run one fanout candidate's own run: its
+	// place in the parent run, its workspace and its spend envelope. Nil for
+	// every run a person started. Set it with SetCandidate.
+	Candidate *CandidateRun `json:"candidate,omitempty"`
 }
 
 // ArchivedPlan is where a run files its approved plan once it completes

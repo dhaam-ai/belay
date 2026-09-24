@@ -1,9 +1,17 @@
 package state
 
 import (
+	"encoding/json"
 	"errors"
 	"path/filepath"
+	"slices"
 	"testing"
+	"time"
+
+	"github.com/google/go-cmp/cmp"
+
+	"github.com/dhaam-ai/belay/internal/config"
+	"github.com/dhaam-ai/belay/pkg/belay"
 )
 
 // TestNewCandidateRunLayout pins where a candidate run keeps its own run
@@ -159,5 +167,192 @@ func TestCandidateRunIdentityLivesInTheManifestNotTheLayout(t *testing.T) {
 	qualified := parent.RunID() + "-" + child.RunID()
 	if qualified == child.RunID() {
 		t.Error("the candidate run's manifest id is indistinguishable from its directory name")
+	}
+}
+
+// TestFanoutBlocksJSONKeySets is a guard, not a RED: it locks the on-disk
+// field set of the two blocks a fanout run's manifests carry, so a rename or
+// an addition is a reviewed change rather than a silent one.
+func TestFanoutBlocksJSONKeySets(t *testing.T) {
+	assertExactJSONKeys(t, FanoutPin{}, []string{"candidates", "select"})
+	assertExactJSONKeys(t, Envelope{}, []string{"limit_usd", "limit_tokens"})
+	assertExactJSONKeys(t, CandidateRun{}, []string{
+		"parent_run_id", "id", "index", "workspace", "provision", "provision_note", "envelope",
+	})
+}
+
+// TestManifest_SetFanoutRecordsTheCapabilityAFanoutRunNeeds is ADR-0011
+// applied to the pin that decides a run's shape. Manifest.Fanout is a
+// control field: a belay that did not know it would decode the manifest,
+// drop the pin, resume the run as an ordinary single run — spending the
+// whole ceiling again on one attempt — and write the manifest back without
+// it. Naming the capability turns that into a refusal that says to upgrade.
+func TestManifest_SetFanoutRecordsTheCapabilityAFanoutRunNeeds(t *testing.T) {
+	m := NewManifest(time.Now(), "run-1", "/work", "goal", config.Default())
+	pin := FanoutPin{Candidates: 3, Select: "fewest_issues"}
+
+	m.SetFanout(pin)
+
+	if m.Fanout == nil {
+		t.Fatal("SetFanout left Manifest.Fanout nil")
+	}
+	if diff := cmp.Diff(pin, *m.Fanout); diff != "" {
+		t.Errorf("Fanout (-want +got):\n%s", diff)
+	}
+	if diff := cmp.Diff([]string{CapabilityFanoutCandidateRuns}, m.Requires); diff != "" {
+		t.Errorf("Requires (-want +got):\n%s", diff)
+	}
+
+	// The manifest is rewritten after every node, so pinning the same
+	// shape twice must not accumulate.
+	m.SetFanout(pin)
+	if diff := cmp.Diff([]string{CapabilityFanoutCandidateRuns}, m.Requires); diff != "" {
+		t.Errorf("Requires after a second SetFanout (-want +got):\n%s", diff)
+	}
+}
+
+// TestManifest_SetCandidateRecordsTheCapabilityACandidateRunNeeds is the
+// same decision on the other document, where losing the block would be
+// worse: the envelope lives there, so a belay that dropped it would resume a
+// candidate with no ceiling of its own and let it spend the parent's whole
+// budget.
+func TestManifest_SetCandidateRecordsTheCapabilityACandidateRunNeeds(t *testing.T) {
+	m := NewManifest(time.Now(), "run-1-cand-01", "/work", "goal", config.Default())
+	cand := CandidateRun{
+		ParentRunID: "run-1",
+		ID:          "cand-01",
+		Index:       1,
+		Workspace:   belay.Workspace{ID: "cand-01", Dir: "/work/.belay/runs/run-1/candidates/cand-01", Ephemeral: true},
+		Provision:   ProvisionOK,
+		Envelope:    Envelope{LimitUSD: 1.5, LimitTokens: 200000},
+	}
+
+	m.SetCandidate(cand)
+
+	if m.Candidate == nil {
+		t.Fatal("SetCandidate left Manifest.Candidate nil")
+	}
+	if diff := cmp.Diff(cand, *m.Candidate); diff != "" {
+		t.Errorf("Candidate (-want +got):\n%s", diff)
+	}
+	if diff := cmp.Diff([]string{CapabilityFanoutCandidateRuns}, m.Requires); diff != "" {
+		t.Errorf("Requires (-want +got):\n%s", diff)
+	}
+
+	m.SetCandidate(cand)
+	if diff := cmp.Diff([]string{CapabilityFanoutCandidateRuns}, m.Requires); diff != "" {
+		t.Errorf("Requires after a second SetCandidate (-want +got):\n%s", diff)
+	}
+}
+
+// TestManifest_SetFanoutLeavesOtherCapabilitiesAlone: the requires list is
+// shared, and a fanout run on a branch depends on both fields.
+func TestManifest_SetFanoutLeavesOtherCapabilitiesAlone(t *testing.T) {
+	m := NewManifest(time.Now(), "run-1", "/work", "goal", config.Default())
+	m.SetOutput(Output{Mode: OutputBranch, Branch: "belay/run-1"})
+
+	m.SetFanout(FanoutPin{Candidates: 3, Select: "fewest_issues"})
+
+	want := []string{CapabilityFanoutCandidateRuns, CapabilityOutputBranch}
+	if diff := cmp.Diff(want, m.Requires); diff != "" {
+		t.Errorf("Requires (-want +got):\n%s", diff)
+	}
+}
+
+// TestManifestWithoutFanoutCarriesNoBlocks is what makes this slice safe to
+// merge on its own: a run that does not fan out writes exactly the
+// manifest.json it wrote before these fields existed, and requires nothing.
+func TestManifestWithoutFanoutCarriesNoBlocks(t *testing.T) {
+	m := NewManifest(time.Now(), "run-1", "/work", "goal", config.Default())
+
+	data, err := json.Marshal(m)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	var keys map[string]json.RawMessage
+	if err := json.Unmarshal(data, &keys); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	for _, absent := range []string{"fanout", "candidate"} {
+		if _, ok := keys[absent]; ok {
+			t.Errorf("an ordinary run's manifest carries a %q block: %s", absent, data)
+		}
+	}
+	if diff := cmp.Diff([]string{}, m.Requires); diff != "" {
+		t.Errorf("Requires (-want +got):\n%s", diff)
+	}
+}
+
+// TestFanoutManifestsRoundTrip proves the two documents a fanout run writes
+// can be read back by the belay that wrote them: the capability they declare
+// has to be one this binary knows, or the first resume would refuse the run
+// it had just created.
+func TestFanoutManifestsRoundTrip(t *testing.T) {
+	dir := t.TempDir()
+
+	parent := NewManifest(time.Now().UTC().Truncate(time.Second), "run-1", "/work", "goal", config.Default())
+	parent.SetFanout(FanoutPin{Candidates: 3, Select: "fastest"})
+	parentPath := filepath.Join(dir, "parent.json")
+	if err := SaveManifest(parentPath, parent); err != nil {
+		t.Fatalf("SaveManifest: %v", err)
+	}
+	gotParent, err := LoadManifest(parentPath)
+	if err != nil {
+		t.Fatalf("LoadManifest: %v", err)
+	}
+	if diff := cmp.Diff(parent, gotParent); diff != "" {
+		t.Errorf("parent manifest round trip (-saved +loaded):\n%s", diff)
+	}
+	if gotParent.Fanout == nil {
+		t.Error("the parent manifest came back without its fanout pin")
+	}
+	if !slices.Contains(gotParent.Requires, CapabilityFanoutCandidateRuns) {
+		t.Errorf("Requires = %v, want the fanout capability declared", gotParent.Requires)
+	}
+
+	child := NewManifest(time.Now().UTC().Truncate(time.Second), "run-1-cand-02", "/work", "goal", config.Default())
+	child.SetCandidate(CandidateRun{
+		ParentRunID:   "run-1",
+		ID:            "cand-02",
+		Index:         2,
+		Provision:     ProvisionRefused,
+		ProvisionNote: "the source tree has uncommitted changes",
+		Envelope:      Envelope{LimitUSD: 0.333333, LimitTokens: 33333},
+	})
+	childPath := filepath.Join(dir, "child.json")
+	if err := SaveManifest(childPath, child); err != nil {
+		t.Fatalf("SaveManifest: %v", err)
+	}
+	gotChild, err := LoadManifest(childPath)
+	if err != nil {
+		t.Fatalf("LoadManifest: %v", err)
+	}
+	if diff := cmp.Diff(child, gotChild); diff != "" {
+		t.Errorf("candidate manifest round trip (-saved +loaded):\n%s", diff)
+	}
+	if gotChild.Candidate == nil {
+		t.Error("the candidate manifest came back without its candidate block")
+	}
+	if !slices.Contains(gotChild.Requires, CapabilityFanoutCandidateRuns) {
+		t.Errorf("Requires = %v, want the fanout capability declared", gotChild.Requires)
+	}
+}
+
+// TestProvisionPendingIsTheZeroValue states what a candidate block with no
+// provision recorded has to mean. Pending is "claimed, no workspace yet",
+// which a resume retries; refused is durable and is reproduced forever. A
+// zero value that read as refused would lose a candidate to a torn write,
+// and one that read as ok would build a dispatcher over a workspace that
+// does not exist.
+func TestProvisionPendingIsTheZeroValue(t *testing.T) {
+	var c CandidateRun
+	if c.Provision != ProvisionPending {
+		t.Errorf("the zero CandidateRun's Provision = %q, want pending", c.Provision)
+	}
+	if err := json.Unmarshal([]byte(`{"id":"cand-01","index":1}`), &c); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if c.Provision != ProvisionPending {
+		t.Errorf("a candidate block with no provision key decoded as %q, want pending", c.Provision)
 	}
 }
