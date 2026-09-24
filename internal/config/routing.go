@@ -68,6 +68,34 @@ func RoutableNodes() []string {
 // half from one file and half from another is a run nobody can explain from
 // either file alone. It also keeps [Config.Merge]'s copy honest, because the
 // map a lower layer holds is never written to.
+// # Routing is read live, and is not pinned in the manifest
+//
+// Wave 0b's rule is that a decision a run depends on is pinned when the run
+// is created, so a resume cannot change it. That rule is about the shape of
+// the graph -- which nodes exist and which edges join them -- because a
+// resumed run walking a different graph cannot finish the run it started.
+// Routing changes no node and no edge. It changes what the next step costs,
+// and nothing that has already been recorded.
+//
+// Reading it live is also the only coherent choice while agent.model is read
+// live, which it is: the manifest records AgentInfo.Model, but nothing reads
+// it back, and every node takes its model from the live configuration. A
+// pinned agent.models over a live agent.model would let a person change a
+// node's model by deleting its override and not by editing it, which is a
+// rule nobody could hold in their head.
+//
+// What a run started under is still recorded: each routed node appears in
+// the manifest's configuration snapshot as agent.models.<node>, so the
+// digest changes when routing does and a resumed run can report the drift.
+// That is the record without the refusal, and it matches what belay already
+// does for the budget ceiling: a run stopped by a setting can be resumed
+// once the setting is fixed, rather than having to be started again.
+//
+// Slice 4b, which owns ADR-0014 for routing and the policy gate together,
+// should fold this in. The policy gate is the opposite case and is pinned:
+// it judges a change against a baseline taken when the run began, so a
+// policy that arrived mid-run could only fail the run for something it did
+// not do.
 type Models map[string]string
 
 // UnmarshalYAML decodes a mapping of node name to model into a fresh map.
