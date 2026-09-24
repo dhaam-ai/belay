@@ -23,6 +23,10 @@
 // fixed when the Isolator is built and come back from the run's manifest on a
 // resume. Everything Destroy acts on is derived from those three values.
 //
+// [Isolator.Reclaim], which takes back a candidate a crash abandoned, carries
+// the same idea to its end: it is given an id and no path at all, because
+// after a Create that died part-way there is no Workspace to be given.
+//
 // Workspace.Dir is never one of them. It is compared against the derivation
 // and then ignored, because a Workspace read back from a file an agent could
 // write is not evidence about anything: a Dir naming the user's checkout, with
@@ -52,17 +56,21 @@
 //     from a different tree than the one the user is looking at. A dirty
 //     source is [ErrDirtySource], naming the files.
 //   - It does not delete a branch whose tip no other ref holds. Unique commits
-//     are work, not an allocation. Destroy releases the worktree, keeps the
-//     branch, and logs the exact `git branch -D` that would remove it.
+//     are work, not an allocation. Destroy and Reclaim release the worktree,
+//     keep the branch, and log the exact `git branch -D` that would remove it.
+//     A kept branch leaves that candidate id uncreatable, and that is the
+//     intended outcome: losing someone's commits to free a name is worse.
 //   - It does not run `git worktree prune`, which would also drop the user's
 //     own stale entries — a worktree on a disk that is not mounted right now.
-//     It removes exactly its own registration.
+//     Destroy and Reclaim each remove exactly one registration, by path.
 //   - It does not force a locked worktree. A lock is a person saying "leave
-//     this alone"; Destroy returns [git.ErrLocked] and stops.
+//     this alone"; Destroy and Reclaim return [git.ErrLocked] and stop.
 //   - It does not take over a destination that already holds files or that git
 //     has a worktree registered at, even a stale one. Either is someone else's,
 //     and a candidate handed a tree that is partly another's is worse than no
-//     candidate at all.
+//     candidate at all. [Isolator.Reclaim] is the deliberate, separately
+//     requested way to clear one belay itself abandoned, and it refuses a
+//     worktree that has since been checked out on another branch.
 //   - It does not create the run's own worktree or branch. Destroy promises to
 //     release everything Create allocated, and the run branch is the
 //     deliverable.
@@ -72,7 +80,9 @@
 // An *Isolator is safe for concurrent use: fanout creating N candidates at
 // once is the normal case. Two concurrent Creates with the same id are not —
 // the second is refused while the first is in flight, rather than both racing
-// into git and the loser getting whichever lock error git happened to hit.
+// into git and the loser getting whichever lock error git happened to hit. A
+// [Isolator.Reclaim] for an id a Create holds is refused the same way, so a
+// reclaim cannot remove a worktree that is still being made.
 // Nothing here arbitrates between processes; belay assumes one dispatcher owns
 // a run at a time, the same assumption internal/state makes.
 package worktree
@@ -507,36 +517,62 @@ func (i *Isolator) Destroy(ctx context.Context, ws belay.Workspace) error {
 		return err
 	}
 
-	tip, ok, err := i.repo.BranchTip(ctx, branch)
+	kept, err := i.releaseBranch(ctx, "destroy", ws.ID, branch)
 	if err != nil {
-		return fmt.Errorf("worktree: destroy %q: %w", ws.ID, err)
+		return err
 	}
-	if !ok {
+	if !kept {
 		i.log.Info("worktree: destroyed a candidate workspace",
 			slog.String("id", ws.ID), slog.String("dir", dir), slog.String("branch", branch))
-		return nil
+	}
+	return nil
+}
+
+// releaseBranch deletes the candidate branch for id, and reports whether
+// it was KEPT instead.
+//
+// A branch whose tip no other ref contains is kept, and the warning says the
+// command that would delete it. Those commits are work — a candidate that
+// committed for itself and then lost — and this package will not be the thing
+// that throws them away. A branch that does not exist at all is nothing to
+// keep, so it reports false: the caller's workspace is fully released either
+// way.
+//
+// `git branch -d` is not the check that belongs here: it judges merge status
+// against the HEAD of the checkout it runs in, which is the user's branch and
+// not the run's, so a candidate merged into the run branch would look
+// unmerged and pile up. ContainedElsewhere asks whether any ref at all holds
+// the tip.
+//
+// DeleteBranch is compare-and-swap against the tip just read, so a branch
+// something else moved in between is left alone rather than deleted with
+// whatever it now holds.
+//
+// Destroy and Reclaim share this because they owe the same promise about a
+// candidate's commits, and a retention rule that two callers each implement
+// is a rule one of them will eventually get wrong.
+func (i *Isolator) releaseBranch(ctx context.Context, op, id, branch string) (kept bool, err error) {
+	tip, ok, err := i.repo.BranchTip(ctx, branch)
+	if err != nil {
+		return false, fmt.Errorf("worktree: %s %q: %w", op, id, err)
+	}
+	if !ok {
+		return false, nil
 	}
 	held, err := i.repo.ContainedElsewhere(ctx, branch)
 	if err != nil {
-		return fmt.Errorf("worktree: destroy %q: %w", ws.ID, err)
+		return false, fmt.Errorf("worktree: %s %q: %w", op, id, err)
 	}
 	if !held {
-		// `git branch -d` is not the check that belongs here: it judges merge
-		// status against the HEAD of the checkout it runs in, which is the
-		// user's branch and not the run's, so a candidate merged into the run
-		// branch would look unmerged and pile up. ContainedElsewhere asks
-		// whether any ref at all holds the tip.
 		i.log.Warn("worktree: keeping a candidate branch whose commits no other ref holds",
-			slog.String("id", ws.ID), slog.String("branch", branch), slog.String("tip", tip),
+			slog.String("id", id), slog.String("branch", branch), slog.String("tip", tip),
 			slog.String("delete_with", "git branch -D "+branch))
-		return nil
+		return true, nil
 	}
 	if err := i.repo.DeleteBranch(ctx, branch, tip); err != nil {
-		return fmt.Errorf("worktree: destroy %q: %w", ws.ID, err)
+		return false, fmt.Errorf("worktree: %s %q: %w", op, id, err)
 	}
-	i.log.Info("worktree: destroyed a candidate workspace",
-		slog.String("id", ws.ID), slog.String("dir", dir), slog.String("branch", branch))
-	return nil
+	return false, nil
 }
 
 // describeBranch names what a worktree has checked out, for an error a person
