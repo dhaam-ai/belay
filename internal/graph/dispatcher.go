@@ -139,6 +139,22 @@ type Options struct {
 	// Config is the run's resolved configuration, supplying the graph's
 	// MaxSteps, NodeTimeout and budget ceilings.
 	Config config.Config
+	// Entry is the node a run whose journal is empty starts at. It
+	// defaults to journal.FirstNode, which is "plan", so a caller that
+	// never sets it sees the run it always did.
+	//
+	// It exists for a run whose graph does not begin at the beginning: a
+	// fanout candidate runs code, write, test, fix and review over a plan
+	// its parent has already had approved, and a registry without a plan
+	// node would end such a run on its first step with an unknown node.
+	//
+	// It is ignored the moment the journal holds any record at all.
+	// Where a run with history resumes is journal.ResolveStart's decision
+	// and nothing else's, because the journal is the only thing that knows
+	// which node died and at which attempt; applying Entry over it would
+	// re-run the entry node on every resume, paying again for work the
+	// journal says is done.
+	Entry string
 	// Logger receives the dispatcher's structured log. Defaults to
 	// slog.Default.
 	Logger *slog.Logger
@@ -344,6 +360,7 @@ type Dispatcher struct {
 	store    *state.Store
 	registry *Registry
 	cfg      config.Config
+	entry    string
 	logger   *slog.Logger
 	now      func() time.Time
 	redact   func(string) string
@@ -382,6 +399,7 @@ func NewDispatcher(opts Options) (*Dispatcher, error) {
 		store:    opts.Store,
 		registry: opts.Registry,
 		cfg:      opts.Config,
+		entry:    opts.Entry,
 		logger:   opts.Logger,
 		now:      opts.Now,
 		redact:   opts.Redact,
@@ -463,6 +481,14 @@ func (d *Dispatcher) dispatch(ctx context.Context, resuming bool) (Outcome, erro
 	start, err := journal.ResolveStart(read.Records)
 	if err != nil {
 		return Outcome{ExitCode: ExitFailed}, fmt.Errorf("graph: resolve resume point: %w", err)
+	}
+	// Where a run with any history at all goes next is ResolveStart's
+	// decision: it is the only thing that knows which node died, at which
+	// attempt, and what the last finished node named as its successor.
+	// Options.Entry answers the one question the journal cannot, which is
+	// where a run that has never run anything begins.
+	if d.entry != "" && len(read.Records) == 0 {
+		start.Node = d.entry
 	}
 
 	// Rebuilt, never New: a resumed run must keep accumulating spend from

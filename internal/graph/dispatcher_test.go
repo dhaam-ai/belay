@@ -378,6 +378,91 @@ func TestDispatcher_FixLoop(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
+// Entry: where a run with no history starts.
+// ---------------------------------------------------------------------------
+
+// entryDispatcher wires nodes into a Dispatcher that starts a run with an
+// empty journal at entry rather than at journal.FirstNode.
+func (h *harness) entryDispatcher(t *testing.T, entry string, nodes ...graph.Node) *graph.Dispatcher {
+	t.Helper()
+	reg := graph.NewRegistry()
+	reg.MustRegister(nodes...)
+	d, err := graph.NewDispatcher(graph.Options{
+		Store: h.store, Registry: reg, Config: h.cfg, Entry: entry,
+		Now: func() time.Time { return time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC) },
+	})
+	if err != nil {
+		t.Fatalf("NewDispatcher() error = %v", err)
+	}
+	return d
+}
+
+// TestDispatcher_StartsAnEmptyJournalAtEntry covers the run a fanout
+// candidate performs: a graph of code, write, test, fix and review, with no
+// plan node and no approve gate, because the parent has already planned and
+// been approved. journal.FirstNode is "plan", so without Entry such a run
+// ends on its first step with an unknown node.
+func TestDispatcher_StartsAnEmptyJournalAtEntry(t *testing.T) {
+	h := newRun(t, config.Default(), "start where the caller says")
+	code := ok(graph.NodeCode, graph.NodeTest)
+	testNode := ok(graph.NodeTest, graph.End)
+
+	out, err := h.entryDispatcher(t, graph.NodeCode, code, testNode).Run(context.Background())
+	if err != nil {
+		t.Fatalf("Run() error = %v, want nil", err)
+	}
+	if out.Status != state.RunStatusCompleted || out.ExitCode != graph.ExitOK {
+		t.Fatalf("Outcome = {%v, exit %d}, want {completed, exit %d} (note %q)",
+			out.Status, out.ExitCode, graph.ExitOK, out.Note)
+	}
+	want := []string{
+		"run_started",
+		"code#1 started", "code#1 finished ok -> test",
+		"test#1 started", "test#1 finished ok -> END",
+		"run_completed",
+	}
+	if got := h.timeline(t); !equalStrings(got, want) {
+		t.Errorf("timeline =\n  %v\nwant\n  %v", got, want)
+	}
+	if code.attempts[0] != 1 {
+		t.Errorf("the entry node ran at attempt %d, want 1", code.attempts[0])
+	}
+}
+
+// TestDispatcher_EntryNeverOverridesAJournalWithHistory is the other half:
+// where a run with history resumes is journal.ResolveStart's decision alone.
+// Applying Entry unconditionally would re-run the entry node on every resume
+// of every candidate, paying for work the journal says is already done.
+func TestDispatcher_EntryNeverOverridesAJournalWithHistory(t *testing.T) {
+	h := newRun(t, config.Default(), "resume where the journal says")
+	h.seedJournal(t,
+		journal.Record{Event: journal.EventRunStarted},
+		journal.Record{Event: journal.EventNodeStarted, Node: graph.NodeCode, Attempt: 1},
+		journal.Record{
+			Event: journal.EventNodeFinished, Node: graph.NodeCode, Attempt: 1,
+			Status: journal.StatusOK, Next: graph.NodeTest,
+		},
+	)
+
+	code := ok(graph.NodeCode, graph.NodeTest)
+	testNode := ok(graph.NodeTest, graph.End)
+
+	out, err := h.entryDispatcher(t, graph.NodeCode, code, testNode).Run(context.Background())
+	if err != nil {
+		t.Fatalf("Run() error = %v, want nil", err)
+	}
+	if out.Status != state.RunStatusCompleted {
+		t.Fatalf("Outcome.Status = %v, want completed (note %q)", out.Status, out.Note)
+	}
+	if code.calls != 0 {
+		t.Errorf("the entry node ran %d times, want 0: the journal already records it finished", code.calls)
+	}
+	if testNode.calls != 1 {
+		t.Errorf("test ran %d times, want 1", testNode.calls)
+	}
+}
+
+// ---------------------------------------------------------------------------
 // Crash / resume. The product's headline claim.
 // ---------------------------------------------------------------------------
 
