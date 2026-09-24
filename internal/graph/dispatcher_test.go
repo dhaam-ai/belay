@@ -1538,7 +1538,7 @@ func TestDispatcher_NodeTimeoutPausesTheRun(t *testing.T) {
 	}
 }
 
-// supervisingNode is a fakeNode that supervises child runs, so
+// supervisingNode is a fakeNode that supervises candidate runs, so
 // graph.node_timeout does not apply to it.
 type supervisingNode struct{ *fakeNode }
 
@@ -1583,7 +1583,7 @@ func TestDispatcher_NodeTimeoutDoesNotApplyToASupervisor(t *testing.T) {
 			cfg.Graph.NodeTimeout = config.NewDuration(50 * time.Millisecond)
 			h := newRun(t, cfg, "wait for the candidates")
 
-			// It ignores its context, as a node waiting on child runs
+			// It ignores its context, as a node waiting on candidate runs
 			// that each watch their own does: the cap must be absent,
 			// not merely unobserved.
 			slow := &fakeNode{name: graph.NodeFanout, steps: []nodeStep{{
