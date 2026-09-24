@@ -122,11 +122,25 @@ func TestRunContextCarriesEverythingANodeIsAllowedToSee(t *testing.T) {
 
 	// A field added to RunContext without a source here reaches every node
 	// as its zero value, and a nil adapter or an empty workspace is read by
-	// the node as "not configured". Every field must be set.
+	// the node as "not configured". Every field must be set, except the
+	// ones below, which are nil on purpose in a run like this one.
+	unset := map[string]string{
+		// A run that does not fan out has no candidate runs, and no run
+		// has any until a caller configures the registry they are driven
+		// over. A node that needs one and finds it nil refuses with
+		// ErrNoCandidateRunner, which is the same contract every other
+		// nil adapter here has; what would be wrong is a node silently
+		// doing nothing. The entry stays until the dispatcher builds one.
+		"CandidateRuns": "no run fans out yet",
+	}
 	v := reflect.ValueOf(*rc)
 	for i := range v.NumField() {
+		name := v.Type().Field(i).Name
+		if _, ok := unset[name]; ok {
+			continue
+		}
 		if v.Field(i).IsZero() {
-			t.Errorf("RunContext.%s is its zero value: runContext does not set it", v.Type().Field(i).Name)
+			t.Errorf("RunContext.%s is its zero value: runContext does not set it", name)
 		}
 	}
 

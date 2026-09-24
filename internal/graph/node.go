@@ -232,6 +232,17 @@ type RunContext struct {
 	// internal/graph has no build tag and the git package runs git through
 	// internal/exec, which builds only on unix; see internal/vcs.
 	VCS vcs.Repository
+
+	// CandidateRuns executes this run's fanout candidates, one full run
+	// each. It is how a node reaches the one capability a node may not
+	// have — goroutines, child stores, durable writes — without holding
+	// any of it: see CandidateRunner.
+	//
+	// It is nil for every run that does not fan out, and for every run
+	// belay performs today, because nothing builds a runner yet. A node
+	// that needs it and finds it nil refuses with ErrNoCandidateRunner,
+	// like any other missing adapter.
+	CandidateRuns CandidateRunner
 }
 
 // WriteArtifact writes a run artifact — plan.md, review.json, a diff — and
