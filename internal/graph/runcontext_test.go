@@ -43,6 +43,93 @@ func (rcIdle) Run(context.Context, *RunContext) (Result, error) {
 	return Result{Next: End, Status: journal.StatusOK}, nil
 }
 
+// TestRunContextGivesANodeTheConfigThisRunPinned covers the half of the pin
+// that is not the registry. Wiring a run's nodes from the manifest keeps the
+// graph's shape, but two nodes read configuration on every execution —
+// fanout asks how many candidates there are, join asks which strategy picks
+// the winner — and a RunContext filled from the file as this process loaded
+// it would hand them whatever belay.yaml says at resume time.
+func TestRunContextGivesANodeTheConfigThisRunPinned(t *testing.T) {
+	const runID = "20260101T000000Z-0123456789ab"
+
+	// Deliberately different from the pin in every field, and with limits
+	// the run was not created with, which must still come through live.
+	live := config.Default()
+	live.Fanout.Enabled = false
+	live.Fanout.Candidates = 5
+	live.Fanout.Select = config.SelectFastest
+	live.Budget.MaxUSD = 9.99
+	live.Graph.MaxSteps = 42
+	live.Graph.NodeTimeout = config.NewDuration(7 * time.Minute)
+
+	pin := state.FanoutPin{Candidates: 3, Select: string(config.SelectFewestIssues)}
+
+	tests := []struct {
+		name  string
+		pin   *state.FanoutPin
+		want  config.Fanout
+		limit float64
+	}{
+		{
+			name: "a run created without fanout reads the configuration as it stands",
+			want: live.Fanout,
+		},
+		{
+			name: "a run that fans out reads the shape it was created with",
+			pin:  &pin,
+			want: config.Fanout{
+				Enabled: true, Candidates: 3,
+				Isolator: live.Fanout.Isolator, Select: config.SelectFewestIssues,
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ws := t.TempDir()
+			layout, err := state.NewLayout(ws, runID)
+			if err != nil {
+				t.Fatalf("NewLayout: %v", err)
+			}
+			reg := NewRegistry()
+			reg.MustRegister(rcIdle{})
+			d, err := NewDispatcher(Options{Store: state.NewStore(layout), Registry: reg, Config: live})
+			if err != nil {
+				t.Fatalf("NewDispatcher: %v", err)
+			}
+
+			man := state.NewManifest(time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC), runID, ws, "ship it", live)
+			if tt.pin != nil {
+				man.SetFanout(*tt.pin)
+			}
+
+			rc := d.runContext(&man, state.NewState("ship it"), budget.New(), NodeFanout, 1, 1)
+
+			if !reflect.DeepEqual(rc.Config.Fanout, tt.want) {
+				t.Errorf("RunContext.Config.Fanout = %+v, want %+v", rc.Config.Fanout, tt.want)
+			}
+			// The limits are deliberately NOT pinned: raising one and
+			// resuming is what continues a run that met it, so a node must
+			// see the figures as they are now.
+			if rc.Config.Budget.MaxUSD != 9.99 {
+				t.Errorf("RunContext.Config.Budget.MaxUSD = %v, want the live 9.99", rc.Config.Budget.MaxUSD)
+			}
+			if rc.Config.Graph.MaxSteps != 42 {
+				t.Errorf("RunContext.Config.Graph.MaxSteps = %v, want the live 42", rc.Config.Graph.MaxSteps)
+			}
+			if rc.Config.Graph.NodeTimeout.Duration() != 7*time.Minute {
+				t.Errorf("RunContext.Config.Graph.NodeTimeout = %v, want the live 7m",
+					rc.Config.Graph.NodeTimeout)
+			}
+			// The overlay is on a copy: the dispatcher's own configuration
+			// is not what gets pinned.
+			if live.Fanout.Candidates != 5 || live.Fanout.Enabled {
+				t.Errorf("the dispatcher's configuration was mutated: %+v", live.Fanout)
+			}
+		})
+	}
+}
+
 func TestRunContextCarriesEverythingANodeIsAllowedToSee(t *testing.T) {
 	const runID = "20260101T000000Z-0123456789ab"
 	ws := t.TempDir()

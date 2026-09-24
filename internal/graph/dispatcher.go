@@ -961,12 +961,24 @@ func (d *Dispatcher) loop(
 // contract on Dispatcher: building a node's view of the run is not a durable
 // effect, so a crash while doing it loses nothing and leaves nothing to heal.
 //
-// Config is d.cfg, the configuration this process loaded. On a resume that is
-// read from disk again and can differ from what the run started with. A value
-// that must stay the same for the whole of a run belongs on man, which was
-// written when the run was created, and a field carrying one should be filled
-// from man rather than from d.cfg; internal/nodes states the same rule for
-// the shape of the graph.
+// Config is d.cfg, the configuration this process loaded, with everything
+// this run pinned when it was created overlaid on it
+// (state.Manifest.PinnedConfig). On a resume d.cfg is read from disk again
+// and can differ from what the run started with, and two nodes ask it about
+// the graph's shape on every execution: fanout asks how many candidates
+// there are, join asks which strategy picks the winner. Overlaying once,
+// here, is what makes a pin something a node reads without a node having to
+// remember to ask the manifest — and what makes a node that reads the live
+// value by accident impossible to write.
+//
+// Only the shape is overlaid. The dispatcher's limits — budget.max_usd,
+// graph.max_steps, graph.node_timeout — are deliberately read live, so that
+// raising one and resuming continues a run that met it.
+//
+// The same rule fills Output, ArchiveDir and VCS from man: a value that must
+// stay the same for the whole of a run belongs on man, which was written
+// when the run was created. internal/nodes states the same rule for the
+// shape of the graph.
 //
 // It does not decide which node runs, or check the budget or the step cap:
 // the loop has done all three before a node needs a context.
@@ -975,7 +987,7 @@ func (d *Dispatcher) runContext(
 ) *RunContext {
 	layout := d.store.Layout()
 	return &RunContext{
-		Goal: man.Goal, State: st, Config: d.cfg, Layout: layout,
+		Goal: man.Goal, State: st, Config: man.PinnedConfig(d.cfg), Layout: layout,
 		// Supplied, not derived: six nodes previously reconstructed the
 		// workspace by walking up from the run directory, which yields
 		// belay's own tree for a zero Layout.
