@@ -197,8 +197,11 @@ func TestAPersonCanReadAndLeaveThePlanOnARealTerminal(t *testing.T) {
 	if r.decision != (Decision{Action: ActionLeave}) {
 		t.Errorf("q decided %+v, want to leave the run as it is", r.decision)
 	}
-	if !strings.Contains(tm.drawn.String(), "\x1b[?1049l") {
-		t.Error("the viewer did not give the alternate screen back")
-	}
+	// Run has returned, but the bytes it wrote are drained by a reader
+	// goroutine, so the last of them may not have been appended yet. Under a
+	// loaded -race run that gap is wide enough to see: wait for the stream to
+	// catch up rather than reading it the instant Run returns.
+	waitUntil(t, func() bool { return strings.Contains(tm.drawn.String(), "\x1b[?1049l") },
+		"the viewer did not give the alternate screen back")
 	tm.assertRestored(t)
 }
