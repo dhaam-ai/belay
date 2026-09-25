@@ -909,3 +909,13 @@ func TestPromoteDirtyWorkTreePausesAndTouchesNothing(t *testing.T) {
 		})
 	}
 }
+
+// promote is the last node standing between a winner the run has already
+// paid for and its delivery, and it runs git rather than an agent. Checking
+// the budget ceiling before it would leave a fanout's winner selected, paid
+// for and undeliverable until someone raised a limit in belay.yaml.
+func TestPromoteSpendsNothing(t *testing.T) {
+	if _, ok := any(promote.New()).(graph.Unpriced); !ok {
+		t.Fatal("the promote node does not implement graph.Unpriced, so a run that met its ceiling could not deliver a winner it had already bought")
+	}
+}
