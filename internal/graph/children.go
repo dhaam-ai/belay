@@ -229,15 +229,26 @@ func (r *candidateRunner) Run(ctx context.Context, specs []CandidateSpec) ([]Can
 	}
 
 	claims := make([]*candidateClaim, len(specs))
+	whole := true
 	for i, spec := range specs {
 		outcomes[i] = CandidateOutcome{ID: spec.ID, Index: spec.Index, Envelope: spec.Envelope}
 		c, err := r.claimFresh(parent, spec)
 		if err != nil {
 			outcomes[i].Err = err
+			whole = false
+			r.parent.logger.Warn("belay/graph: could not claim a candidate run, so none of them runs",
+				slog.String("candidate", spec.ID), slog.String("error", err.Error()))
 			continue
 		}
 		claims[i] = c
 		outcomes[i].RunDir = c.runDir
+	}
+	// Nothing runs unless every candidate has been claimed. Claiming is
+	// cheap and spends nothing, so refusing a fanout that cannot be whole
+	// costs a person nothing, and it saves them paying for candidates whose
+	// results could never be compared with the missing one's.
+	if !whole {
+		return outcomes, nil
 	}
 
 	r.drive(ctx, claims, outcomes)
@@ -279,9 +290,6 @@ func (r *candidateRunner) drive(ctx context.Context, claims []*candidateClaim, o
 		go func() {
 			defer wg.Done()
 			for i := range next {
-				if claims[i] == nil {
-					continue
-				}
 				r.one(ctx, claims[i], &outcomes[i])
 			}
 		}()

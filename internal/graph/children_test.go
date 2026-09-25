@@ -738,3 +738,111 @@ func TestCandidateRunnerHonoursItsConcurrencyLimit(t *testing.T) {
 			got, ids, completed)
 	}
 }
+
+// TestEveryCandidateIsClaimedBeforeAnyOfThemRuns: the split between claiming
+// and running is what makes the envelope division a single, one-shot
+// computation — nothing later re-divides the parent's remaining ceiling — and
+// what makes a Ctrl-C find every candidate durable, including the ones that
+// never reached a goroutine.
+func TestEveryCandidateIsClaimedBeforeAnyOfThemRuns(t *testing.T) {
+	h := newRun(t, budgetCfg(3.00, 0), "claim first, run second")
+	ids := []string{"cand-01", "cand-02", "cand-03"}
+
+	var mu sync.Mutex
+	sawAll := map[string]bool{}
+	code := newCandidateNode(graph.NodeCode, func(_ context.Context, id string, _ *graph.RunContext) (graph.Result, error) {
+		all := true
+		for _, other := range ids {
+			if _, err := os.Stat(candidateLayout(t, h, other).ManifestPath()); err != nil {
+				all = false
+			}
+		}
+		mu.Lock()
+		sawAll[id] = all
+		mu.Unlock()
+		return Result{Next: graph.End, Status: journal.StatusOK}, nil
+	})
+
+	node := &runsCandidates{specs: poolSpecs(h, 3)}
+	if _, err := h.poolDispatcher(t, pool{
+		registry: candidateRegistry(t, code), isolator: newFakeIsolator(h.layout.CandidatesDir()),
+		concurrency: 1,
+	}, node).Run(context.Background()); err != nil {
+		t.Fatalf("Run() error = %v, want nil", err)
+	}
+
+	for _, id := range ids {
+		if !sawAll[id] {
+			t.Errorf("when %s ran, some candidate had not been claimed yet", id)
+		}
+	}
+}
+
+// TestACandidateThatCannotBeClaimedStopsTheFanout: claiming is cheap and
+// spends nothing, so a fanout that cannot be whole is refused before it
+// costs anything. The candidates that were claimed keep their directories,
+// so a resume adopts them rather than paying for them twice.
+func TestACandidateThatCannotBeClaimedStopsTheFanout(t *testing.T) {
+	h := newRun(t, budgetCfg(3.00, 0), "refuse a fanout that cannot be whole")
+
+	// cand-03's run directory cannot be created: something that is not a
+	// directory is already in its place.
+	if err := os.MkdirAll(h.layout.CandidateRunsDir(), 0o750); err != nil {
+		t.Fatalf("MkdirAll: %v", err)
+	}
+	blocked := filepath.Join(h.layout.CandidateRunsDir(), "cand-03")
+	if err := os.WriteFile(blocked, []byte("not a run directory\n"), 0o600); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+
+	code := newCandidateNode(graph.NodeCode, finishes(0.25))
+	iso := newFakeIsolator(h.layout.CandidatesDir())
+	node := &runsCandidates{specs: poolSpecs(h, 3)}
+
+	if _, err := h.poolDispatcher(t, pool{
+		registry: candidateRegistry(t, code), isolator: iso, concurrency: 3,
+	}, node).Run(context.Background()); err != nil {
+		t.Fatalf("Run() error = %v, want nil", err)
+	}
+	if node.err != nil {
+		t.Fatalf("CandidateRuns.Run() error = %v; a fault one candidate hit is reported on its outcome", node.err)
+	}
+
+	for _, id := range []string{"cand-01", "cand-02"} {
+		if code.ran(id) != 0 {
+			t.Errorf("%s ran its code node %d times, want 0: no candidate runs when one cannot be claimed", id, code.ran(id))
+		}
+		if iso.creates(id) != 0 {
+			t.Errorf("%s had a workspace made for it; nothing should have been provisioned", id)
+		}
+		// Claimed all the same, so a resume adopts it instead of paying
+		// for a second one beside it.
+		if _, err := os.Stat(candidateLayout(t, h, id).ManifestPath()); err != nil {
+			t.Errorf("%s was not claimed: %v", id, err)
+		}
+	}
+
+	for i, o := range node.outcomes {
+		switch o.ID {
+		case "cand-03":
+			if o.Err == nil {
+				t.Errorf("cand-03 outcome carries no Err, so nothing names the fault a resume has to retry")
+			}
+		default:
+			if o.Err != nil {
+				t.Errorf("%s outcome carries Err = %v, want nil: it was claimed, it simply did not run", o.ID, o.Err)
+			}
+			if o.Status != state.RunStatusUnknown || o.Provision != state.ProvisionPending {
+				t.Errorf("%s = {%v, %q}, want a candidate that is claimed and no further", o.ID, o.Status, o.Provision)
+			}
+		}
+		if o.Index != i+1 {
+			t.Errorf("outcome %d has Index %d; every slot is still identified", i, o.Index)
+		}
+	}
+
+	// And it was left exactly where it was, not deleted.
+	if data, err := os.ReadFile(blocked); err != nil || string(data) != "not a run directory\n" {
+		t.Errorf("the file in cand-03's place reads %q (err %v), want it untouched", data, err)
+	}
+}
