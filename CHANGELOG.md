@@ -135,6 +135,15 @@ that only `pkg/belay` carries a compatibility promise. Everything under
 
 ### Changed
 
+- **A run that has met its budget ceiling still delivers the work it already
+  bought.** The ceiling is checked before every node, which meant a run that
+  reached `budget.max_usd` during its last coding step stopped just short of
+  promoting the change it had paid for, and the only way to collect it was to
+  raise the limit in `belay.yaml` and resume. `promote` runs git and calls no
+  model, so stopping there saved nothing and lost everything; it is now
+  exempt from the check, along with `join`. Every other node is checked
+  exactly as before, and both nodes' spend is still recorded — what changed
+  is what is checked, never what is counted.
 - **`fanout.isolator` defaults to `auto`, and is a closed set.** It was free
   text checked only for emptiness, so `worktrees` or `dircopy ` loaded fine
   and failed later, when a run had already been created — while

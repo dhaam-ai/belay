@@ -65,11 +65,24 @@ type Strategy struct {
 	// names the data the rule does not have and says what it does instead,
 	// and the join node reports it to the user rather than presenting an
 	// approximate winner as an exact one.
+	//
+	// On a row returned by Strategies it is the approximation the rule MAY
+	// have to make; on the row inside an Outcome it is the one this
+	// selection really made, cleared when the candidates carried everything
+	// the rule wanted. A rule whose data only sometimes exists would
+	// otherwise have to choose between crying wolf on every run and never
+	// warning at all.
 	Approximation string
 
-	// pick chooses among passing, which Select guarantees is non-empty and
+	// pick chooses among eligible, which Select guarantees is non-empty and
 	// in the order fanout recorded the candidates.
-	pick func(passing []state.Candidate) state.Candidate
+	pick func(eligible []state.Candidate) state.Candidate
+
+	// approximates reports whether this row had to substitute for data it
+	// wanted, given the candidates it was offered. Nil means the row's
+	// Approximation is fixed: exact rules have none, and a rule whose data
+	// can never exist always declares one.
+	approximates func(eligible []state.Candidate) bool
 }
 
 // Exact reports whether this row's rule is computed from the data it
@@ -79,12 +92,12 @@ func (s Strategy) Exact() bool { return s.Approximation == "" }
 // strategies is belay's complete candidate selection table, in a stable
 // order so error messages and tests do not depend on map iteration.
 //
-// # Only passing candidates are eligible
+// # Only eligible candidates are offered to a row
 //
-// Every row selects among candidates whose TestPassed is true, and Select —
-// not the rows — enforces that. A "best of N" that can return a candidate
-// whose tests fail is not selecting a best, it is selecting a survivor: the
-// whole point of running N attempts is that at least one of them works.
+// Every row selects among the candidates eligible reports, and Select — not
+// the rows — enforces that. A "best of N" that can return a candidate whose
+// tests fail is not selecting a best, it is selecting a survivor: the whole
+// point of running N attempts is that at least one of them works.
 //
 // # Every row is deterministic
 //
@@ -109,42 +122,70 @@ var strategies = []Strategy{
 	},
 	{
 		Name: config.SelectFastest,
-		Rule: "the candidate that finished soonest, approximated by the first candidate that passed in recorded order; " +
-			"no tie is possible, for the same reason as first_pass.",
-		// The honest version of "fastest" would compare durations, and
-		// belay records none that this node can see. state.Candidate has
-		// no duration field (and inventing one is not this package's
-		// call); state.HistoryEntry records a finish Time but not which
-		// candidate it belongs to; and the journal, besides being the
-		// dispatcher's file rather than a node's, carries no per-candidate
-		// records at all today, because v0.1's fanout node prepares
-		// candidate workspaces without running anything inside them.
+		Rule: "among the candidates that passed, the one whose own candidate run spent the least time in its nodes; " +
+			"ties break by the lowest candidate ID, so the result does not depend on the order candidates were recorded in. " +
+			"A blackboard that records no duration for some eligible candidate falls back to the first that passed in recorded order.",
+		// The duration compared is the sum of the candidate run's own
+		// node_finished durations, not wall-clock time, so the downtime
+		// between a crash and the resume that healed it is not held against
+		// a candidate nobody was running.
 		//
-		// So this row substitutes recorded order, which under v0.1 is the
-		// closest true statement available: fanout prepares candidates
-		// SEQUENTIALLY, in candidate order, in one goroutine, so candidate
-		// 1 finishes before candidate 2 finishes before candidate 3.
-		// Earliest-finishing is therefore exactly first-in-recorded-order,
-		// and the approximation is in reading "fastest" as "finished
-		// soonest" (which is what config.SelectFastest's own doc comment
-		// says) rather than "took the least time" — the two coincide only
-		// while candidates start together, which sequential fanout does
-		// not do.
+		// This row used to substitute recorded order unconditionally, and
+		// said why: "no per-candidate duration is recorded anywhere a node
+		// can read [...] The day the dispatcher runs candidates
+		// concurrently and records per-candidate timing, this is the one
+		// row that changes." That day is this slice. The substitution
+		// survives only for a blackboard written before candidates really
+		// ran, where there is still nothing to compare — and it says so,
+		// through approximates, rather than warning on every run.
 		//
-		// The day the dispatcher runs candidates concurrently and records
-		// per-candidate timing, this is the one row that changes, and the
-		// Approximation below is how a user finds out that today it has
-		// not changed yet.
-		Approximation: "no per-candidate duration is recorded anywhere a node can read, " +
-			"so this run picked the first candidate that passed in recorded order instead; " +
-			"under v0.1's sequential fanout that is the candidate that finished soonest, but it is not a duration comparison",
-		pick: firstInOrder,
+		// Reading "fastest" as "took the least time" rather than "finished
+		// soonest" is deliberate now that candidates run CONCURRENTLY.
+		// Finishing soonest under contention is partly a fact about the
+		// pool's scheduling; time spent is a fact about the candidate.
+		Approximation: "some eligible candidate records no duration, so this run picked the first that passed in recorded order instead; " +
+			"that is not a duration comparison",
+		pick:         fastest,
+		approximates: func(eligible []state.Candidate) bool { return !allTimed(eligible) },
 	},
 }
 
 // firstInOrder returns the first candidate, which is the earliest one fanout
-// recorded. passing is never empty; Select checks that before calling a row.
-func firstInOrder(passing []state.Candidate) state.Candidate { return passing[0] }
+// recorded. eligible is never empty; Select checks that before calling a row.
+func firstInOrder(eligible []state.Candidate) state.Candidate { return eligible[0] }
+
+// fastest returns the candidate whose own run spent the least time in its
+// nodes, breaking ties by the lowest ID.
+//
+// It falls back to recorded order when any eligible candidate records no
+// duration. Treating a missing duration as zero would make the candidate
+// belay knows least about win every time, which is the opposite of what the
+// rule is for; and comparing only the timed ones would silently narrow the
+// field a person asked to choose from.
+func fastest(eligible []state.Candidate) state.Candidate {
+	if !allTimed(eligible) {
+		return firstInOrder(eligible)
+	}
+	best := eligible[0]
+	for _, c := range eligible[1:] {
+		if c.DurationMS < best.DurationMS || (c.DurationMS == best.DurationMS && c.ID < best.ID) {
+			best = c
+		}
+	}
+	return best
+}
+
+// allTimed reports whether every candidate carries a duration to compare. A
+// zero is "not recorded" rather than "instantaneous": no candidate run that
+// executed a node took no time at all.
+func allTimed(eligible []state.Candidate) bool {
+	for _, c := range eligible {
+		if c.DurationMS <= 0 {
+			return false
+		}
+	}
+	return true
+}
 
 // fewestIssues returns the candidate with the lowest IssueCount, breaking
 // ties by the lowest ID.
@@ -153,9 +194,9 @@ func firstInOrder(passing []state.Candidate) state.Candidate { return passing[0]
 // unique by the time a row runs (see validate), so exactly one candidate is
 // the minimum. That makes this row independent of the order candidates
 // arrive in, not merely repeatable for one fixed order.
-func fewestIssues(passing []state.Candidate) state.Candidate {
-	best := passing[0]
-	for _, c := range passing[1:] {
+func fewestIssues(eligible []state.Candidate) state.Candidate {
+	best := eligible[0]
+	for _, c := range eligible[1:] {
 		if c.IssueCount < best.IssueCount || (c.IssueCount == best.IssueCount && c.ID < best.ID) {
 			best = c
 		}
@@ -205,22 +246,58 @@ type Outcome struct {
 	Winner state.Candidate
 	// Total is how many candidates were considered.
 	Total int
-	// Passed is how many of them were eligible, that is, had TestPassed
-	// set. Only these were offered to the rule.
+	// Completed is how many candidates' own runs reached a verdict about
+	// the code: the run completed, or the blackboard predates candidate
+	// runs and records no outcome at all.
+	//
+	// It is what tells "all of them failed their tests" apart from "none of
+	// them ever ran" — two results a person would act on very differently,
+	// and which a single "no winner" would report identically.
+	Completed int
+	// Passed is how many candidates were eligible: their tests passed AND
+	// their own run completed. Only these were offered to the rule.
 	Passed int
 }
 
 // Selected reports whether Outcome names a winner.
 func (o Outcome) Selected() bool { return o.Passed > 0 }
 
+// eligible reports whether a candidate may be offered to a selection rule:
+// its tests passed AND its own candidate run completed.
+//
+// The second half is not redundant. A candidate whose tests passed and whose
+// quality gate then rejected the work, until its fix loop gave up, ends
+// run_failed — and letting it win would promote code a single run would
+// never have promoted. So would a candidate that aborted part-way through
+// its envelope with a green test result from an earlier round, or one whose
+// workspace was refused and which therefore has no result at all.
+//
+// An empty Outcome stays eligible. That is every candidate on a blackboard
+// written before candidate runs existed, where nothing recorded how a
+// candidate ended, and reading "unrecorded" as "did not complete" would make
+// every one of those runs unable to select a winner it had already selected.
+//
+// It is one function rather than a term inside each row so that a rule
+// cannot opt out of it, and so that the next thing that makes a candidate
+// ineligible — a policy violation, say — is added in one place.
+func eligible(c state.Candidate) bool {
+	return c.TestPassed && completedRun(c)
+}
+
+// completedRun reports whether a candidate's own run reached a verdict about
+// the code, whatever that verdict was.
+func completedRun(c state.Candidate) bool {
+	return c.Outcome == "" || c.Outcome == state.RunStatusCompleted.String()
+}
+
 // Select applies the strategy named by name to candidates and reports the
 // winner.
 //
 // Eligibility, tie-breaking and validation live here rather than in the
 // table rows, so that every rule inherits the same invariants and a new row
-// cannot quietly opt out of them: only candidates with TestPassed are
-// offered to a rule, candidates are offered in the order fanout recorded
-// them, and the result is deterministic for a given input.
+// cannot quietly opt out of them: only eligible candidates are offered to a
+// rule, candidates are offered in the order fanout recorded them, and the
+// result is deterministic for a given input.
 //
 // It returns an error only for the wiring bugs the sentinels above describe.
 // "No candidate passed" is not one: that comes back as an Outcome with
@@ -238,24 +315,35 @@ func Select(candidates []state.Candidate, name config.SelectStrategy) (Outcome, 
 		return Outcome{}, err
 	}
 
-	passing := make([]state.Candidate, 0, len(candidates))
+	offered := make([]state.Candidate, 0, len(candidates))
+	completed := 0
 	for _, c := range candidates {
-		if c.TestPassed {
-			passing = append(passing, c)
+		if completedRun(c) {
+			completed++
+		}
+		if eligible(c) {
+			offered = append(offered, c)
 		}
 	}
 
-	out := Outcome{Strategy: strategy, Total: len(candidates), Passed: len(passing)}
-	if len(passing) == 0 {
+	// strategy is this function's own copy of the row, so clearing the
+	// approximation it did not have to make says what THIS selection did
+	// without rewriting the table for every later caller.
+	if strategy.approximates != nil && !strategy.approximates(offered) {
+		strategy.Approximation = ""
+	}
+
+	out := Outcome{Strategy: strategy, Total: len(candidates), Completed: completed, Passed: len(offered)}
+	if len(offered) == 0 {
 		return out, nil
 	}
-	out.Winner = strategy.pick(passing)
+	out.Winner = strategy.pick(offered)
 	return out, nil
 }
 
 // validate rejects candidates that cannot be named as a winner. It runs over
-// every candidate, not only the passing ones: a duplicate ID among the
-// failing candidates still means the blackboard is describing two different
+// every candidate, not only the eligible ones: a duplicate ID among the
+// ineligible candidates still means the blackboard is describing two different
 // workspaces under one name, and the next run of this graph might select
 // one of them.
 func validate(candidates []state.Candidate) error {

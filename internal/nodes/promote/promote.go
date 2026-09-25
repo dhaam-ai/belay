@@ -267,10 +267,25 @@ type Node struct{}
 // New returns the promote node.
 func New() *Node { return &Node{} }
 
-var _ graph.Node = (*Node)(nil)
+var (
+	_ graph.Node     = (*Node)(nil)
+	_ graph.Unpriced = (*Node)(nil)
+)
 
 // Name returns graph.NodePromote.
 func (n *Node) Name() string { return graph.NodePromote }
+
+// SpendsNothing exempts this node from the dispatcher's budget ceiling
+// check.
+//
+// It is not an exemption from the ceiling but the observation that the
+// ceiling has nothing to say about a node that cannot spend: promote runs
+// git, calls no agent, and its Usage is zero by construction. It is also the
+// last node between a winner the run has already bought and its delivery, so
+// stopping here saves nothing and leaves the work selected, paid for and
+// out of reach until someone edits belay.yaml — the case a fanout whose
+// candidates spent the ceiling reaches every time. See graph.Unpriced.
+func (n *Node) SpendsNothing() {}
 
 // Run promotes the run's change onto its branch and ends the run.
 //

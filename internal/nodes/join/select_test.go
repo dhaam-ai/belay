@@ -50,8 +50,11 @@ func TestStrategiesTable(t *testing.T) {
 	}
 }
 
-// fastest is the one row that cannot compute what it is named after, so it
-// must say so rather than pass its answer off as a duration comparison.
+// fastest is the one row that may have to substitute for the data it is
+// named after — a blackboard written before candidate runs recorded any
+// duration — so the TABLE declares that substitution. Whether a given
+// selection really made it is the Outcome's to say; see
+// TestFastestIsExactWhenDurationsAreRecorded.
 func TestFastestDeclaresItsApproximation(t *testing.T) {
 	for _, s := range join.Strategies() {
 		if s.Name != config.SelectFastest {
@@ -61,7 +64,7 @@ func TestFastestDeclaresItsApproximation(t *testing.T) {
 			continue
 		}
 		if s.Exact() {
-			t.Fatalf("strategy %q claims to be exact, but belay records no per-candidate duration", s.Name)
+			t.Fatalf("strategy %q claims to be exact, but a blackboard may record no per-candidate duration", s.Name)
 		}
 	}
 }
@@ -354,6 +357,219 @@ func TestUnknownStrategyErrorNamesTheTable(t *testing.T) {
 	for _, s := range allStrategies {
 		if !strings.Contains(err.Error(), string(s)) {
 			t.Errorf("error %q does not name the valid strategy %q", err, s)
+		}
+	}
+}
+
+// ran is a candidate whose own candidate run reached the given end, in the
+// vocabulary state.Candidate.Outcome uses.
+func ran(id string, passed bool, issues int, outcome string) state.Candidate {
+	c := cand(id, passed, issues)
+	c.Outcome = outcome
+	return c
+}
+
+// timed is a candidate whose own run completed and recorded how long its
+// nodes took.
+func timed(id string, ms int64) state.Candidate {
+	c := ran(id, true, 0, "completed")
+	c.DurationMS = ms
+	return c
+}
+
+// Passing tests are necessary but not sufficient. A candidate whose tests
+// passed and whose run then failed — its quality gate rejected the work and
+// its fix loop gave up — must not win, because promoting it would ship code
+// a single run would have refused.
+func TestSelectRequiresACompletedCandidateRun(t *testing.T) {
+	tests := []struct {
+		name       string
+		candidates []state.Candidate
+		wantWinner string
+		wantPassed int
+	}{
+		{
+			name:       "a blackboard written before candidates really ran stays eligible",
+			candidates: []state.Candidate{ran("c1", true, 3, ""), ran("c2", true, 1, "")},
+			wantWinner: "c2",
+			wantPassed: 2,
+		},
+		{
+			name:       "a completed candidate run is eligible",
+			candidates: []state.Candidate{ran("c1", true, 3, "completed"), ran("c2", true, 1, "completed")},
+			wantWinner: "c2",
+			wantPassed: 2,
+		},
+		{
+			name:       "tests passed but the run failed is not eligible, however few issues it has",
+			candidates: []state.Candidate{ran("c1", true, 0, "failed"), ran("c2", true, 4, "completed")},
+			wantWinner: "c2",
+			wantPassed: 1,
+		},
+		{
+			name:       "a candidate that aborted on its envelope is not eligible",
+			candidates: []state.Candidate{ran("c1", true, 0, "aborted"), ran("c2", true, 4, "completed")},
+			wantWinner: "c2",
+			wantPassed: 1,
+		},
+		{
+			name:       "a candidate that never ran is not eligible",
+			candidates: []state.Candidate{ran("c1", true, 0, "error"), ran("c2", true, 4, "completed")},
+			wantWinner: "c2",
+			wantPassed: 1,
+		},
+		{
+			name:       "every candidate ran and failed its tests",
+			candidates: []state.Candidate{ran("c1", false, 0, "completed"), ran("c2", false, 0, "completed")},
+			wantWinner: "",
+			wantPassed: 0,
+		},
+		{
+			name:       "no candidate ever ran",
+			candidates: []state.Candidate{ran("c1", false, 0, "error"), ran("c2", true, 0, "aborted")},
+			wantWinner: "",
+			wantPassed: 0,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := join.Select(tt.candidates, config.SelectFewestIssues)
+			if err != nil {
+				t.Fatalf("Select() error = %v, want nil", err)
+			}
+			if got.Winner.ID != tt.wantWinner {
+				t.Errorf("Select() winner = %q, want %q", got.Winner.ID, tt.wantWinner)
+			}
+			if got.Passed != tt.wantPassed {
+				t.Errorf("Select() Passed = %d, want %d", got.Passed, tt.wantPassed)
+			}
+		})
+	}
+}
+
+// Completed is how many candidates' own runs reached a verdict about the
+// code at all, which is what tells "all of them failed their tests" apart
+// from "none of them ever ran".
+func TestSelectCountsCompletedRunsSeparatelyFromPassingOnes(t *testing.T) {
+	tests := []struct {
+		name          string
+		candidates    []state.Candidate
+		wantCompleted int
+		wantPassed    int
+	}{
+		{
+			name:          "legacy candidates count as completed, because nothing else is recorded",
+			candidates:    []state.Candidate{cand("c1", true, 0), cand("c2", false, 0)},
+			wantCompleted: 2,
+			wantPassed:    1,
+		},
+		{
+			name:          "a run that failed did not complete",
+			candidates:    []state.Candidate{ran("c1", true, 0, "completed"), ran("c2", true, 0, "failed")},
+			wantCompleted: 1,
+			wantPassed:    1,
+		},
+		{
+			name:          "nothing ran",
+			candidates:    []state.Candidate{ran("c1", false, 0, "error"), ran("c2", false, 0, "error")},
+			wantCompleted: 0,
+			wantPassed:    0,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := join.Select(tt.candidates, config.SelectFewestIssues)
+			if err != nil {
+				t.Fatalf("Select() error = %v, want nil", err)
+			}
+			if got.Completed != tt.wantCompleted {
+				t.Errorf("Select() Completed = %d, want %d", got.Completed, tt.wantCompleted)
+			}
+			if got.Passed != tt.wantPassed {
+				t.Errorf("Select() Passed = %d, want %d", got.Passed, tt.wantPassed)
+			}
+		})
+	}
+}
+
+// Now that a candidate run records how long its own nodes took, fastest
+// compares durations instead of substituting recorded order — the change
+// select.go's own comment invited. Where the data is missing it still
+// substitutes, and still says so.
+func TestFastestIsExactWhenDurationsAreRecorded(t *testing.T) {
+	tests := []struct {
+		name       string
+		candidates []state.Candidate
+		wantWinner string
+		wantExact  bool
+	}{
+		{
+			name:       "the shortest total node time wins, whatever order it was recorded in",
+			candidates: []state.Candidate{timed("c3", 900), timed("c2", 300), timed("c1", 300)},
+			wantWinner: "c1",
+			wantExact:  true,
+		},
+		{
+			name:       "a tie breaks by the lowest id, so the winner does not depend on recorded order",
+			candidates: []state.Candidate{timed("c2", 300), timed("c1", 300)},
+			wantWinner: "c1",
+			wantExact:  true,
+		},
+		{
+			name:       "a slow candidate that was recorded first does not win",
+			candidates: []state.Candidate{timed("c1", 5000), timed("c2", 10)},
+			wantWinner: "c2",
+			wantExact:  true,
+		},
+		{
+			name:       "a failing candidate's duration is not compared",
+			candidates: []state.Candidate{ran("c1", false, 0, "completed"), timed("c2", 800)},
+			wantWinner: "c2",
+			wantExact:  true,
+		},
+		{
+			name:       "a blackboard with no durations at all keeps the substitution, and says so",
+			candidates: []state.Candidate{cand("c1", true, 0), cand("c2", true, 0)},
+			wantWinner: "c1",
+			wantExact:  false,
+		},
+		{
+			name:       "one eligible candidate without a duration is enough to make the comparison a substitution",
+			candidates: []state.Candidate{timed("c1", 5000), ran("c2", true, 0, "completed")},
+			wantWinner: "c1",
+			wantExact:  false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := join.Select(tt.candidates, config.SelectFastest)
+			if err != nil {
+				t.Fatalf("Select() error = %v, want nil", err)
+			}
+			if got.Winner.ID != tt.wantWinner {
+				t.Errorf("Select() winner = %q, want %q", got.Winner.ID, tt.wantWinner)
+			}
+			if got.Strategy.Exact() != tt.wantExact {
+				t.Errorf("Select() Strategy.Exact() = %v (approximation %q), want %v",
+					got.Strategy.Exact(), got.Strategy.Approximation, tt.wantExact)
+			}
+		})
+	}
+}
+
+// An Outcome carrying a cleared approximation must not clear the table's.
+// The row still describes the substitution it makes when the data is
+// missing, because that is a property of the rule, not of one run.
+func TestAnExactSelectionDoesNotRewriteTheTable(t *testing.T) {
+	if _, err := join.Select([]state.Candidate{timed("c1", 10), timed("c2", 20)}, config.SelectFastest); err != nil {
+		t.Fatalf("Select() error = %v", err)
+	}
+	for _, s := range join.Strategies() {
+		if s.Name == config.SelectFastest && s.Exact() {
+			t.Fatal("selecting with recorded durations cleared the fastest row's approximation in the table itself")
 		}
 	}
 }
