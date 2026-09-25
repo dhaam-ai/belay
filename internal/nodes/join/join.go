@@ -217,13 +217,13 @@ func noWinner(log *slog.Logger, outcome Outcome) graph.Result {
 // noWinnerNote says which of the three "no winner" runs this was.
 func noWinnerNote(o Outcome) string {
 	tail := fmt.Sprintf(", so %s had nothing to choose between", o.Strategy.Name)
-	switch {
-	case o.Completed == 0:
+	switch o.Completed {
+	case 0:
 		// Nothing ran, so nothing can be said about the code. Saying
 		// "failed their tests" here would send someone to debug a test
 		// suite no candidate reached.
 		return fmt.Sprintf("no winner: none of the %d candidates completed its run%s", o.Total, tail)
-	case o.Completed == o.Total:
+	case o.Total:
 		return fmt.Sprintf("no winner: all %d candidates failed their tests%s", o.Total, tail)
 	default:
 		return fmt.Sprintf("no winner: of %d candidates, %d failed the tests and %d never completed%s",
