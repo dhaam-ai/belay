@@ -339,6 +339,34 @@ func (r *candidateRunner) makeWorkspace(ctx context.Context, c *candidateClaim, 
 		return false
 	}
 
+	// Strictly before Create, and only for a candidate whose run directory
+	// was already there: both isolators refuse to create over the debris a
+	// Create killed part-way leaves behind (a non-empty destination, a
+	// worktree git still has registered). A candidate claimed in this call
+	// has nothing to reclaim, because the manifest is written before any
+	// Create is attempted.
+	//
+	// Reclaim and not Destroy. Destroy's contract is "at most once, for a
+	// Workspace Create returned", and here Create never returned one, so
+	// asking Destroy to cope would turn a precise contract into a vague
+	// one. It is optional and consumer-side: an isolator without it leaves
+	// the candidate as a fault naming the directory, which pauses the
+	// fanout rather than losing the candidate.
+	if c.adopted {
+		reclaimer, ok := iso.(Reclaimer)
+		if !ok {
+			out.Err = fmt.Errorf(
+				"graph: candidate %q was claimed but never given a workspace, and %T cannot reclaim what a "+
+					"half-finished one left behind; remove %s and resume",
+				c.spec.ID, iso, c.layout.RunDir())
+			return false
+		}
+		if err := reclaimer.Reclaim(ctx, c.spec.ID); err != nil {
+			out.Err = fmt.Errorf("graph: reclaim candidate %q before making its workspace again: %w", c.spec.ID, err)
+			return false
+		}
+	}
+
 	ws, err := iso.Create(ctx, c.spec.Source, c.spec.ID)
 	switch {
 	case errors.Is(err, belay.ErrUnsupported):
@@ -557,6 +585,10 @@ type candidateClaim struct {
 	// note is why a refused candidate was refused, as its manifest records
 	// it, so an adoption reports the same sentence the first attempt did.
 	note string
+	// adopted reports that the run directory was already there when this
+	// call found it, which is what decides whether debris a Create that
+	// died part-way left has to be reclaimed before another is attempted.
+	adopted bool
 }
 
 // claim makes sure spec has a run directory, either by writing one or by
@@ -661,6 +693,7 @@ func (r *candidateRunner) adopt(spec CandidateSpec, layout state.Layout, runDir 
 		provision: man.Candidate.Provision,
 		workspace: man.Candidate.Workspace,
 		note:      man.Candidate.ProvisionNote,
+		adopted:   true,
 	}, nil
 }
 

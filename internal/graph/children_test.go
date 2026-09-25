@@ -1241,7 +1241,10 @@ func TestADurableRefusalIsRecordedAndAMachineFaultIsRetried(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			h := newRun(t, budgetCfg(3.00, 0), "one candidate cannot be given a workspace")
-			iso := newFakeIsolator(h.layout.CandidatesDir())
+			// A reclaiming isolator, as both real ones are: retrying the
+			// provisioning of a candidate that was claimed and never given
+			// a workspace means clearing whatever the first attempt left.
+			iso := reclaimingIsolator{newFakeIsolator(h.layout.CandidatesDir())}
 			iso.fail["cand-02"] = tt.cause
 			code := newCandidateNode(graph.NodeCode, finishes(0.25))
 			node := &runsCandidates{
@@ -1330,4 +1333,76 @@ func TestADurableRefusalIsRecordedAndAMachineFaultIsRetried(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestAnUnprovisionedClaimIsReclaimedBeforeItsWorkspaceIsMadeAgain covers
+// the crash that lands between the claim and the workspace: the manifest
+// exists, provision is still empty, and whatever Isolator.Create had begun
+// is lying in the candidate root. Both isolators refuse to create over that
+// debris, so it has to go first — and Destroy cannot be what removes it,
+// because its contract is "at most once per Workspace Create returned" and
+// here Create never returned one.
+func TestAnUnprovisionedClaimIsReclaimedBeforeItsWorkspaceIsMadeAgain(t *testing.T) {
+	t.Run("an isolator that can reclaim does so strictly before it creates", func(t *testing.T) {
+		h := newRun(t, budgetCfg(3.00, 0), "reclaim before create")
+		iso := reclaimingIsolator{newFakeIsolator(h.layout.CandidatesDir())}
+		seedCandidate(t, h, iso.fakeIsolator, seeded{
+			id: "cand-01", index: 1, provision: state.ProvisionPending,
+			envelope: oneEnvelope, status: state.RunStatusRunning,
+		})
+
+		code := newCandidateNode(graph.NodeCode, finishes(0.25))
+		node := &runsCandidates{specs: poolSpecs(h, 2)}
+		if _, err := h.poolDispatcher(t, pool{
+			registry: candidateRegistry(t, code), isolator: iso, concurrency: 1,
+		}, node).Run(context.Background()); err != nil {
+			t.Fatalf("Run() error = %v, want nil", err)
+		}
+
+		want := []string{"reclaim cand-01", "create cand-01", "create cand-02"}
+		if got := iso.calls(); !equalStrings(got, want) {
+			t.Errorf("the isolator was called as\n  %v\nwant\n  %v", got, want)
+		}
+		for i, o := range node.outcomes {
+			if o.Err != nil || o.Status != state.RunStatusCompleted {
+				t.Errorf("outcome %d = {%v, err %v}, want completed", i, o.Status, o.Err)
+			}
+		}
+	})
+
+	t.Run("an isolator that cannot reclaim reports a fault naming the directory", func(t *testing.T) {
+		h := newRun(t, budgetCfg(3.00, 0), "nothing can clear the debris")
+		iso := newFakeIsolator(h.layout.CandidatesDir())
+		l := seedCandidate(t, h, iso, seeded{
+			id: "cand-01", index: 1, provision: state.ProvisionPending,
+			envelope: oneEnvelope, status: state.RunStatusRunning,
+		})
+
+		code := newCandidateNode(graph.NodeCode, finishes(0.25))
+		node := &runsCandidates{specs: poolSpecs(h, 2)}
+		if _, err := h.poolDispatcher(t, pool{
+			registry: candidateRegistry(t, code), isolator: iso, concurrency: 1,
+		}, node).Run(context.Background()); err != nil {
+			t.Fatalf("Run() error = %v, want nil", err)
+		}
+
+		got := node.outcomes[0]
+		if got.Err == nil {
+			t.Fatal("cand-01 outcome carries no Err; nothing would pause the fanout")
+		}
+		if !strings.Contains(got.Err.Error(), l.RunDir()) {
+			t.Errorf("cand-01 Err = %v, want it to name %s so a person can clear it", got.Err, l.RunDir())
+		}
+		if iso.creates("cand-01") != 0 {
+			t.Errorf("the isolator was asked to create over debris it refuses to create over")
+		}
+		if man := candidateManifest(t, h, "cand-01"); man.Candidate.Provision != state.ProvisionPending {
+			t.Errorf("cand-01 manifest records %q, want it left unprovisioned for the next attempt",
+				man.Candidate.Provision)
+		}
+		// Its sibling still ran: one candidate's fault is not the others'.
+		if node.outcomes[1].Status != state.RunStatusCompleted {
+			t.Errorf("cand-02 = %v, want completed", node.outcomes[1].Status)
+		}
+	})
 }
