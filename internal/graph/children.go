@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io/fs"
 	"log/slog"
 	"os"
 	"path"
@@ -232,7 +233,7 @@ func (r *candidateRunner) Run(ctx context.Context, specs []CandidateSpec) ([]Can
 	whole := true
 	for i, spec := range specs {
 		outcomes[i] = CandidateOutcome{ID: spec.ID, Index: spec.Index, Envelope: spec.Envelope}
-		c, err := r.claimFresh(parent, spec)
+		c, err := r.claim(parent, spec)
 		if err != nil {
 			outcomes[i].Err = err
 			whole = false
@@ -297,9 +298,13 @@ func (r *candidateRunner) drive(ctx context.Context, claims []*candidateClaim, o
 	wg.Wait()
 }
 
-// one takes a single candidate from wherever it is to wherever it can get.
+// one takes a single candidate from wherever it is to wherever it can get,
+// on its own goroutine.
 func (r *candidateRunner) one(ctx context.Context, c *candidateClaim, out *CandidateOutcome) {
-	if !r.makeWorkspace(ctx, c, out) {
+	// A candidate adopted with its workspace already made keeps it. Making
+	// a second one would hand the candidate an empty tree and throw away
+	// the work its own run had already paid for.
+	if c.provision != state.ProvisionOK && !r.makeWorkspace(ctx, c, out) {
 		return
 	}
 	r.resume(ctx, c, out)
@@ -502,14 +507,15 @@ type candidateClaim struct {
 	workspace belay.Workspace
 }
 
-// claimFresh writes one candidate's run directory: its blackboard, its copy
-// of the plan, and its manifest last.
+// claim makes sure spec has a run directory, either by writing one or by
+// adopting the one a previous attempt of the fanout node left, and returns
+// what it found.
 //
-// The manifest is written LAST, the rule createRun follows and for the same
-// reason: a directory without one is a torn claim and never a run, so the
-// window a crash can land in leaves debris that is recognisable rather than
-// a half-built run that looks finished.
-func (r *candidateRunner) claimFresh(parent state.Manifest, spec CandidateSpec) (*candidateClaim, error) {
+// Adopt-or-create is what makes the parent's resume correct. Ids are derived
+// from the index alone, so the directory a resume looks for is the one the
+// crashed attempt made, and a candidate is never started a second time
+// beside the one that is already there with money spent in it.
+func (r *candidateRunner) claim(parent state.Manifest, spec CandidateSpec) (*candidateClaim, error) {
 	layout, err := state.NewCandidateRunLayout(r.parent.store.Layout(), spec.ID)
 	if err != nil {
 		return nil, fmt.Errorf("graph: candidate %q: %w", spec.ID, err)
@@ -518,7 +524,54 @@ func (r *candidateRunner) claimFresh(parent state.Manifest, spec CandidateSpec) 
 	if err != nil {
 		return nil, fmt.Errorf("graph: locate candidate %q under its parent: %w", spec.ID, err)
 	}
+	runDir := filepath.ToSlash(rel)
 
+	switch _, err := os.Stat(layout.ManifestPath()); {
+	case err == nil:
+		return r.adopt(spec, layout, runDir)
+	case !errors.Is(err, fs.ErrNotExist):
+		return nil, fmt.Errorf("graph: inspect the manifest of candidate %q: %w", spec.ID, err)
+	}
+	return r.claimFresh(parent, spec, layout, runDir)
+}
+
+// adopt takes over the run directory a previous attempt of the fanout node
+// left, rather than starting the candidate a second time beside it.
+//
+// Nothing in the directory is rewritten. The blackboard holds what that
+// candidate reached, the journal is what its end state is read from and what
+// its own dispatcher heals, and the plan is part of the record of what it
+// worked from.
+func (r *candidateRunner) adopt(spec CandidateSpec, layout state.Layout, runDir string) (*candidateClaim, error) {
+	man, err := state.LoadManifest(layout.ManifestPath())
+	if err != nil {
+		return nil, fmt.Errorf("graph: read the manifest of candidate %q: %w", spec.ID, err)
+	}
+	if man.Candidate == nil {
+		return nil, fmt.Errorf("%w: %s holds a manifest that is not a candidate run's",
+			ErrCandidateRunCorrupt, layout.RunDir())
+	}
+
+	r.parent.logger.Info("belay/graph: adopted a candidate run a previous attempt left",
+		slog.String("candidate", spec.ID), slog.String("provision", string(man.Candidate.Provision)))
+	return &candidateClaim{
+		spec: spec, layout: layout, man: man, runDir: runDir,
+		envelope:  man.Candidate.Envelope,
+		provision: man.Candidate.Provision,
+		workspace: man.Candidate.Workspace,
+	}, nil
+}
+
+// claimFresh writes one candidate's run directory: its blackboard, its copy
+// of the plan, and its manifest last.
+//
+// The manifest is written LAST, the rule createRun follows and for the same
+// reason: a directory without one is a torn claim and never a run, so the
+// window a crash can land in leaves debris that is recognisable rather than
+// a half-built run that looks finished.
+func (r *candidateRunner) claimFresh(
+	parent state.Manifest, spec CandidateSpec, layout state.Layout, runDir string,
+) (*candidateClaim, error) {
 	if err := os.MkdirAll(layout.RunDir(), 0o750); err != nil {
 		return nil, fmt.Errorf("graph: create the run directory of candidate %q: %w", spec.ID, err)
 	}
@@ -550,8 +603,7 @@ func (r *candidateRunner) claimFresh(parent state.Manifest, spec CandidateSpec) 
 	r.parent.logger.Info("belay/graph: claimed a candidate run",
 		slog.String("candidate", spec.ID), slog.Float64("envelope_usd", spec.Envelope.LimitUSD))
 	return &candidateClaim{
-		spec: spec, layout: layout, man: man,
-		runDir: filepath.ToSlash(rel), envelope: spec.Envelope,
+		spec: spec, layout: layout, man: man, runDir: runDir, envelope: spec.Envelope,
 	}, nil
 }
 

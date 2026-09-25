@@ -846,3 +846,226 @@ func TestACandidateThatCannotBeClaimedStopsTheFanout(t *testing.T) {
 		t.Errorf("the file in cand-03's place reads %q (err %v), want it untouched", data, err)
 	}
 }
+
+// seeded describes the candidate run directory a previous attempt of the
+// fanout node left behind, so a test can start from the disk a crash
+// produced rather than from one this code wrote.
+type seeded struct {
+	id        string
+	index     int
+	provision state.Provision
+	note      string
+	envelope  state.Envelope
+	// status is what the manifest says, which after a kill between the run
+	// marker and SaveManifest may not be what the journal says.
+	status  state.RunStatus
+	step    int
+	records []journal.Record
+	// blackboard edits the state.json this candidate had already reached.
+	blackboard func(*state.State)
+}
+
+// seedCandidate writes one candidate run directory as a previous attempt
+// would have left it.
+func seedCandidate(t *testing.T, h *harness, iso *fakeIsolator, s seeded) state.Layout {
+	t.Helper()
+	l := candidateLayout(t, h, s.id)
+	if err := os.MkdirAll(l.RunDir(), 0o750); err != nil {
+		t.Fatalf("MkdirAll(%s): %v", l.RunDir(), err)
+	}
+
+	st := state.NewState("ship it")
+	st.Plan = state.Plan{Path: planArtifact, Approved: true, Digest: "sha256:plan"}
+	if s.blackboard != nil {
+		s.blackboard(&st)
+	}
+	if err := state.SaveState(l.StatePath(), st); err != nil {
+		t.Fatalf("SaveState(%s): %v", s.id, err)
+	}
+
+	abs, err := l.ArtifactPath("plan.md")
+	if err != nil {
+		t.Fatalf("ArtifactPath: %v", err)
+	}
+	if err := os.MkdirAll(filepath.Dir(abs), 0o750); err != nil {
+		t.Fatalf("MkdirAll(artifacts): %v", err)
+	}
+	if err := os.WriteFile(abs, []byte("# plan\n\nship it\n"), 0o600); err != nil {
+		t.Fatalf("WriteFile(plan): %v", err)
+	}
+
+	if len(s.records) > 0 {
+		j, err := journal.Open(l.JournalPath())
+		if err != nil {
+			t.Fatalf("journal.Open(%s): %v", s.id, err)
+		}
+		for _, rec := range s.records {
+			if _, err := j.Append(rec); err != nil {
+				t.Fatalf("Append(%v) to %s: %v", rec.Event, s.id, err)
+			}
+		}
+		if err := j.Close(); err != nil {
+			t.Fatalf("journal.Close(%s): %v", s.id, err)
+		}
+	}
+
+	var ws belay.Workspace
+	if s.provision == state.ProvisionOK {
+		dir := filepath.Join(iso.root, s.id)
+		if err := os.MkdirAll(dir, 0o750); err != nil {
+			t.Fatalf("MkdirAll(workspace): %v", err)
+		}
+		ws = belay.Workspace{ID: s.id, Dir: dir, Ephemeral: true}
+	}
+
+	cfg := h.cfg
+	cfg.Budget.MaxUSD, cfg.Budget.MaxTokens = s.envelope.LimitUSD, s.envelope.LimitTokens
+	man := state.NewManifest(
+		time.Date(2026, 1, 1, 11, 0, 0, 0, time.UTC),
+		testRunID+"-"+s.id, h.layout.WorkspaceDir(), "ship it", cfg)
+	man.Status, man.Step = s.status, s.step
+	man.SetCandidate(state.CandidateRun{
+		ParentRunID: testRunID, ID: s.id, Index: s.index, Workspace: ws,
+		Provision: s.provision, ProvisionNote: s.note, Envelope: s.envelope,
+	})
+	if err := state.SaveManifest(l.ManifestPath(), man); err != nil {
+		t.Fatalf("SaveManifest(%s): %v", s.id, err)
+	}
+	return l
+}
+
+// oneEnvelope is the envelope every seeded candidate in these tests holds.
+var oneEnvelope = state.Envelope{LimitUSD: 1.00, LimitTokens: 1000}
+
+// TestTerminalCandidatesAreAdoptedAndInterruptedOnesResume is the resume the
+// whole slice exists for: the parent died with one candidate finished, one
+// failed and one inside a node. Adoption is what makes that recoverable —
+// the finished ones execute nothing and keep their own blackboards, and only
+// the interrupted one runs, from the node it died in.
+func TestTerminalCandidatesAreAdoptedAndInterruptedOnesResume(t *testing.T) {
+	h := newRun(t, budgetCfg(3.00, 0), "resume a half-finished fanout")
+	iso := newFakeIsolator(h.layout.CandidatesDir())
+
+	// cand-01 completed, and its blackboard holds what it achieved.
+	seedCandidate(t, h, iso, seeded{
+		id: "cand-01", index: 1, provision: state.ProvisionOK, envelope: oneEnvelope,
+		status: state.RunStatusCompleted, step: 1,
+		blackboard: func(st *state.State) { st.Test = state.Test{Total: 7, Passed: 7} },
+		records: []journal.Record{
+			{Event: journal.EventRunStarted},
+			{Event: journal.EventNodeStarted, Node: graph.NodeCode, Attempt: 1},
+			{Event: journal.EventNodeFinished, Node: graph.NodeCode, Attempt: 1,
+				Status: journal.StatusOK, Next: graph.End,
+				Usage: &journal.Usage{USD: 0.40}, Note: "cand-01 is done"},
+			{Event: journal.EventRunCompleted, Note: "cand-01 is done"},
+		},
+	})
+	// cand-02 failed, and a kill between the run marker and SaveManifest
+	// left its manifest still saying "running".
+	seedCandidate(t, h, iso, seeded{
+		id: "cand-02", index: 2, provision: state.ProvisionOK, envelope: oneEnvelope,
+		status: state.RunStatusRunning, step: 1,
+		records: []journal.Record{
+			{Event: journal.EventRunStarted},
+			{Event: journal.EventNodeStarted, Node: graph.NodeTest, Attempt: 1},
+			{Event: journal.EventNodeFinished, Node: graph.NodeTest, Attempt: 1,
+				Status: journal.StatusFailed, Usage: &journal.Usage{USD: 0.30}, Note: "the fix loop gave up"},
+			{Event: journal.EventRunFailed, Note: "the fix loop gave up"},
+		},
+	})
+	// cand-03 was inside test when the process died.
+	seedCandidate(t, h, iso, seeded{
+		id: "cand-03", index: 3, provision: state.ProvisionOK, envelope: oneEnvelope,
+		status: state.RunStatusRunning, step: 1,
+		records: []journal.Record{
+			{Event: journal.EventRunStarted},
+			{Event: journal.EventNodeStarted, Node: graph.NodeCode, Attempt: 1},
+			{Event: journal.EventNodeFinished, Node: graph.NodeCode, Attempt: 1,
+				Status: journal.StatusOK, Next: graph.NodeTest, Usage: &journal.Usage{USD: 0.20}},
+			{Event: journal.EventNodeStarted, Node: graph.NodeTest, Attempt: 1},
+		},
+	})
+
+	code := newCandidateNode(graph.NodeCode, finishes(0.25))
+	var mu sync.Mutex
+	attempts := map[string]int{}
+	testNode := newCandidateNode(graph.NodeTest, func(_ context.Context, id string, rc *graph.RunContext) (graph.Result, error) {
+		mu.Lock()
+		attempts[id] = rc.Attempt
+		mu.Unlock()
+		return Result{
+			Next: graph.End, Status: journal.StatusOK,
+			Patch: state.Patch{Test: &state.Test{Total: 3, Passed: 3}},
+			Note:  id + " passed on the re-run",
+		}, nil
+	})
+
+	node := &runsCandidates{specs: poolSpecs(h, 3)}
+	if _, err := h.poolDispatcher(t, pool{
+		registry: candidateRegistry(t, code, testNode), isolator: iso, concurrency: 3,
+	}, node).Run(context.Background()); err != nil {
+		t.Fatalf("Run() error = %v, want nil", err)
+	}
+	if node.err != nil {
+		t.Fatalf("CandidateRuns.Run() error = %v, want nil", node.err)
+	}
+
+	// Nothing is provisioned twice: every candidate already had a workspace.
+	for _, id := range []string{"cand-01", "cand-02", "cand-03"} {
+		if iso.creates(id) != 0 {
+			t.Errorf("%s had its workspace made again (%d times); it was already provisioned", id, iso.creates(id))
+		}
+	}
+	// A terminal candidate executes nothing at all.
+	for _, id := range []string{"cand-01", "cand-02"} {
+		if code.ran(id)+testNode.ran(id) != 0 {
+			t.Errorf("%s executed %d nodes, want 0: it had already ended", id, code.ran(id)+testNode.ran(id))
+		}
+	}
+	// The interrupted one re-runs only the node it died in, at the next
+	// attempt, and never an earlier one.
+	if code.ran("cand-03") != 0 {
+		t.Errorf("cand-03 re-ran code %d times; only the node its journal left open runs again", code.ran("cand-03"))
+	}
+	if testNode.ran("cand-03") != 1 || attempts["cand-03"] != 2 {
+		t.Errorf("cand-03 ran test %d times at attempt %d, want once at attempt 2",
+			testNode.ran("cand-03"), attempts["cand-03"])
+	}
+	healed := 0
+	for _, rec := range candidateRecords(t, h, "cand-03") {
+		if rec.Interrupted() {
+			healed++
+		}
+	}
+	if healed != 1 {
+		t.Errorf("cand-03's journal holds %d interrupted attempts, want exactly 1", healed)
+	}
+
+	// The end states are read from each candidate's own journal, and the
+	// blackboard a finished candidate reached is still its own.
+	want := []struct {
+		id     string
+		status state.RunStatus
+		total  int
+	}{
+		{"cand-01", state.RunStatusCompleted, 7},
+		{"cand-02", state.RunStatusFailed, 0},
+		{"cand-03", state.RunStatusCompleted, 3},
+	}
+	for i, w := range want {
+		o := node.outcomes[i]
+		if o.ID != w.id || o.Status != w.status {
+			t.Errorf("outcome %d = {%q, %v}, want {%q, %v}", i, o.ID, o.Status, w.id, w.status)
+		}
+		if o.State.Test.Total != w.total {
+			t.Errorf("%s State.Test.Total = %d, want %d: adoption must not wipe a candidate's blackboard",
+				w.id, o.State.Test.Total, w.total)
+		}
+		if o.Err != nil {
+			t.Errorf("%s outcome carries Err = %v, want nil", w.id, o.Err)
+		}
+	}
+	if got := node.outcomes[1].Spent.USD; !closeTo(got, 0.30) {
+		t.Errorf("cand-02 Spent.USD = %v, want 0.30 rebuilt from its own journal", got)
+	}
+}
