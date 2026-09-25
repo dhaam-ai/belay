@@ -311,11 +311,20 @@ func (r *candidateRunner) drive(ctx context.Context, claims []*candidateClaim, o
 // one takes a single candidate from wherever it is to wherever it can get,
 // on its own goroutine.
 func (r *candidateRunner) one(ctx context.Context, c *candidateClaim, out *CandidateOutcome) {
-	// A candidate adopted with its workspace already made keeps it. Making
-	// a second one would hand the candidate an empty tree and throw away
-	// the work its own run had already paid for.
-	if c.provision != state.ProvisionOK && !r.makeWorkspace(ctx, c, out) {
+	switch c.provision {
+	case state.ProvisionRefused:
+		// Durable, and reproduced from the manifest with no isolator call:
+		// the conditions that produced it are ones no resume changes.
+		out.Provision, out.Note = state.ProvisionRefused, c.note
 		return
+	case state.ProvisionOK:
+		// Adopted with its workspace already made. Making a second one
+		// would hand the candidate an empty tree and throw away the work
+		// its own run has already paid for.
+	default:
+		if !r.makeWorkspace(ctx, c, out) {
+			return
+		}
 	}
 	r.resume(ctx, c, out)
 }
@@ -332,6 +341,17 @@ func (r *candidateRunner) makeWorkspace(ctx context.Context, c *candidateClaim, 
 
 	ws, err := iso.Create(ctx, c.spec.Source, c.spec.ID)
 	switch {
+	case errors.Is(err, belay.ErrUnsupported):
+		// The isolator says this can never work here. pkg/belay defines
+		// exactly one marker for that and this is it: "well-formed, but
+		// this implementation cannot do it", as opposed to a source that
+		// is merely dirty right now, which a person can commit and resume.
+		// Nothing more specific is matched, because internal/graph has no
+		// build tag and both isolator packages are unix-only — and erring
+		// towards "retry on resume" loses a candidate to nothing worse
+		// than a pause somebody can see.
+		r.refuse(c, out, err)
+		return false
 	case err != nil:
 		out.Err = fmt.Errorf("graph: make a workspace for candidate %q: %w", c.spec.ID, err)
 		return false
@@ -352,6 +372,25 @@ func (r *candidateRunner) makeWorkspace(ctx context.Context, c *candidateClaim, 
 	c.workspace, c.provision = ws, state.ProvisionOK
 	out.Workspace, out.Provision = ws, state.ProvisionOK
 	return true
+}
+
+// refuse records a durable provisioning refusal in the candidate's own
+// manifest, so that every later adoption reproduces it without asking the
+// isolator again. A manifest it cannot write leaves the candidate claimed
+// and unprovisioned, which the next attempt retries — the safe direction.
+func (r *candidateRunner) refuse(c *candidateClaim, out *CandidateOutcome, cause error) {
+	note := r.parent.note(cause.Error())
+	block := *c.man.Candidate
+	block.Provision, block.ProvisionNote = state.ProvisionRefused, note
+	c.man.SetCandidate(block)
+	if err := state.SaveManifest(c.layout.ManifestPath(), c.man); err != nil {
+		out.Err = fmt.Errorf("graph: record the refusal of candidate %q: %w", c.spec.ID, err)
+		return
+	}
+	c.provision, c.note = state.ProvisionRefused, note
+	out.Provision, out.Note = state.ProvisionRefused, note
+	r.parent.logger.Warn("belay/graph: a candidate's workspace was refused for good",
+		slog.String("candidate", c.spec.ID), slog.String("reason", note))
 }
 
 // resume drives the candidate's own run to wherever it gets, then reads its
@@ -515,6 +554,9 @@ type candidateClaim struct {
 	envelope  state.Envelope
 	provision state.Provision
 	workspace belay.Workspace
+	// note is why a refused candidate was refused, as its manifest records
+	// it, so an adoption reports the same sentence the first attempt did.
+	note string
 }
 
 // claim makes sure spec has a run directory, either by writing one or by
@@ -618,6 +660,7 @@ func (r *candidateRunner) adopt(spec CandidateSpec, layout state.Layout, runDir 
 		envelope:  man.Candidate.Envelope,
 		provision: man.Candidate.Provision,
 		workspace: man.Candidate.Workspace,
+		note:      man.Candidate.ProvisionNote,
 	}, nil
 }
 

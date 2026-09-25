@@ -286,9 +286,15 @@ type runsCandidates struct {
 	specs    []graph.CandidateSpec
 	outcomes []graph.CandidateOutcome
 	err      error
-	// before runs just before the pool does, so a test can arrange the disk
-	// with the run already under way.
-	before func(rc *graph.RunContext)
+	// rounds is how many times to ask the pool for the same candidates,
+	// which is what a resume does: the second round finds on disk whatever
+	// the first left. Zero means once.
+	rounds int
+	// between runs before every round after the first, so a test can mend
+	// whatever made the first round fail.
+	between func(round int)
+	// results holds every round's outcomes; outcomes is the last one's.
+	results [][]graph.CandidateOutcome
 }
 
 func (*runsCandidates) Name() string { return graph.NodeFanout }
@@ -301,10 +307,16 @@ func (n *runsCandidates) Run(ctx context.Context, rc *graph.RunContext) (graph.R
 	if rc.CandidateRuns == nil {
 		return graph.Result{}, graph.ErrNoCandidateRunner
 	}
-	if n.before != nil {
-		n.before(rc)
+	for round := 1; round <= max(n.rounds, 1); round++ {
+		if round > 1 && n.between != nil {
+			n.between(round)
+		}
+		n.outcomes, n.err = rc.CandidateRuns.Run(ctx, n.specs)
+		n.results = append(n.results, n.outcomes)
+		if n.err != nil {
+			break
+		}
 	}
-	n.outcomes, n.err = rc.CandidateRuns.Run(ctx, n.specs)
 	return Result{Next: graph.End, Status: journal.StatusOK, Note: "candidates done"}, nil
 }
 
@@ -1197,6 +1209,125 @@ func TestATornClaimIsRemadeAndAnythingElseIsRefused(t *testing.T) {
 				t.Errorf("cand-01 ran = %v, want %v", ran, tt.wantRun)
 			}
 			check(t)
+		})
+	}
+}
+
+// TestADurableRefusalIsRecordedAndAMachineFaultIsRetried draws the one
+// distinction that decides whether a candidate can ever come back.
+//
+// An isolator saying "not here, not ever" (belay.ErrUnsupported) is written
+// into the candidate's own manifest and reproduced from it for good, without
+// the isolator being asked again. Anything else — a full disk, a lock, a
+// deadline — has nothing durable written about it at all, so the candidate
+// stays claimed and unprovisioned and the next attempt tries exactly that
+// provisioning again. Making a transient fault permanent would lose a
+// candidate, and money, to a disk that was full for a minute.
+func TestADurableRefusalIsRecordedAndAMachineFaultIsRetried(t *testing.T) {
+	unsupported := fmt.Errorf("%w: the source is not inside this repository", belay.ErrUnsupported)
+	diskFull := errors.New("write: no space left on device")
+
+	tests := []struct {
+		name string
+		// cause is what Create returns for cand-02 in the first round.
+		cause error
+		// durable says the refusal is recorded and never retried.
+		durable bool
+	}{
+		{name: "an isolator that can never work here is recorded for good", cause: unsupported, durable: true},
+		{name: "a machine fault records nothing and is retried", cause: diskFull},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			h := newRun(t, budgetCfg(3.00, 0), "one candidate cannot be given a workspace")
+			iso := newFakeIsolator(h.layout.CandidatesDir())
+			iso.fail["cand-02"] = tt.cause
+			code := newCandidateNode(graph.NodeCode, finishes(0.25))
+			node := &runsCandidates{
+				specs: poolSpecs(h, 3), rounds: 2,
+				// A durable refusal must survive a mended isolator; a
+				// machine fault must be retried against it.
+				between: func(int) {
+					iso.mu.Lock()
+					defer iso.mu.Unlock()
+					delete(iso.fail, "cand-02")
+				},
+			}
+
+			if _, err := h.poolDispatcher(t, pool{
+				registry: candidateRegistry(t, code), isolator: iso, concurrency: 3,
+			}, node).Run(context.Background()); err != nil {
+				t.Fatalf("Run() error = %v, want nil", err)
+			}
+			if len(node.results) != 2 {
+				t.Fatalf("the pool was asked %d times, want 2", len(node.results))
+			}
+
+			first, second := node.results[0][1], node.results[1][1]
+			man := candidateManifest(t, h, "cand-02")
+			if man.Candidate == nil {
+				t.Fatal("cand-02 has no candidate block")
+			}
+
+			if tt.durable {
+				if first.Provision != state.ProvisionRefused || first.Err != nil {
+					t.Errorf("first round cand-02 = {%q, err %v}, want a durable refusal", first.Provision, first.Err)
+				}
+				if man.Candidate.Provision != state.ProvisionRefused || man.Candidate.ProvisionNote == "" {
+					t.Errorf("cand-02 manifest records {%q, %q}, want the refusal and its reason",
+						man.Candidate.Provision, man.Candidate.ProvisionNote)
+				}
+				if !strings.Contains(first.Note, "not inside this repository") {
+					t.Errorf("cand-02 Note = %q, want the isolator's reason", first.Note)
+				}
+				if second.Provision != state.ProvisionRefused || second.Note != first.Note {
+					t.Errorf("second round cand-02 = {%q, %q}, want the same refusal reproduced",
+						second.Provision, second.Note)
+				}
+				if iso.creates("cand-02") != 1 {
+					t.Errorf("the isolator was asked for cand-02's workspace %d times, want 1: "+
+						"a refusal is reproduced from the manifest, never asked again", iso.creates("cand-02"))
+				}
+				if code.ran("cand-02") != 0 {
+					t.Errorf("cand-02 ran %d nodes, want 0", code.ran("cand-02"))
+				}
+			} else {
+				if first.Err == nil || first.Provision != state.ProvisionPending {
+					t.Errorf("first round cand-02 = {%q, err %v}, want a fault and nothing durable",
+						first.Provision, first.Err)
+				}
+				if man.Candidate.Provision != state.ProvisionOK {
+					t.Errorf("cand-02 manifest records %q after the retry, want %q",
+						man.Candidate.Provision, state.ProvisionOK)
+				}
+				if second.Err != nil || second.Status != state.RunStatusCompleted {
+					t.Errorf("second round cand-02 = {%v, err %v}, want it completed on the retry",
+						second.Status, second.Err)
+				}
+				if iso.creates("cand-02") != 2 {
+					t.Errorf("the isolator was asked for cand-02's workspace %d times, want 2: "+
+						"exactly that provisioning is retried", iso.creates("cand-02"))
+				}
+				if code.ran("cand-02") != 1 {
+					t.Errorf("cand-02 ran %d nodes, want 1", code.ran("cand-02"))
+				}
+			}
+
+			// Its siblings ended durably in the first round either way, and
+			// the second round adopts them without running anything again.
+			for _, i := range []int{0, 2} {
+				id := node.results[0][i].ID
+				if node.results[0][i].Status != state.RunStatusCompleted {
+					t.Errorf("%s = %v in the first round, want completed", id, node.results[0][i].Status)
+				}
+				if code.ran(id) != 1 {
+					t.Errorf("%s ran %d nodes across both rounds, want 1", id, code.ran(id))
+				}
+				if iso.creates(id) != 1 {
+					t.Errorf("%s had its workspace made %d times, want 1", id, iso.creates(id))
+				}
+			}
 		})
 	}
 }
