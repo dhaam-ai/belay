@@ -3,9 +3,14 @@ package graph_test
 import (
 	"context"
 	"errors"
+	"fmt"
+	"os"
+	"path/filepath"
 	"reflect"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 
 	"github.com/dhaam-ai/belay/internal/graph"
 	"github.com/dhaam-ai/belay/internal/journal"
@@ -195,6 +200,376 @@ func TestCandidateRunSentinelsAreDistinct(t *testing.T) {
 	for _, err := range []error{graph.ErrNoCandidateRunner, graph.ErrCandidateRunCorrupt} {
 		if !strings.HasPrefix(err.Error(), "graph: ") {
 			t.Errorf("%v does not name its package; every sentinel in this package does", err)
+		}
+	}
+}
+
+// ---------------------------------------------------------------------------
+// The pool itself: a real parent run, real candidate runs on disk.
+//
+// Everything below drives graph.Dispatcher's own candidate runner rather than
+// a fake, because what these tests are about is the durable shape it leaves
+// behind — one run directory, one journal and one manifest per candidate —
+// which no fake can stand in for.
+// ---------------------------------------------------------------------------
+
+// planArtifact is the name the seed blackboard's plan is filed under, and so
+// the name a candidate's code node reads it back by.
+const planArtifact = "artifacts/plan.md"
+
+// candidateNode is the one node a test's candidate registry holds. One
+// instance serves every candidate goroutine, so it looks up what to do by
+// the candidate whose run is executing it, and counts its executions under
+// a mutex.
+type candidateNode struct {
+	name string
+	act  func(ctx context.Context, id string, rc *graph.RunContext) (graph.Result, error)
+
+	mu    sync.Mutex
+	calls map[string]int
+}
+
+func newCandidateNode(
+	name string, act func(ctx context.Context, id string, rc *graph.RunContext) (graph.Result, error),
+) *candidateNode {
+	return &candidateNode{name: name, act: act, calls: map[string]int{}}
+}
+
+func (n *candidateNode) Name() string { return n.name }
+
+func (n *candidateNode) Run(ctx context.Context, rc *graph.RunContext) (graph.Result, error) {
+	// A candidate run's Layout is rooted at candidate-runs/<id>, so its
+	// RunID is the bare candidate id — which is how one node instance tells
+	// the goroutines apart.
+	id := rc.Layout.RunID()
+	n.mu.Lock()
+	n.calls[id]++
+	n.mu.Unlock()
+	return n.act(ctx, id, rc)
+}
+
+// ran reports how many times this node executed for one candidate.
+func (n *candidateNode) ran(id string) int {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	return n.calls[id]
+}
+
+// finishes is the commonest candidate node: it records a test result and
+// ends the candidate's run.
+func finishes(usd float64) func(context.Context, string, *graph.RunContext) (graph.Result, error) {
+	return func(_ context.Context, id string, _ *graph.RunContext) (graph.Result, error) {
+		return Result{
+			Next: graph.End, Status: journal.StatusOK,
+			Patch: state.Patch{Test: &state.Test{Total: 2, Passed: 2}},
+			Usage: belay.Usage{USD: usd, InputTokens: 100, OutputTokens: 20},
+			Note:  id + " finished its work",
+		}, nil
+	}
+}
+
+// candidateRegistry is the inner graph a candidate run is driven over. The
+// real one is code → write → test → fix → review; a test registers only the
+// nodes the run it scripts walks.
+func candidateRegistry(t *testing.T, nodes ...graph.Node) *graph.Registry {
+	t.Helper()
+	reg := graph.NewRegistry()
+	reg.MustRegister(nodes...)
+	return reg
+}
+
+// runsCandidates is the supervising node a pool is reached through: the only
+// way any node ever reaches one is RunContext.CandidateRuns.
+type runsCandidates struct {
+	specs    []graph.CandidateSpec
+	outcomes []graph.CandidateOutcome
+	err      error
+	// before runs just before the pool does, so a test can arrange the disk
+	// with the run already under way.
+	before func(rc *graph.RunContext)
+}
+
+func (*runsCandidates) Name() string { return graph.NodeFanout }
+
+// SupervisesCandidates exempts this node from graph.node_timeout, as the
+// real fanout node is exempt.
+func (*runsCandidates) SupervisesCandidates() {}
+
+func (n *runsCandidates) Run(ctx context.Context, rc *graph.RunContext) (graph.Result, error) {
+	if rc.CandidateRuns == nil {
+		return graph.Result{}, graph.ErrNoCandidateRunner
+	}
+	if n.before != nil {
+		n.before(rc)
+	}
+	n.outcomes, n.err = rc.CandidateRuns.Run(ctx, n.specs)
+	return Result{Next: graph.End, Status: journal.StatusOK, Note: "candidates done"}, nil
+}
+
+// fakeIsolator makes a directory per candidate under the parent run's
+// candidates/ root, which is where the CLI roots both real isolators.
+type fakeIsolator struct {
+	root string
+
+	mu        sync.Mutex
+	created   []string
+	reclaimed []string
+	// order records every Create and Reclaim in the order they happened,
+	// which is what pins "reclaim strictly before create".
+	order []string
+	// fail scripts what Create returns for one candidate id, and
+	// reclaimFail what Reclaim returns.
+	fail        map[string]error
+	reclaimFail map[string]error
+	// emptyDir makes Create succeed but hand back a Workspace with no
+	// directory, which no caller can work in.
+	emptyDir map[string]bool
+	// block holds Create until the channel for that id is closed.
+	block map[string]chan struct{}
+}
+
+func newFakeIsolator(root string) *fakeIsolator {
+	return &fakeIsolator{
+		root: root, fail: map[string]error{}, reclaimFail: map[string]error{},
+		emptyDir: map[string]bool{}, block: map[string]chan struct{}{},
+	}
+}
+
+func (f *fakeIsolator) Create(ctx context.Context, _, id string) (belay.Workspace, error) {
+	f.mu.Lock()
+	f.created = append(f.created, id)
+	f.order = append(f.order, "create "+id)
+	err, failing := f.fail[id]
+	empty := f.emptyDir[id]
+	gate := f.block[id]
+	f.mu.Unlock()
+
+	if gate != nil {
+		select {
+		case <-gate:
+		case <-ctx.Done():
+			return belay.Workspace{}, ctx.Err()
+		}
+	}
+	if failing {
+		return belay.Workspace{}, err
+	}
+	if empty {
+		return belay.Workspace{ID: id, Ephemeral: true}, nil
+	}
+	dir := filepath.Join(f.root, id)
+	if err := os.MkdirAll(dir, 0o750); err != nil {
+		return belay.Workspace{}, err
+	}
+	return belay.Workspace{ID: id, Dir: dir, Ephemeral: true}, nil
+}
+
+func (f *fakeIsolator) Destroy(context.Context, belay.Workspace) error { return nil }
+
+// creates reports how many times Create was called for one candidate.
+func (f *fakeIsolator) creates(id string) int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	n := 0
+	for _, seen := range f.created {
+		if seen == id {
+			n++
+		}
+	}
+	return n
+}
+
+// calls returns every Create and Reclaim in the order they happened, as
+// "create cand-01" / "reclaim cand-01", so a test can assert the order of
+// the two rather than only that both happened.
+func (f *fakeIsolator) calls() []string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]string(nil), f.order...)
+}
+
+// reclaimingIsolator is a fakeIsolator that also implements graph.Reclaimer,
+// which is the optional, consumer-side interface both real isolators satisfy
+// structurally.
+type reclaimingIsolator struct{ *fakeIsolator }
+
+func (r reclaimingIsolator) Reclaim(_ context.Context, id string) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.reclaimed = append(r.reclaimed, id)
+	r.order = append(r.order, "reclaim "+id)
+	return r.reclaimFail[id]
+}
+
+// pool is how a test wires the parent dispatcher that owns a candidate
+// runner. Every field mirrors one graph.Options field.
+type pool struct {
+	registry *graph.Registry
+	isolator belay.Isolator
+	agentFor func(string) belay.AgentBackend
+}
+
+// poolDispatcher builds the parent dispatcher for a run whose fanout node
+// reaches a real candidate runner.
+func (h *harness) poolDispatcher(t *testing.T, p pool, nodes ...graph.Node) *graph.Dispatcher {
+	t.Helper()
+	reg := graph.NewRegistry()
+	reg.MustRegister(nodes...)
+	d, err := graph.NewDispatcher(graph.Options{
+		Store: h.store, Registry: reg, Config: h.cfg,
+		// The parent run starts at its fanout node: the plan and the
+		// approval that come before it in the real graph have nothing to
+		// do with what a pool does.
+		Entry:             graph.NodeFanout,
+		Now:               func() time.Time { return time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC) },
+		Isolator:          p.isolator,
+		CandidateRegistry: p.registry,
+		CandidateAgent:    p.agentFor,
+	})
+	if err != nil {
+		t.Fatalf("NewDispatcher() error = %v", err)
+	}
+	return d
+}
+
+// poolSpecs is what a fanout node would decide for n candidates of the run
+// h describes: stable ids, equal envelopes, and the goal and plan alone to
+// work from.
+func poolSpecs(h *harness, n int) []graph.CandidateSpec {
+	parent := state.NewState("ship it")
+	parent.Plan = state.Plan{Path: planArtifact, Approved: true, Digest: "sha256:plan"}
+	specs := make([]graph.CandidateSpec, 0, n)
+	for i := 1; i <= n; i++ {
+		specs = append(specs, graph.CandidateSpec{
+			ID: fmt.Sprintf("cand-%02d", i), Index: i,
+			Source:   h.layout.WorkspaceDir(),
+			Envelope: state.Envelope{LimitUSD: 1.00, LimitTokens: 1000},
+			Seed:     state.SeedCandidateState(parent),
+			Plan:     []byte("# plan\n\nship it\n"),
+		})
+	}
+	return specs
+}
+
+// candidateLayout is one candidate run's Layout under the parent h owns.
+func candidateLayout(t *testing.T, h *harness, id string) state.Layout {
+	t.Helper()
+	l, err := state.NewCandidateRunLayout(h.layout, id)
+	if err != nil {
+		t.Fatalf("NewCandidateRunLayout(%q) error = %v", id, err)
+	}
+	return l
+}
+
+// candidateRecords reads one candidate's own journal, without healing it:
+// journal.Open rewrites a torn tail, and a test asserting what a crash left
+// behind must not be the thing that repairs it.
+func candidateRecords(t *testing.T, h *harness, id string) []journal.Record {
+	t.Helper()
+	res, err := journal.ReadFile(candidateLayout(t, h, id).JournalPath())
+	if err != nil {
+		t.Fatalf("ReadFile(%s journal) error = %v", id, err)
+	}
+	return res.Records
+}
+
+// candidateManifest reads one candidate run's own manifest.
+func candidateManifest(t *testing.T, h *harness, id string) state.Manifest {
+	t.Helper()
+	m, err := state.LoadManifest(candidateLayout(t, h, id).ManifestPath())
+	if err != nil {
+		t.Fatalf("LoadManifest(%s) error = %v", id, err)
+	}
+	return m
+}
+
+// TestCandidateRunnerGivesEachCandidateARunOfItsOwn is the shape the whole
+// slice rests on: a candidate is a full run, with its own directory,
+// journal, blackboard, manifest and envelope, driven over the inner graph
+// from code, in the workspace its isolator made.
+func TestCandidateRunnerGivesEachCandidateARunOfItsOwn(t *testing.T) {
+	h := newRun(t, budgetCfg(3.00, 0), "ship it")
+	iso := newFakeIsolator(h.layout.CandidatesDir())
+	code := newCandidateNode(graph.NodeCode, finishes(0.25))
+	node := &runsCandidates{specs: poolSpecs(h, 2)}
+
+	out, err := h.poolDispatcher(t, pool{registry: candidateRegistry(t, code), isolator: iso}, node).
+		Run(context.Background())
+	if err != nil {
+		t.Fatalf("Run() error = %v, want nil", err)
+	}
+	if out.Status != state.RunStatusCompleted {
+		t.Fatalf("parent Outcome.Status = %v, want completed (note %q)", out.Status, out.Note)
+	}
+	if node.err != nil {
+		t.Fatalf("CandidateRuns.Run() error = %v, want nil", node.err)
+	}
+	if len(node.outcomes) != 2 {
+		t.Fatalf("got %d outcomes, want 2: %+v", len(node.outcomes), node.outcomes)
+	}
+
+	for i, o := range node.outcomes {
+		id := fmt.Sprintf("cand-%02d", i+1)
+		if o.ID != id || o.Index != i+1 {
+			t.Errorf("outcome %d = {%q, %d}, want {%q, %d}", i, o.ID, o.Index, id, i+1)
+		}
+		if o.Err != nil {
+			t.Fatalf("%s outcome carries Err = %v, want nil", id, o.Err)
+		}
+		if o.Status != state.RunStatusCompleted {
+			t.Errorf("%s Status = %v, want completed", id, o.Status)
+		}
+		if o.Provision != state.ProvisionOK {
+			t.Errorf("%s Provision = %q, want %q", id, o.Provision, state.ProvisionOK)
+		}
+		if want := "candidate-runs/" + id; o.RunDir != want {
+			t.Errorf("%s RunDir = %q, want %q", id, o.RunDir, want)
+		}
+		if o.State.Test.Total != 2 || o.State.Test.Passed != 2 {
+			t.Errorf("%s State.Test = %+v, want the candidate's own blackboard", id, o.State.Test)
+		}
+		if !closeTo(o.Spent.USD, 0.25) {
+			t.Errorf("%s Spent.USD = %v, want 0.25 rebuilt from its own journal", id, o.Spent.USD)
+		}
+		if o.Steps != 1 {
+			t.Errorf("%s Steps = %d, want 1", id, o.Steps)
+		}
+		if o.Envelope != (state.Envelope{LimitUSD: 1.00, LimitTokens: 1000}) {
+			t.Errorf("%s Envelope = %+v, want the one it was claimed with", id, o.Envelope)
+		}
+		if o.Workspace.Dir != filepath.Join(iso.root, id) || !o.Workspace.Ephemeral {
+			t.Errorf("%s Workspace = %+v, want the one the isolator made", id, o.Workspace)
+		}
+		if o.Note == "" {
+			t.Errorf("%s Note is empty; a reader would have to open the journal", id)
+		}
+		if code.ran(id) != 1 {
+			t.Errorf("%s ran its code node %d times, want 1", id, code.ran(id))
+		}
+
+		// Its own run directory, holding everything a run is made of.
+		l := candidateLayout(t, h, id)
+		for _, p := range []string{l.ManifestPath(), l.StatePath(), l.JournalPath(),
+			filepath.Join(l.ArtifactsDir(), "plan.md")} {
+			if _, err := os.Stat(p); err != nil {
+				t.Errorf("%s is missing from %s: %v", filepath.Base(p), id, err)
+			}
+		}
+		man := candidateManifest(t, h, id)
+		if want := testRunID + "-" + id; man.RunID != want {
+			t.Errorf("%s manifest RunID = %q, want %q", id, man.RunID, want)
+		}
+		if man.Candidate == nil {
+			t.Fatalf("%s manifest has no candidate block", id)
+		}
+		if man.Candidate.ParentRunID != testRunID || man.Candidate.Index != i+1 {
+			t.Errorf("%s candidate block = %+v, want parent %q index %d", id, *man.Candidate, testRunID, i+1)
+		}
+		if man.Candidate.Envelope.LimitUSD != 1.00 || man.Candidate.Envelope.LimitTokens != 1000 {
+			t.Errorf("%s persisted envelope = %+v, want the claim's", id, man.Candidate.Envelope)
+		}
+		if man.Budget.LimitUSD != 1.00 {
+			t.Errorf("%s manifest budget ceiling = %v, want its envelope 1.00", id, man.Budget.LimitUSD)
 		}
 	}
 }

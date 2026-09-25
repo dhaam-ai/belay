@@ -155,6 +155,36 @@ type Options struct {
 	// re-run the entry node on every resume, paying again for work the
 	// journal says is done.
 	Entry string
+
+	// CandidateRegistry is the graph a fanout candidate's own run is
+	// driven over: code, write, test, fix and review, with no plan node,
+	// no approve gate and no fanout of its own.
+	//
+	// Setting it is what gives this run a candidate runner, which the
+	// dispatcher builds once and hands every node through
+	// RunContext.CandidateRuns. Nil leaves that field nil, and a node that
+	// needs it refuses with ErrNoCandidateRunner.
+	//
+	// It is a second registry rather than a subset of Registry because the
+	// two graphs are different graphs: the parent's still has to hold code
+	// and the rest off-route, so that a run created before fanout was
+	// reachable and resumed afterwards still finds the node its journal
+	// names.
+	CandidateRegistry *Registry
+
+	// CandidateAgent is the backend one candidate run uses, by id. Nil
+	// gives every candidate the shared Agent, which is the right answer
+	// for every real backend: pkg/belay already requires Invoke to be safe
+	// for concurrent use.
+	//
+	// It exists for the one backend that cannot be shared as it is. A
+	// replay cassette is keyed on a fingerprint of the request, and N
+	// candidates asking the same question with the same plan produce the
+	// same fingerprint, so an unscoped cassette hands whichever candidate
+	// asks first whichever answer was recorded first. The CLI passes a
+	// per-candidate scoped view; see internal/agent/replay.
+	CandidateAgent func(id string) belay.AgentBackend
+
 	// Logger receives the dispatcher's structured log. Defaults to
 	// slog.Default.
 	Logger *slog.Logger
@@ -382,6 +412,11 @@ type Dispatcher struct {
 	reviewer belay.Reviewer
 	isolator belay.Isolator
 	vcs      vcs.Repository
+
+	// candidates is nil unless Options.CandidateRegistry was set. It is
+	// held as the interface rather than as the implementation so that the
+	// nil a node checks for is a nil interface and not a typed nil.
+	candidates CandidateRunner
 }
 
 // NewDispatcher returns a Dispatcher for the run described by opts. It does not
@@ -430,6 +465,9 @@ func NewDispatcher(opts Options) (*Dispatcher, error) {
 	}
 	if d.redact == nil {
 		d.redact = func(s string) string { return s }
+	}
+	if opts.CandidateRegistry != nil {
+		d.candidates = newCandidateRunner(d, opts.CandidateRegistry, opts.CandidateAgent)
 	}
 	return d, nil
 }
@@ -1004,6 +1042,8 @@ func (d *Dispatcher) runContext(
 		Output:     man.Output,
 		ArchiveDir: man.ArchivedPlan.Dir,
 		VCS:        d.vcs,
+		// Nil for every run that does not fan out; see Options.CandidateRegistry.
+		CandidateRuns: d.candidates,
 	}
 }
 
