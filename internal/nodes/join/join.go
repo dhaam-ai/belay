@@ -15,9 +15,15 @@
 // The three rules live in select.go as an explicit table, one row per
 // fanout.select value, each carrying the sentence that describes it. Read
 // Strategies to see them, and Select for the invariants every row inherits:
-// only candidates whose tests passed are eligible, candidates are offered in
+// only eligible candidates are offered to a rule, candidates are offered in
 // the order fanout recorded them, and the outcome is deterministic for a
 // given input.
+//
+// Eligible means the candidate's tests passed AND its own candidate run
+// completed — see eligible, which argues the second half. It is one
+// predicate rather than a term inside each row, so no rule can opt out of
+// it and the next thing that disqualifies a candidate is added in one
+// place.
 //
 // Determinism is not a nicety here. The dispatcher re-runs a node whose
 // start has no matching finish, which is exactly how a crash inside join
@@ -28,10 +34,10 @@
 // reported, and no best-of-N whose result cannot be reproduced can be
 // audited.
 //
-// # "No candidate passed" is a result, not an error
+// # "No candidate was eligible" is a result, not an error
 //
-// When every candidate's tests failed, Run returns journal.StatusFailed with
-// a note saying so, and explicitly clears state.Winner. It does not pick the
+// When no candidate is eligible, Run returns journal.StatusFailed with a
+// note saying so, and explicitly clears state.Winner. It does not pick the
 // least-bad loser. N attempts that all failed is real, useful information
 // about the goal — most likely that the goal, the plan or the test suite is
 // the problem rather than any candidate — and naming the best of N failures
@@ -40,6 +46,13 @@
 // field untouched is deliberate too: state.Patch fields are absolute sets,
 // and a stale winner from an earlier attempt outliving a join that found
 // none would be a lie the blackboard told forever.
+//
+// The note distinguishes three runs, because a person acts on them very
+// differently: every candidate ran and failed its tests (the goal, the plan
+// or the test suite is wrong); no candidate ever completed a run (the
+// machine, the isolator or the budget stopped them, and nothing has been
+// learned about the code); and a mixture. Reporting the second as the first
+// would send someone to debug a test suite no candidate reached.
 //
 // # Promotion
 //
@@ -130,10 +143,24 @@ func New(opts ...Option) *Node {
 	return n
 }
 
-var _ graph.Node = (*Node)(nil)
+var (
+	_ graph.Node     = (*Node)(nil)
+	_ graph.Unpriced = (*Node)(nil)
+)
 
 // Name returns graph.NodeJoin.
 func (n *Node) Name() string { return graph.NodeJoin }
+
+// SpendsNothing exempts this node from the dispatcher's budget ceiling
+// check.
+//
+// It is not an exemption from the ceiling but the observation that the
+// ceiling has nothing to say about a node that cannot spend: join compares
+// numbers other nodes produced, calls no agent, and its Usage is zero by
+// construction. Checking before it would stop a fanout whose candidates
+// spent the ceiling from collecting the winner it had already selected and
+// paid for — money saved: none; work lost: all of it. See graph.Unpriced.
+func (n *Node) SpendsNothing() {}
 
 // Run selects the winning candidate and ends the run.
 //
@@ -164,10 +191,16 @@ func (n *Node) Run(ctx context.Context, rc *graph.RunContext) (graph.Result, err
 	return winner(log, outcome, n.onSelected), nil
 }
 
-// noWinner reports that every candidate failed.
+// noWinner reports that no candidate was eligible, and why.
+//
+// The why is the whole of this function. "No winner" covers three runs a
+// person would act on very differently — the goal or the test suite is
+// wrong; the machine could not run anything; some candidates got nowhere —
+// and reporting them identically tells two of the three something false.
 func noWinner(log *slog.Logger, outcome Outcome) graph.Result {
-	log.Warn("join: every candidate failed its tests, so this run has no winner",
+	log.Warn("join: no candidate was eligible, so this run has no winner",
 		"candidates", outcome.Total,
+		"completed", outcome.Completed,
 		"strategy", string(outcome.Strategy.Name),
 	)
 
@@ -177,8 +210,24 @@ func noWinner(log *slog.Logger, outcome Outcome) graph.Result {
 	return graph.Result{
 		Status: journal.StatusFailed,
 		Patch:  state.Patch{Winner: &none},
-		Note: fmt.Sprintf("no winner: all %d candidates failed their tests, so %s had nothing to choose between",
-			outcome.Total, outcome.Strategy.Name),
+		Note:   noWinnerNote(outcome),
+	}
+}
+
+// noWinnerNote says which of the three "no winner" runs this was.
+func noWinnerNote(o Outcome) string {
+	tail := fmt.Sprintf(", so %s had nothing to choose between", o.Strategy.Name)
+	switch {
+	case o.Completed == 0:
+		// Nothing ran, so nothing can be said about the code. Saying
+		// "failed their tests" here would send someone to debug a test
+		// suite no candidate reached.
+		return fmt.Sprintf("no winner: none of the %d candidates completed its run%s", o.Total, tail)
+	case o.Completed == o.Total:
+		return fmt.Sprintf("no winner: all %d candidates failed their tests%s", o.Total, tail)
+	default:
+		return fmt.Sprintf("no winner: of %d candidates, %d failed the tests and %d never completed%s",
+			o.Total, o.Completed, o.Total-o.Completed, tail)
 	}
 }
 

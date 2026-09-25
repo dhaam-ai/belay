@@ -449,3 +449,78 @@ func TestRunWithoutLogger(t *testing.T) {
 		t.Fatalf("Run() error = %v, want nil", err)
 	}
 }
+
+// "No winner" hides three very different runs, and a person acts on them
+// very differently: fix the goal or the test suite; free some disk and
+// resume; or look at why only some candidates got anywhere. Telling someone
+// "all 3 candidates failed their tests" when in fact none of them ever ran
+// is telling them something false about their code.
+func TestRunNoWinnerSaysWhyThereIsNone(t *testing.T) {
+	tests := []struct {
+		name       string
+		candidates []state.Candidate
+		wantNote   []string
+		wantAbsent []string
+	}{
+		{
+			name:       "every candidate ran and failed its tests",
+			candidates: []state.Candidate{ran("c1", false, 0, "completed"), ran("c2", false, 0, "completed")},
+			wantNote:   []string{"all 2 candidates failed their tests"},
+		},
+		{
+			name:       "a blackboard written before candidates really ran still reads as failed tests",
+			candidates: []state.Candidate{cand("c1", false, 0), cand("c2", false, 0)},
+			wantNote:   []string{"all 2 candidates failed their tests"},
+		},
+		{
+			name:       "no candidate ever completed a run",
+			candidates: []state.Candidate{ran("c1", false, 0, "error"), ran("c2", true, 0, "aborted")},
+			wantNote:   []string{"none of the 2 candidates completed its run"},
+			wantAbsent: []string{"failed their tests"},
+		},
+		{
+			name:       "a mixture names both halves",
+			candidates: []state.Candidate{ran("c1", false, 0, "completed"), ran("c2", true, 0, "error"), ran("c3", true, 0, "aborted")},
+			wantNote:   []string{"3 candidates", "1 failed the tests", "2 never completed"},
+			wantAbsent: []string{"all 3 candidates failed their tests"},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			rc := newRunContext(t, config.SelectFewestIssues, tt.candidates)
+
+			got, err := join.New().Run(context.Background(), rc)
+			if err != nil {
+				t.Fatalf("Run() error = %v, want nil: no winner is an outcome, not an error", err)
+			}
+			if got.Status != journal.StatusFailed {
+				t.Errorf("Run() Status = %v, want %v", got.Status, journal.StatusFailed)
+			}
+			if got.Patch.Winner == nil || *got.Patch.Winner != "" {
+				t.Errorf("Run() Patch.Winner = %v, want an explicitly cleared winner", got.Patch.Winner)
+			}
+			for _, want := range tt.wantNote {
+				if !strings.Contains(got.Note, want) {
+					t.Errorf("Run() Note = %q, want it to contain %q", got.Note, want)
+				}
+			}
+			for _, absent := range tt.wantAbsent {
+				if strings.Contains(got.Note, absent) {
+					t.Errorf("Run() Note = %q, want it NOT to claim %q", got.Note, absent)
+				}
+			}
+		})
+	}
+}
+
+// join stands between a winner the run has already paid for and its
+// delivery, and it cannot add a penny to the bill. Checking the ceiling
+// before it would stop a fanout whose candidates spent the ceiling from
+// collecting the winner it selected, which is the opposite of what ADR-0007
+// exists for.
+func TestJoinSpendsNothing(t *testing.T) {
+	if _, ok := any(join.New()).(graph.Unpriced); !ok {
+		t.Fatal("the join node does not implement graph.Unpriced, so a fanout that spent its ceiling could not collect its winner")
+	}
+}
