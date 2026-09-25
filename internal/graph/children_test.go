@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"sort"
 	"strings"
 	"sync"
 	"testing"
@@ -404,9 +405,10 @@ func (r reclaimingIsolator) Reclaim(_ context.Context, id string) error {
 // pool is how a test wires the parent dispatcher that owns a candidate
 // runner. Every field mirrors one graph.Options field.
 type pool struct {
-	registry *graph.Registry
-	isolator belay.Isolator
-	agentFor func(string) belay.AgentBackend
+	registry    *graph.Registry
+	isolator    belay.Isolator
+	concurrency int
+	agentFor    func(string) belay.AgentBackend
 }
 
 // poolDispatcher builds the parent dispatcher for a run whose fanout node
@@ -425,6 +427,7 @@ func (h *harness) poolDispatcher(t *testing.T, p pool, nodes ...graph.Node) *gra
 		Isolator:          p.isolator,
 		CandidateRegistry: p.registry,
 		CandidateAgent:    p.agentFor,
+		Concurrency:       p.concurrency,
 	})
 	if err != nil {
 		t.Fatalf("NewDispatcher() error = %v", err)
@@ -571,5 +574,167 @@ func TestCandidateRunnerGivesEachCandidateARunOfItsOwn(t *testing.T) {
 		if man.Budget.LimitUSD != 1.00 {
 			t.Errorf("%s manifest budget ceiling = %v, want its envelope 1.00", id, man.Budget.LimitUSD)
 		}
+	}
+}
+
+// startGate lets a test hold every candidate inside its node and release
+// them one at a time, so how many run together is something the test
+// observes rather than times.
+type startGate struct {
+	started chan string
+	done    chan string
+
+	mu      sync.Mutex
+	release map[string]chan struct{}
+	live    int
+	peak    int
+}
+
+func newStartGate(t *testing.T, ids ...string) *startGate {
+	g := &startGate{
+		started: make(chan string, len(ids)), done: make(chan string, len(ids)),
+		release: make(map[string]chan struct{}, len(ids)),
+	}
+	for _, id := range ids {
+		g.release[id] = make(chan struct{})
+	}
+	// However the test ends, nothing is left blocked inside a node.
+	t.Cleanup(func() {
+		g.mu.Lock()
+		defer g.mu.Unlock()
+		for _, ch := range g.release {
+			select {
+			case <-ch:
+			default:
+				close(ch)
+			}
+		}
+	})
+	return g
+}
+
+// hold is the candidate node's body: announce, wait to be let go, announce
+// again.
+func (g *startGate) hold(_ context.Context, id string, _ *graph.RunContext) (graph.Result, error) {
+	g.mu.Lock()
+	g.live++
+	if g.live > g.peak {
+		g.peak = g.live
+	}
+	ch := g.release[id]
+	g.mu.Unlock()
+
+	g.started <- id
+	<-ch
+
+	g.mu.Lock()
+	g.live--
+	g.mu.Unlock()
+	g.done <- id
+
+	return Result{
+		Next: graph.End, Status: journal.StatusOK,
+		Patch: state.Patch{Test: &state.Test{Total: 1, Passed: 1}},
+		Note:  id + " finished",
+	}, nil
+}
+
+// awaitStart waits for the next candidate to reach its node, and fails the
+// test rather than hanging when none does.
+func (g *startGate) awaitStart(t *testing.T) string {
+	t.Helper()
+	select {
+	case id := <-g.started:
+		return id
+	case <-time.After(10 * time.Second):
+		g.mu.Lock()
+		peak := g.peak
+		g.mu.Unlock()
+		t.Fatalf("no further candidate reached its node; at most %d ran at once", peak)
+		return ""
+	}
+}
+
+// let releases one candidate and waits for it to leave its node, so the
+// order candidates finish in is the test's to choose.
+func (g *startGate) let(t *testing.T, id string) {
+	t.Helper()
+	g.mu.Lock()
+	ch := g.release[id]
+	g.mu.Unlock()
+	close(ch)
+	select {
+	case <-g.done:
+	case <-time.After(10 * time.Second):
+		t.Fatalf("candidate %q never left its node after it was released", id)
+	}
+}
+
+// TestCandidateRunnerHonoursItsConcurrencyLimit: candidates run several at a
+// time, never more than the limit, and are admitted in index order — and an
+// outcome lands in its own slot however the goroutines happen to finish, so
+// what the node sees does not depend on which candidate was quickest.
+func TestCandidateRunnerHonoursItsConcurrencyLimit(t *testing.T) {
+	h := newRun(t, budgetCfg(5.00, 0), "five ways to ship it")
+	ids := []string{"cand-01", "cand-02", "cand-03", "cand-04", "cand-05"}
+	gate := newStartGate(t, ids...)
+	code := newCandidateNode(graph.NodeCode, gate.hold)
+	node := &runsCandidates{specs: poolSpecs(h, 5)}
+	d := h.poolDispatcher(t, pool{
+		registry: candidateRegistry(t, code), isolator: newFakeIsolator(h.layout.CandidatesDir()),
+		concurrency: 2,
+	}, node)
+
+	finished := make(chan struct{})
+	go func() {
+		defer close(finished)
+		if _, err := d.Run(context.Background()); err != nil {
+			t.Errorf("Run() error = %v, want nil", err)
+		}
+	}()
+
+	// Two at a time, in index order, each batch released highest id first
+	// so that the order they finish in is never the order of their slots.
+	var admitted, completed []string
+	for done := 0; done < len(ids); {
+		batch := []string{gate.awaitStart(t)}
+		if done+2 <= len(ids) {
+			batch = append(batch, gate.awaitStart(t))
+		}
+		sort.Strings(batch)
+		admitted = append(admitted, batch...)
+		for i := len(batch) - 1; i >= 0; i-- {
+			gate.let(t, batch[i])
+			completed = append(completed, batch[i])
+		}
+		done += len(batch)
+	}
+
+	select {
+	case <-finished:
+	case <-time.After(10 * time.Second):
+		t.Fatal("Run() never returned after every candidate finished")
+	}
+
+	if gate.peak != 2 {
+		t.Errorf("at most %d candidates ran at once, want exactly the limit of 2", gate.peak)
+	}
+	if !equalStrings(admitted, ids) {
+		t.Errorf("candidates were admitted as %v, want index order %v", admitted, ids)
+	}
+	if want := []string{"cand-02", "cand-01", "cand-04", "cand-03", "cand-05"}; !equalStrings(completed, want) {
+		t.Fatalf("candidates finished as %v, want %v; the test did not arrange what it meant to", completed, want)
+	}
+
+	var got []string
+	for _, o := range node.outcomes {
+		if o.Err != nil {
+			t.Fatalf("%s outcome carries Err = %v, want nil", o.ID, o.Err)
+		}
+		got = append(got, o.ID)
+	}
+	if !equalStrings(got, ids) {
+		t.Errorf("outcomes came back as %v, want them in index order %v although they finished as %v",
+			got, ids, completed)
 	}
 }

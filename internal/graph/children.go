@@ -9,6 +9,7 @@ import (
 	"path"
 	"path/filepath"
 	"strings"
+	"sync"
 
 	"github.com/dhaam-ai/belay/internal/config"
 	"github.com/dhaam-ai/belay/internal/journal"
@@ -199,9 +200,10 @@ const defaultPlanArtifact = "plan.md"
 // file forever after. Directory nesting makes that unreachable rather than
 // merely avoided.
 type candidateRunner struct {
-	parent   *Dispatcher
-	registry *Registry
-	agentFor func(id string) belay.AgentBackend
+	parent      *Dispatcher
+	registry    *Registry
+	agentFor    func(id string) belay.AgentBackend
+	concurrency int
 }
 
 // newCandidateRunner returns the runner NewDispatcher injects through
@@ -210,9 +212,9 @@ type candidateRunner struct {
 // wired from, and a field added to Options reaches candidates without a
 // second place remembering to pass it on.
 func newCandidateRunner(
-	parent *Dispatcher, registry *Registry, agentFor func(id string) belay.AgentBackend,
+	parent *Dispatcher, registry *Registry, agentFor func(id string) belay.AgentBackend, concurrency int,
 ) *candidateRunner {
-	return &candidateRunner{parent: parent, registry: registry, agentFor: agentFor}
+	return &candidateRunner{parent: parent, registry: registry, agentFor: agentFor, concurrency: concurrency}
 }
 
 // Run implements CandidateRunner.
@@ -226,6 +228,7 @@ func (r *candidateRunner) Run(ctx context.Context, specs []CandidateSpec) ([]Can
 		return outcomes, fmt.Errorf("graph: load the parent manifest before claiming candidates: %w", err)
 	}
 
+	claims := make([]*candidateClaim, len(specs))
 	for i, spec := range specs {
 		outcomes[i] = CandidateOutcome{ID: spec.ID, Index: spec.Index, Envelope: spec.Envelope}
 		c, err := r.claimFresh(parent, spec)
@@ -233,10 +236,57 @@ func (r *candidateRunner) Run(ctx context.Context, specs []CandidateSpec) ([]Can
 			outcomes[i].Err = err
 			continue
 		}
+		claims[i] = c
 		outcomes[i].RunDir = c.runDir
-		r.one(ctx, c, &outcomes[i])
 	}
+
+	r.drive(ctx, claims, outcomes)
 	return outcomes, nil
+}
+
+// drive runs the claimed candidates, at most concurrency of them at a time,
+// and returns once every goroutine it started has exited.
+//
+// The pool is a fixed set of workers pulling from one channel fed in index
+// order, rather than a goroutine per candidate waiting on a semaphore. Two
+// things follow from that shape, and both are the point of it: candidates
+// are admitted in index order, and a candidate that has not been admitted
+// has no goroutine of its own, so nothing about it has started.
+//
+// Each worker writes into outcomes[i], a slot no other goroutine touches, so
+// the result is in index order however the candidates finish and no lock is
+// needed to build it. Waiting for every worker before returning is what lets
+// a node act on the outcomes: no candidate can still be writing to a file
+// once Run has returned.
+func (r *candidateRunner) drive(ctx context.Context, claims []*candidateClaim, outcomes []CandidateOutcome) {
+	workers := min(max(r.concurrency, 1), len(claims))
+	next := make(chan int)
+
+	go func() {
+		defer close(next)
+		for i := range claims {
+			select {
+			case next <- i:
+			case <-ctx.Done():
+				return
+			}
+		}
+	}()
+
+	var wg sync.WaitGroup
+	for range workers {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for i := range next {
+				if claims[i] == nil {
+					continue
+				}
+				r.one(ctx, claims[i], &outcomes[i])
+			}
+		}()
+	}
+	wg.Wait()
 }
 
 // one takes a single candidate from wherever it is to wherever it can get.

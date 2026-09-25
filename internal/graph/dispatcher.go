@@ -185,6 +185,19 @@ type Options struct {
 	// per-candidate scoped view; see internal/agent/replay.
 	CandidateAgent func(id string) belay.AgentBackend
 
+	// Concurrency is how many candidate runs execute at the same time. It
+	// is clamped to at least one and at most the number of candidates, so
+	// zero — the value a caller that has not wired the setting yet passes
+	// — runs them one at a time, which is also what recording a cassette
+	// needs.
+	//
+	// It is deliberately not pinned in the manifest: lowering it on a
+	// resume is how a person backs off a rate limit. What that costs is
+	// that a duration measured under contention is a different number, so
+	// under a selection strategy that compares durations the winner can
+	// change.
+	Concurrency int
+
 	// Logger receives the dispatcher's structured log. Defaults to
 	// slog.Default.
 	Logger *slog.Logger
@@ -467,7 +480,7 @@ func NewDispatcher(opts Options) (*Dispatcher, error) {
 		d.redact = func(s string) string { return s }
 	}
 	if opts.CandidateRegistry != nil {
-		d.candidates = newCandidateRunner(d, opts.CandidateRegistry, opts.CandidateAgent)
+		d.candidates = newCandidateRunner(d, opts.CandidateRegistry, opts.CandidateAgent, opts.Concurrency)
 	}
 	return d, nil
 }
