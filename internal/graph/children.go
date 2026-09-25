@@ -188,6 +188,16 @@ type Reclaimer interface {
 // this package and not the other way round.
 const defaultPlanArtifact = "plan.md"
 
+// candidateRunEntries are the names a candidate run directory may hold. A
+// directory holding anything else is not one belay wrote, and the debris of
+// a torn claim is only ever removed when every name in it is one of these —
+// the alternative being that a directory somebody else put there is deleted
+// on the strength of a name collision.
+var candidateRunEntries = map[string]bool{
+	"manifest.json": true, "state.json": true, "journal.ndjson": true,
+	"artifacts": true, "snapshots": true, "nodes": true, "worktree": true,
+}
+
 // candidateRunner is the Dispatcher's CandidateRunner: it gives each
 // candidate a run of its own and reports how each one ended.
 //
@@ -526,13 +536,62 @@ func (r *candidateRunner) claim(parent state.Manifest, spec CandidateSpec) (*can
 	}
 	runDir := filepath.ToSlash(rel)
 
-	switch _, err := os.Stat(layout.ManifestPath()); {
-	case err == nil:
-		return r.adopt(spec, layout, runDir)
-	case !errors.Is(err, fs.ErrNotExist):
-		return nil, fmt.Errorf("graph: inspect the manifest of candidate %q: %w", spec.ID, err)
+	info, err := os.Lstat(layout.RunDir())
+	switch {
+	case errors.Is(err, fs.ErrNotExist):
+		return r.claimFresh(parent, spec, layout, runDir)
+	case err != nil:
+		return nil, fmt.Errorf("graph: inspect the run directory of candidate %q: %w", spec.ID, err)
+	case info.Mode()&fs.ModeSymlink != 0:
+		// Lstat, not Stat: a symlink pointing anywhere at all would
+		// otherwise have an agent's workspace written through it.
+		return nil, fmt.Errorf("%w: %s is a symlink", ErrCandidateRunCorrupt, layout.RunDir())
+	case !info.IsDir():
+		return nil, fmt.Errorf("%w: %s is not a directory", ErrCandidateRunCorrupt, layout.RunDir())
 	}
-	return r.claimFresh(parent, spec, layout, runDir)
+
+	if _, err := os.Stat(layout.ManifestPath()); err != nil {
+		if !errors.Is(err, fs.ErrNotExist) {
+			return nil, fmt.Errorf("graph: inspect the manifest of candidate %q: %w", spec.ID, err)
+		}
+		// No manifest, and a claim writes it last: this is the debris of a
+		// claim a crash cut short, so it is cleared and made again rather
+		// than written over. Whatever it holds was left mid-write, and a
+		// snapshot or an artifact from it would be read by the new run as
+		// if the new run had produced it.
+		if err := removeTornClaim(layout.RunDir()); err != nil {
+			return nil, err
+		}
+		return r.claimFresh(parent, spec, layout, runDir)
+	}
+	return r.adopt(spec, layout, runDir)
+}
+
+// removeTornClaim deletes the debris of a claim a crash cut short, having
+// first established that the directory holds nothing but the files a
+// candidate run is made of.
+//
+// The containment rule is deliberately narrow, and it is three checks deep.
+// state.NewCandidateRunLayout has already established that the path is one
+// safe segment under candidate-runs/; the caller has established that it is
+// a real directory and not a symlink; and this establishes that belay wrote
+// it, for which the names inside are the only evidence there is. Anything
+// else is ErrCandidateRunCorrupt and is left exactly where it is.
+func removeTornClaim(dir string) error {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return fmt.Errorf("graph: inspect the torn candidate run at %s: %w", dir, err)
+	}
+	for _, e := range entries {
+		if !candidateRunEntries[e.Name()] {
+			return fmt.Errorf("%w: %s holds %q, which no candidate run does",
+				ErrCandidateRunCorrupt, dir, e.Name())
+		}
+	}
+	if err := os.RemoveAll(dir); err != nil {
+		return fmt.Errorf("graph: remove the torn candidate run at %s: %w", dir, err)
+	}
+	return nil
 }
 
 // adopt takes over the run directory a previous attempt of the fanout node

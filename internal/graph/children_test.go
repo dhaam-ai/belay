@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -1067,5 +1068,135 @@ func TestTerminalCandidatesAreAdoptedAndInterruptedOnesResume(t *testing.T) {
 	}
 	if got := node.outcomes[1].Spent.USD; !closeTo(got, 0.30) {
 		t.Errorf("cand-02 Spent.USD = %v, want 0.30 rebuilt from its own journal", got)
+	}
+}
+
+// TestATornClaimIsRemadeAndAnythingElseIsRefused covers the window between
+// the first file a claim writes and the manifest it writes last. What is
+// there is either debris belay recognises as its own, which it clears and
+// makes again, or something it cannot prove it wrote — and then it refuses,
+// because the alternative is writing an agent's workspace into a directory
+// somebody else put there.
+func TestATornClaimIsRemadeAndAnythingElseIsRefused(t *testing.T) {
+	tests := []struct {
+		name string
+		// arrange puts something at candidate-runs/cand-01 and returns a
+		// check to run afterwards.
+		arrange func(t *testing.T, h *harness, dir string) func(t *testing.T)
+		wantRun bool
+		wantErr error
+	}{
+		{
+			name: "debris a claim left behind is cleared and claimed again",
+			arrange: func(t *testing.T, _ *harness, dir string) func(t *testing.T) {
+				t.Helper()
+				if err := os.MkdirAll(filepath.Join(dir, "snapshots"), 0o750); err != nil {
+					t.Fatalf("MkdirAll: %v", err)
+				}
+				stale := filepath.Join(dir, "snapshots", "0001-code.json")
+				if err := os.WriteFile(stale, []byte("{}\n"), 0o600); err != nil {
+					t.Fatalf("WriteFile: %v", err)
+				}
+				if err := os.WriteFile(filepath.Join(dir, "state.json"), []byte("{}\n"), 0o600); err != nil {
+					t.Fatalf("WriteFile: %v", err)
+				}
+				return func(t *testing.T) {
+					t.Helper()
+					if _, err := os.Stat(stale); !errors.Is(err, fs.ErrNotExist) {
+						t.Errorf("the torn claim's snapshot survived (%v); the directory is remade, not written over", err)
+					}
+				}
+			},
+			wantRun: true,
+		},
+		{
+			name: "a symlink is refused and what it points at is untouched",
+			arrange: func(t *testing.T, _ *harness, dir string) func(t *testing.T) {
+				t.Helper()
+				victim := t.TempDir()
+				if err := os.WriteFile(filepath.Join(victim, "victim.txt"), []byte("mine\n"), 0o600); err != nil {
+					t.Fatalf("WriteFile: %v", err)
+				}
+				if err := os.Symlink(victim, dir); err != nil {
+					t.Fatalf("Symlink: %v", err)
+				}
+				return func(t *testing.T) {
+					t.Helper()
+					entries, err := os.ReadDir(victim)
+					if err != nil {
+						t.Fatalf("ReadDir(victim): %v", err)
+					}
+					if len(entries) != 1 || entries[0].Name() != "victim.txt" {
+						names := make([]string, 0, len(entries))
+						for _, e := range entries {
+							names = append(names, e.Name())
+						}
+						t.Errorf("the symlink's target holds %v, want only victim.txt", names)
+					}
+				}
+			},
+			wantErr: graph.ErrCandidateRunCorrupt,
+		},
+		{
+			name: "a directory holding anything no claim writes is refused",
+			arrange: func(t *testing.T, _ *harness, dir string) func(t *testing.T) {
+				t.Helper()
+				if err := os.MkdirAll(dir, 0o750); err != nil {
+					t.Fatalf("MkdirAll: %v", err)
+				}
+				mine := filepath.Join(dir, "notes.txt")
+				if err := os.WriteFile(mine, []byte("mine\n"), 0o600); err != nil {
+					t.Fatalf("WriteFile: %v", err)
+				}
+				return func(t *testing.T) {
+					t.Helper()
+					if _, err := os.Stat(mine); err != nil {
+						t.Errorf("notes.txt is gone (%v); belay removed a directory it could not prove it wrote", err)
+					}
+				}
+			},
+			wantErr: graph.ErrCandidateRunCorrupt,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			h := newRun(t, budgetCfg(3.00, 0), "a torn claim")
+			if err := os.MkdirAll(h.layout.CandidateRunsDir(), 0o750); err != nil {
+				t.Fatalf("MkdirAll: %v", err)
+			}
+			check := tt.arrange(t, h, filepath.Join(h.layout.CandidateRunsDir(), "cand-01"))
+
+			iso := newFakeIsolator(h.layout.CandidatesDir())
+			code := newCandidateNode(graph.NodeCode, finishes(0.25))
+			node := &runsCandidates{specs: poolSpecs(h, 1)}
+			if _, err := h.poolDispatcher(t, pool{
+				registry: candidateRegistry(t, code), isolator: iso,
+			}, node).Run(context.Background()); err != nil {
+				t.Fatalf("Run() error = %v, want nil", err)
+			}
+
+			got := node.outcomes[0]
+			switch {
+			case tt.wantErr != nil:
+				if !errors.Is(got.Err, tt.wantErr) {
+					t.Fatalf("cand-01 Err = %v, want one matching %v", got.Err, tt.wantErr)
+				}
+				if code.ran("cand-01") != 0 {
+					t.Errorf("cand-01 ran although its run directory was refused")
+				}
+			default:
+				if got.Err != nil {
+					t.Fatalf("cand-01 Err = %v, want nil", got.Err)
+				}
+				if got.Status != state.RunStatusCompleted {
+					t.Errorf("cand-01 Status = %v, want completed", got.Status)
+				}
+			}
+			if ran := code.ran("cand-01") > 0; ran != tt.wantRun {
+				t.Errorf("cand-01 ran = %v, want %v", ran, tt.wantRun)
+			}
+			check(t)
+		})
 	}
 }
