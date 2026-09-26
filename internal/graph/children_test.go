@@ -7,17 +7,20 @@ import (
 	"fmt"
 	"io/fs"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"reflect"
 	"sort"
 	"strings"
 	"sync"
 	"sync/atomic"
+	"syscall"
 	"testing"
 	"time"
 
 	"github.com/dhaam-ai/belay/internal/graph"
 	"github.com/dhaam-ai/belay/internal/journal"
+	"github.com/dhaam-ai/belay/internal/procgroup"
 	"github.com/dhaam-ai/belay/internal/state"
 	"github.com/dhaam-ai/belay/pkg/belay"
 )
@@ -1905,5 +1908,95 @@ func TestAPanickingCandidateDoesNotTakeDownItsSiblings(t *testing.T) {
 	}
 	if last := recs[len(recs)-1]; last.Event != journal.EventNodeStarted {
 		t.Errorf("cand-02 journal ends with %v, want the node_started its panic left open", last.Event)
+	}
+}
+
+// TestAResumeKillsACandidatesOrphanedProcessBeforeItsNodeRunsAgain is a
+// guard, not a failing test first: internal/procgroup and the dispatcher's
+// heal already do this for a run, and a candidate is a run, so it passed the
+// moment it was written. It is here because the inheritance is the whole
+// argument for the shape — it would fail for any design that gave the
+// candidates a shared evidence tree, or that drove them from the parent's
+// own Layout — and because an agent CLI left running after a kill -9 keeps
+// spending the user's money.
+func TestAResumeKillsACandidatesOrphanedProcessBeforeItsNodeRunsAgain(t *testing.T) {
+	h := newRun(t, budgetCfg(3.00, 0), "kill what the dead process left running")
+	iso := newFakeIsolator(h.layout.CandidatesDir())
+	l := seedCandidate(t, h, iso, seeded{
+		id: "cand-01", index: 1, provision: state.ProvisionOK, envelope: oneEnvelope,
+		status: state.RunStatusRunning,
+		records: []journal.Record{
+			{Event: journal.EventRunStarted},
+			{Event: journal.EventNodeStarted, Node: graph.NodeCode, Attempt: 1},
+		},
+	})
+
+	// The agent the dead belay had started, in a process group of its own,
+	// recorded exactly as internal/exec records one — under the candidate's
+	// evidence tree, not the parent's.
+	sleeper := exec.Command("sleep", "60")
+	sleeper.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	if err := sleeper.Start(); err != nil {
+		t.Fatalf("start sleep: %v", err)
+	}
+	exited := make(chan struct{})
+	go func() {
+		if err := sleeper.Wait(); err != nil {
+			t.Logf("sleeper exited: %v", err) // expected: killed
+		}
+		close(exited)
+	}()
+	t.Cleanup(func() {
+		if err := syscall.Kill(-sleeper.Process.Pid, syscall.SIGKILL); err != nil &&
+			!errors.Is(err, syscall.ESRCH) {
+			t.Errorf("clean up process group: %v", err)
+		}
+		<-exited
+	})
+
+	nodeDir, err := l.NodeDir(1, graph.NodeCode)
+	if err != nil {
+		t.Fatalf("NodeDir: %v", err)
+	}
+	tracked, err := procgroup.Track(nodeDir, []string{"claude", "-p", "implement the plan"})
+	if err != nil {
+		t.Fatalf("Track: %v", err)
+	}
+	if err := tracked.Started(sleeper.Process.Pid); err != nil {
+		t.Fatalf("Started: %v", err)
+	}
+
+	var aliveWhenItRan bool
+	code := newCandidateNode(graph.NodeCode, func(ctx context.Context, id string, rc *graph.RunContext) (graph.Result, error) {
+		aliveWhenItRan = syscall.Kill(sleeper.Process.Pid, 0) == nil
+		return finishes(0.25)(ctx, id, rc)
+	})
+
+	node := &runsCandidates{specs: poolSpecs(h, 1)}
+	if _, err := h.poolDispatcher(t, pool{
+		registry: candidateRegistry(t, code), isolator: iso,
+	}, node).Run(context.Background()); err != nil {
+		t.Fatalf("Run() error = %v, want nil", err)
+	}
+	if got := node.outcomes[0]; got.Err != nil || got.Status != state.RunStatusCompleted {
+		t.Fatalf("cand-01 = {%v, err %v}, want completed", got.Status, got.Err)
+	}
+
+	select {
+	case <-exited:
+	case <-time.After(10 * time.Second):
+		t.Fatalf("process %d is still running: adopting the candidate did not kill what its crash left behind",
+			sleeper.Process.Pid)
+	}
+	if aliveWhenItRan {
+		t.Error("the orphan was still alive when the candidate's node ran again; it would have been writing " +
+			"into the same workspace")
+	}
+	left, err := filepath.Glob(filepath.Join(nodeDir, "pgroup-*.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(left) != 0 {
+		t.Errorf("records left behind: %v; a later resume could signal a pid that by then is somebody else's", left)
 	}
 }
