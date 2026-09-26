@@ -432,6 +432,141 @@ Where finished plans go, relative to the workspace (`--workspace`), not to the d
 
 <!-- slice:plan -->
 
+## `policy`
+
+Guardrails a run's change must obey, whatever its tests say. A change that passes every test can still edit the deployment pipeline, pull in a dependency nobody vetted, grow by four thousand lines, or leave a credential in a source file. These rules are what makes it safe to point belay at a repository and walk away.
+
+Every rule is off by default, and a repository that declares no policy runs exactly as it did before this section existed: belay adds no step to the graph and reads no extra file.
+
+When a policy is set, belay adds a `policy` gate to the run's route, between `write` and `test`, and judges the change there on every pass of the fix loop. Two things follow:
+
+- **The rules are fixed when the run starts.** belay records them, and the dependencies your workspace declared, in the run's `manifest.json`, and `belay resume` judges the change against those and not against `belay.yaml` as it is by then. A run started with no policy never grows one: it has no gate, and no record of what its workspace looked like before the agent ran, so a policy added mid-run could only fail it for something it did not do. ADR-0014 records the decision.
+- **A violation is one of two kinds.** `forbidden_paths`, `max_changed_files` and `max_changed_lines` **end the run**: a change that touched a path it may not touch is not something to ask an agent to repair. Everything else goes to the **fix loop**, which tells the agent what it broke and asks for a repair, bounded by `graph.give_up` like any other repair.
+
+`review.fail_on` has nothing to do with this section. It is the threshold a linter's findings are judged against; a policy violation always counts.
+
+Paths are matched with globs, described under `policy.forbidden_paths`.
+
+Example:
+
+```yaml
+version: 1
+policy:
+  forbidden_paths:
+    - ".github/workflows/**"
+    - "infra/**"
+    - "pyproject.toml"
+  max_changed_files: 25
+  max_changed_lines: 2000
+  no_new_dependencies: true
+  required_tests:
+    - when: "**/*.go"
+      require: "**/*_test.go"
+  forbidden_content:
+    - pattern: "AKIA[0-9A-Z]{16}"
+      reason: "an AWS access key id"
+```
+
+### `policy.forbidden_paths`
+
+**Type**: List of strings  
+**Default**: `[]`
+
+Paths the change may not touch. A run that changes one **ends**, naming the file and the pattern that forbade it.
+
+A pattern is slash-separated, relative to the workspace, and anchored at its root:
+
+| Pattern | Matches | Does not match |
+|---|---|---|
+| `go.mod` | `go.mod` | `api/go.mod` |
+| `*.tf` | `main.tf` | `infra/main.tf` |
+| `**/*.tf` | `main.tf`, `infra/aws/main.tf` | `main.tfvars` |
+| `infra/**` | `infra`, `infra/aws/main.tf` | `infrastructure/main.tf` |
+| `src/**/*_test.go` | `src/a/b/x_test.go` | `x_test.go` |
+
+`*` and `?` and a character class such as `[0-9]` match inside one path segment. `**` is the only thing that crosses a `/`, and stands for zero or more whole segments. Unlike `.gitignore`, a pattern with no slash is **not** matched at every depth: write `**/secrets.yaml` for that. One rule that always reads the same way is worth two extra characters.
+
+A pattern belay cannot match — an empty one, an absolute one, one containing `..`, or one gluing `**` to other characters such as `src**/x` — is refused when the configuration loads. A rule that silently matches nothing is worse than no rule, because somebody is relying on it.
+
+### `policy.max_changed_files`
+
+**Type**: Integer  
+**Default**: `0`
+
+The most files one run's change may touch. `0` means no ceiling. A change over it **ends** the run.
+
+### `policy.max_changed_lines`
+
+**Type**: Integer  
+**Default**: `0`
+
+The most lines the files a change touches may hold together. `0` means no ceiling. A change over it **ends** the run.
+
+Read the name carefully: this is **not** a diffstat. belay keeps no copy of the tree from before the agent ran, so it cannot know which lines inside a file changed, and it does not pretend to — it counts the whole of every changed file as it now stands. A one-line edit to a 900-line file counts 900. That over-counts and never under-counts, which is the safe direction for a ceiling: it is a limit on how much of the repository one unattended run may rewrite, and how much you have to read afterwards.
+
+Set it generously, or use `policy.max_changed_files` instead, which is exact. A file the change deleted is counted by `max_changed_files` but contributes no lines, because the lines it held are the one thing no longer there to count.
+
+### `policy.no_new_dependencies`
+
+**Type**: Boolean  
+**Default**: `false`
+
+Forbid declaring a dependency the workspace did not declare when the run started. A change that adds one goes to the **fix loop**: the agent is told which dependency in which manifest, and asked to do without it.
+
+belay reads `go.mod` (its `require` directives), `package.json` (`dependencies`, `devDependencies`, `peerDependencies` and `optionalDependencies` alike — a build plugin runs with the same privileges as anything else) and `requirements.txt`, in the workspace and up to three directories below it, skipping the same directories `belay run` skips when it works out what kind of project you have (`node_modules`, `vendor`, `.git` and the rest). Names are compared, never versions: upgrading something you already trust is a different decision from taking on code nobody has looked at.
+
+`pyproject.toml` is **not** read. Doing it properly means a TOML parser and PEP 621's several spellings of a dependency, and a parser that got it half right would report dependencies you do not have or miss ones you do. Until belay reads it properly, add it to `policy.forbidden_paths`, which stops the change belay cannot judge instead of waving it through.
+
+A manifest belay cannot parse stops the run from starting, rather than being recorded as declaring nothing: a baseline missing what a file declares would make every one of those dependencies look new at the gate.
+
+### `policy.required_tests`
+
+**Type**: List of rules  
+**Default**: `[]`
+
+Make a change of one kind bring a change of another with it. Each rule has two path globs, written exactly as `policy.forbidden_paths` describes:
+
+- `when`: the changed files the rule is about.
+- `require`: what the change must also touch.
+
+A change that touches a file matching `when` and nothing matching `require` goes to the **fix loop**, naming a file that triggered the rule. A change that touches nothing matching `when` is not what the rule is about and passes it.
+
+```yaml
+policy:
+  required_tests:
+    - when: "**/*.go"
+      require: "**/*_test.go"
+    - when: "internal/api/**"
+      require: "docs/api/**"
+```
+
+The rule is satisfied by any changed file matching `require`, anywhere: belay does not try to work out which test covers which source file, because a wrong answer to that would either block correct changes or wave through untested ones.
+
+### `policy.forbidden_content`
+
+**Type**: List of rules  
+**Default**: `[]`
+
+Text a changed file may not contain. Each rule has:
+
+- `pattern`: a [Go regular expression](https://pkg.go.dev/regexp/syntax), matched line by line so a violation can name the line it is on. Required.
+- `paths`: path globs limiting the rule to some changed files. Empty means every changed file.
+- `reason`: what you are told when the rule fires, in place of the pattern. A bare regular expression explains nothing to whoever has to act on it.
+
+A match goes to the **fix loop**, once per rule per file: a pattern that matches forty lines of one file is one thing to fix.
+
+```yaml
+policy:
+  forbidden_content:
+    - pattern: "AKIA[0-9A-Z]{16}"
+      reason: "an AWS access key id"
+    - pattern: "(?i)//\\s*nolint"
+      paths: ["**/*.go"]
+      reason: "a lint suppression; fix the finding instead"
+```
+
+Only the changed files are read, never the whole repository: this is a check on what the run did, not an audit of what was already there. A changed file with a line longer than 1 MiB — a minified bundle, a generated blob — stops the gate with an error rather than being reported as clean, because "belay could not look" must never be recorded as "belay looked and it was fine". Exclude such a file with the rule's `paths`, or name it in `policy.forbidden_paths`.
+
 <!-- slice:policy -->
 
 ## Environment Variables
