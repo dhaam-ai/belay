@@ -2,6 +2,7 @@ package graph_test
 
 import (
 	"context"
+	"crypto/sha256"
 	"errors"
 	"fmt"
 	"io/fs"
@@ -296,6 +297,14 @@ type runsCandidates struct {
 	between func(round int)
 	// results holds every round's outcomes; outcomes is the last one's.
 	results [][]graph.CandidateOutcome
+	// digest, when set, is called immediately before and immediately after
+	// the pool runs, so a test can prove nothing in the parent run changed
+	// while it did. The parent's own files are quiet for exactly this
+	// window: the dispatcher appends node_started before the node and
+	// node_finished after it.
+	digest       func() map[string]string
+	digestBefore map[string]string
+	digestAfter  map[string]string
 }
 
 func (*runsCandidates) Name() string { return graph.NodeFanout }
@@ -308,6 +317,9 @@ func (n *runsCandidates) Run(ctx context.Context, rc *graph.RunContext) (graph.R
 	if rc.CandidateRuns == nil {
 		return graph.Result{}, graph.ErrNoCandidateRunner
 	}
+	if n.digest != nil {
+		n.digestBefore = n.digest()
+	}
 	for round := 1; round <= max(n.rounds, 1); round++ {
 		if round > 1 && n.between != nil {
 			n.between(round)
@@ -317,6 +329,9 @@ func (n *runsCandidates) Run(ctx context.Context, rc *graph.RunContext) (graph.R
 		if n.err != nil {
 			break
 		}
+	}
+	if n.digest != nil {
+		n.digestAfter = n.digest()
 	}
 	return Result{Next: graph.End, Status: journal.StatusOK, Note: "candidates done"}, nil
 }
@@ -1753,4 +1768,88 @@ func TestAnAdoptedEnvelopeIsNeverLoweredAndMayRise(t *testing.T) {
 			t.Errorf("cand-01 persisted envelope = %v, want 3.00", man.Candidate.Envelope.LimitUSD)
 		}
 	})
+}
+
+// TestEveryCandidateWritesOnlyItsOwnFiles is the reason a candidate is a run
+// and not a set of records in the parent's journal. internal/journal rejects
+// a node_started opened while another is still open, so N concurrent
+// candidates sharing one journal would corrupt it on the second append and
+// journal.Open would refuse the file for good. Nesting by directory makes
+// that unreachable rather than merely avoided.
+func TestEveryCandidateWritesOnlyItsOwnFiles(t *testing.T) {
+	h := newRun(t, budgetCfg(5.00, 0), "one journal each")
+	iso := newFakeIsolator(h.layout.CandidatesDir())
+	ids := []string{"cand-01", "cand-02", "cand-03"}
+
+	code := newCandidateNode(graph.NodeCode, func(_ context.Context, id string, _ *graph.RunContext) (graph.Result, error) {
+		return Result{Next: graph.NodeTest, Status: journal.StatusOK, Usage: belay.Usage{USD: 0.10}, Note: id}, nil
+	})
+	testNode := newCandidateNode(graph.NodeTest, finishes(0.05))
+
+	node := &runsCandidates{
+		specs: poolSpecs(h, 3),
+		digest: func() map[string]string {
+			out := map[string]string{}
+			for _, name := range []string{"manifest.json", "state.json", "journal.ndjson"} {
+				data, err := os.ReadFile(filepath.Join(h.layout.RunDir(), name))
+				if err != nil {
+					out[name] = "missing"
+					continue
+				}
+				out[name] = fmt.Sprintf("%x", sha256.Sum256(data))
+			}
+			return out
+		},
+	}
+	if _, err := h.poolDispatcher(t, pool{
+		registry: candidateRegistry(t, code, testNode), isolator: iso, concurrency: 3,
+	}, node).Run(context.Background()); err != nil {
+		t.Fatalf("Run() error = %v, want nil", err)
+	}
+
+	// Not one byte of the parent run changed while the candidates ran.
+	// The digests are checked for substance first, so that a comparison of
+	// two sets of "missing" cannot pass for proof.
+	if len(node.digestBefore) != 3 {
+		t.Fatalf("the parent was digested as %v, want all three of its files", node.digestBefore)
+	}
+	for name, sum := range node.digestBefore {
+		if sum == "missing" {
+			t.Fatalf("the parent's %s was not there to digest", name)
+		}
+	}
+	if !reflect.DeepEqual(node.digestBefore, node.digestAfter) {
+		t.Errorf("the parent's files changed while the candidates ran:\n  before %v\n  after  %v",
+			node.digestBefore, node.digestAfter)
+	}
+
+	// The parent's journal knows only about its own node.
+	for _, rec := range h.records(t) {
+		if rec.Node != "" && rec.Node != graph.NodeFanout {
+			t.Errorf("the parent journal holds a record for %q; candidate records belong in candidate journals", rec.Node)
+		}
+	}
+
+	// And each candidate's journal is a valid run of its own, holding its
+	// own records and nobody else's.
+	for _, id := range ids {
+		recs := candidateRecords(t, h, id)
+		if err := journal.Validate(recs); err != nil {
+			t.Errorf("%s journal.Validate() = %v, want nil", id, err)
+		}
+		var nodes []string
+		for _, rec := range recs {
+			if rec.Node != "" {
+				nodes = append(nodes, rec.Node)
+			}
+			if rec.Note != "" && rec.Note != id && rec.Note != id+" finished its work" &&
+				rec.Note != "run completed" {
+				t.Errorf("%s journal holds the note %q, which is not its own", id, rec.Note)
+			}
+		}
+		want := []string{graph.NodeCode, graph.NodeCode, graph.NodeTest, graph.NodeTest}
+		if !equalStrings(nodes, want) {
+			t.Errorf("%s journal names %v, want %v", id, nodes, want)
+		}
+	}
 }
