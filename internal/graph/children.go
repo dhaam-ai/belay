@@ -9,6 +9,7 @@ import (
 	"os"
 	"path"
 	"path/filepath"
+	"runtime/debug"
 	"strings"
 	"sync"
 
@@ -329,6 +330,26 @@ func (r *candidateRunner) drive(ctx context.Context, claims []*candidateClaim, o
 // one takes a single candidate from wherever it is to wherever it can get,
 // on its own goroutine.
 func (r *candidateRunner) one(ctx context.Context, c *candidateClaim, out *CandidateOutcome) {
+	// A panic is recovered into the outcome rather than allowed to end the
+	// process, so a bug in one candidate's node does not cost its siblings
+	// work that has already been paid for. It becomes a fault like any
+	// other: nothing durable is written about it, the candidate's journal
+	// is left with its node_started open, and the next attempt heals it and
+	// runs that node again.
+	//
+	// The isolation is honest but partial, and ADR-0019 says so. It covers
+	// a panic on this goroutine. A panic in a goroutine a node itself
+	// starts — an exec pipe, a backend stream — still ends the process,
+	// exactly as it does for a single run today.
+	defer func() {
+		if p := recover(); p != nil {
+			r.parent.logger.Error("belay/graph: a candidate run panicked",
+				slog.String("candidate", c.spec.ID), slog.Any("panic", p),
+				slog.String("stack", string(debug.Stack())))
+			out.Err = fmt.Errorf("graph: candidate %q panicked: %v", c.spec.ID, p)
+		}
+	}()
+
 	switch c.provision {
 	case state.ProvisionRefused:
 		// Durable, and reproduced from the manifest with no isolator call:

@@ -1853,3 +1853,57 @@ func TestEveryCandidateWritesOnlyItsOwnFiles(t *testing.T) {
 		}
 	}
 }
+
+// TestAPanickingCandidateDoesNotTakeDownItsSiblings: a bug in one
+// candidate's node must not cost the others work that has already been paid
+// for. Its outcome carries the fault, so the fanout pauses rather than
+// settling a verdict about it, and its journal is left open, so a resume
+// heals it and runs that node again.
+//
+// The isolation is honest but partial, and the ADR says so: it covers a
+// panic on the candidate's own goroutine. A panic in a goroutine a node
+// itself starts still ends the process, exactly as it does for a single run
+// today.
+func TestAPanickingCandidateDoesNotTakeDownItsSiblings(t *testing.T) {
+	h := newRun(t, budgetCfg(3.00, 0), "one candidate has a bug in it")
+	iso := newFakeIsolator(h.layout.CandidatesDir())
+	code := newCandidateNode(graph.NodeCode, func(ctx context.Context, id string, rc *graph.RunContext) (graph.Result, error) {
+		if id == "cand-02" {
+			panic("the candidate node dereferenced nothing")
+		}
+		return finishes(0.25)(ctx, id, rc)
+	})
+
+	node := &runsCandidates{specs: poolSpecs(h, 3)}
+	if _, err := h.poolDispatcher(t, pool{
+		registry: candidateRegistry(t, code), isolator: iso, concurrency: 3,
+	}, node).Run(context.Background()); err != nil {
+		t.Fatalf("Run() error = %v, want nil", err)
+	}
+
+	got := node.outcomes[1]
+	if got.Err == nil {
+		t.Fatal("cand-02 outcome carries no Err; the fanout would settle a verdict about a candidate that crashed")
+	}
+	if !strings.Contains(got.Err.Error(), "dereferenced nothing") {
+		t.Errorf("cand-02 Err = %v, want it to carry what the panic said", got.Err)
+	}
+
+	// Its siblings finished.
+	for _, i := range []int{0, 2} {
+		o := node.outcomes[i]
+		if o.Err != nil || o.Status != state.RunStatusCompleted {
+			t.Errorf("%s = {%v, err %v}, want completed", o.ID, o.Status, o.Err)
+		}
+	}
+
+	// And cand-02's journal is left open, which is what makes it resumable:
+	// the next attempt heals it and runs that node again.
+	recs := candidateRecords(t, h, "cand-02")
+	if len(recs) == 0 {
+		t.Fatal("cand-02 has an empty journal")
+	}
+	if last := recs[len(recs)-1]; last.Event != journal.EventNodeStarted {
+		t.Errorf("cand-02 journal ends with %v, want the node_started its panic left open", last.Event)
+	}
+}
