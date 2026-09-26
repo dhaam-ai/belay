@@ -876,8 +876,8 @@ func TestACandidateThatCannotBeClaimedStopsTheFanout(t *testing.T) {
 	}
 
 	// And it was left exactly where it was, not deleted.
-	if data, err := os.ReadFile(blocked); err != nil || string(data) != "not a run directory\n" {
-		t.Errorf("the file in cand-03's place reads %q (err %v), want it untouched", data, err)
+	if data := readFile(t, blocked); string(data) != "not a run directory\n" {
+		t.Errorf("the file in cand-03's place reads %q, want it untouched", data)
 	}
 }
 
@@ -1794,6 +1794,7 @@ func TestEveryCandidateWritesOnlyItsOwnFiles(t *testing.T) {
 		digest: func() map[string]string {
 			out := map[string]string{}
 			for _, name := range []string{"manifest.json", "state.json", "journal.ndjson"} {
+				// #nosec G304 -- path is inside the test's own run directory.
 				data, err := os.ReadFile(filepath.Join(h.layout.RunDir(), name))
 				if err != nil {
 					out[name] = "missing"
