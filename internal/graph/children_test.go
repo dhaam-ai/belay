@@ -1406,3 +1406,70 @@ func TestAnUnprovisionedClaimIsReclaimedBeforeItsWorkspaceIsMadeAgain(t *testing
 		}
 	})
 }
+
+// TestEveryCandidateGetsAnOutcomeCarryingItsOwnID pins the contract the
+// fanout node places outcomes by: one per candidate, in the order the specs
+// came in, each naming the candidate it belongs to — whatever happened, and
+// including the rounds the pool could not carry out at all.
+//
+// The node refuses a partial set rather than settling it, because
+// state.Candidates is an absolute set: outcomes only for the candidates that
+// reached an end state would quietly drop one the run had already paid for.
+func TestEveryCandidateGetsAnOutcomeCarryingItsOwnID(t *testing.T) {
+	h := newRun(t, budgetCfg(3.00, 0), "one outcome each, always")
+	iso := reclaimingIsolator{newFakeIsolator(h.layout.CandidatesDir())}
+	// One candidate a fault stops, one an isolator refuses for good, one
+	// that simply works.
+	iso.fail["cand-01"] = errors.New("write: no space left on device")
+	iso.fail["cand-02"] = fmt.Errorf("%w: the source is not inside this repository", belay.ErrUnsupported)
+
+	code := newCandidateNode(graph.NodeCode, finishes(0.25))
+	specs := poolSpecs(h, 3)
+	node := &runsCandidates{
+		specs: specs, rounds: 2,
+		// The second round cannot even begin: the parent's own manifest is
+		// gone, so the pool has nothing to claim against.
+		between: func(int) {
+			if err := os.Remove(h.layout.ManifestPath()); err != nil {
+				t.Errorf("Remove(parent manifest): %v", err)
+			}
+		},
+	}
+
+	if _, err := h.poolDispatcher(t, pool{
+		registry: candidateRegistry(t, code), isolator: iso, concurrency: 3,
+	}, node).Run(context.Background()); err != nil {
+		t.Fatalf("Run() error = %v, want nil", err)
+	}
+	if len(node.results) != 2 {
+		t.Fatalf("the pool was asked %d times, want 2", len(node.results))
+	}
+	if node.err == nil {
+		t.Error("the round that could not begin reported no error")
+	}
+
+	for round, outcomes := range node.results {
+		if len(outcomes) != len(specs) {
+			t.Fatalf("round %d returned %d outcomes, want one per candidate (%d)",
+				round+1, len(outcomes), len(specs))
+		}
+		for i, o := range outcomes {
+			if o.ID != specs[i].ID || o.Index != specs[i].Index {
+				t.Errorf("round %d outcome %d = {%q, %d}, want {%q, %d}",
+					round+1, i, o.ID, o.Index, specs[i].ID, specs[i].Index)
+			}
+		}
+	}
+
+	// And in the round that did run, each of the three ended its own way.
+	first := node.results[0]
+	if first[0].Err == nil {
+		t.Errorf("cand-01 = %+v, want the fault that stopped it", first[0])
+	}
+	if first[1].Provision != state.ProvisionRefused {
+		t.Errorf("cand-02 Provision = %q, want %q", first[1].Provision, state.ProvisionRefused)
+	}
+	if first[2].Status != state.RunStatusCompleted {
+		t.Errorf("cand-03 Status = %v, want completed", first[2].Status)
+	}
+}

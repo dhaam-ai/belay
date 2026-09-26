@@ -229,8 +229,21 @@ func newCandidateRunner(
 }
 
 // Run implements CandidateRunner.
+//
+// It always returns exactly one outcome per spec, in the order the specs
+// came in, each carrying that spec's ID and Index — including for a
+// candidate that never ran, and including when Run itself reports an error.
+// The fanout node places outcomes by index and refuses a set it cannot
+// place, because state.Candidates is an absolute set: a set missing the
+// candidate that went wrong would silently drop one the run has already paid
+// for, and leave join choosing between fewer candidates than really ran.
 func (r *candidateRunner) Run(ctx context.Context, specs []CandidateSpec) ([]CandidateOutcome, error) {
+	// Identity first, before anything that can fail: every slot names the
+	// candidate it belongs to even on a path that gets no further.
 	outcomes := make([]CandidateOutcome, len(specs))
+	for i, spec := range specs {
+		outcomes[i] = CandidateOutcome{ID: spec.ID, Index: spec.Index, Envelope: spec.Envelope}
+	}
 	if len(specs) == 0 {
 		return outcomes, nil
 	}
@@ -242,7 +255,6 @@ func (r *candidateRunner) Run(ctx context.Context, specs []CandidateSpec) ([]Can
 	claims := make([]*candidateClaim, len(specs))
 	whole := true
 	for i, spec := range specs {
-		outcomes[i] = CandidateOutcome{ID: spec.ID, Index: spec.Index, Envelope: spec.Envelope}
 		c, err := r.claim(parent, spec)
 		if err != nil {
 			outcomes[i].Err = err
