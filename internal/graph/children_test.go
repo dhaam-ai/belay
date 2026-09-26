@@ -11,6 +11,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -418,10 +419,11 @@ func (r reclaimingIsolator) Reclaim(_ context.Context, id string) error {
 // pool is how a test wires the parent dispatcher that owns a candidate
 // runner. Every field mirrors one graph.Options field.
 type pool struct {
-	registry    *graph.Registry
-	isolator    belay.Isolator
-	concurrency int
-	agentFor    func(string) belay.AgentBackend
+	registry      *graph.Registry
+	isolator      belay.Isolator
+	concurrency   int
+	agentFor      func(string) belay.AgentBackend
+	pauseOnCancel bool
 }
 
 // poolDispatcher builds the parent dispatcher for a run whose fanout node
@@ -441,6 +443,7 @@ func (h *harness) poolDispatcher(t *testing.T, p pool, nodes ...graph.Node) *gra
 		CandidateRegistry: p.registry,
 		CandidateAgent:    p.agentFor,
 		Concurrency:       p.concurrency,
+		PauseOnCancel:     p.pauseOnCancel,
 	})
 	if err != nil {
 		t.Fatalf("NewDispatcher() error = %v", err)
@@ -1471,5 +1474,145 @@ func TestEveryCandidateGetsAnOutcomeCarryingItsOwnID(t *testing.T) {
 	}
 	if first[2].Status != state.RunStatusCompleted {
 		t.Errorf("cand-03 Status = %v, want completed", first[2].Status)
+	}
+}
+
+// TestOneCancelLeavesEveryCandidateResumable is the Ctrl-C promise, N+1
+// journals over: `belay run` says one interrupt leaves a run `belay resume`
+// picks up, and a fanout keeps that promise only if every candidate keeps it
+// too. A candidate ended as aborted could never be continued, and the money
+// its run had already spent would buy nothing.
+func TestOneCancelLeavesEveryCandidateResumable(t *testing.T) {
+	h := newRun(t, budgetCfg(5.00, 0), "one Ctrl-C, five candidates")
+	iso := reclaimingIsolator{newFakeIsolator(h.layout.CandidatesDir())}
+	specs := poolSpecs(h, 5)
+
+	var blocking atomic.Bool
+	var live atomic.Int64
+	blocking.Store(true)
+	arrived := make(chan string, len(specs))
+	code := newCandidateNode(graph.NodeCode, func(ctx context.Context, id string, _ *graph.RunContext) (graph.Result, error) {
+		live.Add(1)
+		defer live.Add(-1)
+		if !blocking.Load() {
+			return finishes(0.20)(ctx, id, nil)
+		}
+		arrived <- id
+		<-ctx.Done()
+		return Result{}, ctx.Err()
+	})
+
+	// The interrupted attempt.
+	ctx, cancel := context.WithCancel(context.Background())
+	interrupted := &runsCandidates{specs: specs}
+	stopped := make(chan struct{})
+	go func() {
+		defer close(stopped)
+		if _, err := h.poolDispatcher(t, pool{
+			registry: candidateRegistry(t, code), isolator: iso, concurrency: 3, pauseOnCancel: true,
+		}, interrupted).Run(ctx); err == nil {
+			t.Error("the interrupted parent run reported no error")
+		}
+	}()
+
+	inFlight := make([]string, 0, 3)
+	for range 3 {
+		select {
+		case id := <-arrived:
+			inFlight = append(inFlight, id)
+		case <-time.After(10 * time.Second):
+			t.Fatalf("only %d candidates reached their node, want 3", len(inFlight))
+		}
+	}
+	cancel()
+	select {
+	case <-stopped:
+	case <-time.After(10 * time.Second):
+		t.Fatal("the interrupted run never returned")
+	}
+
+	if !errors.Is(interrupted.err, context.Canceled) {
+		t.Errorf("CandidateRuns.Run() error = %v, want one wrapping context.Canceled", interrupted.err)
+	}
+	if n := live.Load(); n != 0 {
+		t.Errorf("%d candidates were still inside their node when Run returned; it must wait for all of them", n)
+	}
+
+	sort.Strings(inFlight)
+	if want := []string{"cand-01", "cand-02", "cand-03"}; !equalStrings(inFlight, want) {
+		t.Fatalf("the candidates in flight were %v, want %v", inFlight, want)
+	}
+
+	// Every candidate that started is paused, with its interrupted attempt
+	// closed: never a bare open node_started, which journal.Validate would
+	// reject a later record over, and never run_aborted, which no resume
+	// recovers.
+	for _, id := range inFlight {
+		recs := candidateRecords(t, h, id)
+		if err := journal.Validate(recs); err != nil {
+			t.Errorf("%s journal.Validate() = %v, want nil", id, err)
+		}
+		if len(recs) == 0 {
+			t.Fatalf("%s has an empty journal", id)
+		}
+		last := recs[len(recs)-1]
+		if last.Event != journal.EventRunPaused {
+			t.Errorf("%s journal ends with %v, want run_paused", id, last.Event)
+		}
+		if prev := recs[len(recs)-2]; !prev.Interrupted() {
+			t.Errorf("%s closes its attempt as %v -> %q, want an interrupted attempt to run again",
+				id, prev.Status, prev.Next)
+		}
+	}
+	// The two the cancellation reached before a goroutine did are claimed
+	// and no further, which is what a resume adopts.
+	for _, id := range []string{"cand-04", "cand-05"} {
+		man := candidateManifest(t, h, id)
+		if man.Candidate == nil || man.Candidate.Provision != state.ProvisionPending {
+			t.Errorf("%s = %+v, want a candidate claimed and not yet provisioned", id, man.Candidate)
+		}
+		if iso.creates(id) != 0 {
+			t.Errorf("%s was provisioned although it never started", id)
+		}
+		if code.ran(id) != 0 {
+			t.Errorf("%s ran %d nodes although it never started", id, code.ran(id))
+		}
+	}
+
+	// And the resume finishes all five.
+	blocking.Store(false)
+	resumed := &runsCandidates{specs: specs}
+	out, err := h.poolDispatcher(t, pool{
+		registry: candidateRegistry(t, code), isolator: iso, concurrency: 3, pauseOnCancel: true,
+	}, resumed).Resume(context.Background())
+	if err != nil {
+		t.Fatalf("Resume() error = %v, want nil", err)
+	}
+	if out.Status != state.RunStatusCompleted {
+		t.Fatalf("resumed Outcome.Status = %v, want completed (note %q)", out.Status, out.Note)
+	}
+	if resumed.err != nil {
+		t.Fatalf("CandidateRuns.Run() error on the resume = %v, want nil", resumed.err)
+	}
+	for i, o := range resumed.outcomes {
+		if o.Err != nil || o.Status != state.RunStatusCompleted {
+			t.Errorf("outcome %d (%s) = {%v, err %v}, want completed", i, o.ID, o.Status, o.Err)
+		}
+	}
+	// The three that were interrupted kept their workspaces and re-ran the
+	// node they were stopped in; the two that never started were given one.
+	for _, id := range inFlight {
+		if iso.creates(id) != 1 {
+			t.Errorf("%s had its workspace made %d times, want 1", id, iso.creates(id))
+		}
+		if code.ran(id) != 2 {
+			t.Errorf("%s ran code %d times, want 2: once interrupted, once on the resume", id, code.ran(id))
+		}
+	}
+	for _, id := range []string{"cand-04", "cand-05"} {
+		if iso.creates(id) != 1 || code.ran(id) != 1 {
+			t.Errorf("%s was created %d times and ran %d nodes, want 1 and 1",
+				id, iso.creates(id), code.ran(id))
+		}
 	}
 }

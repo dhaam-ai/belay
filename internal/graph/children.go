@@ -275,6 +275,12 @@ func (r *candidateRunner) Run(ctx context.Context, specs []CandidateSpec) ([]Can
 	}
 
 	r.drive(ctx, claims, outcomes)
+
+	// Reported only once every goroutine has exited, so a caller acting on
+	// the cancellation knows no candidate is still writing to a file.
+	if err := ctx.Err(); err != nil {
+		return outcomes, fmt.Errorf("graph: the candidate runs were interrupted: %w", err)
+	}
 	return outcomes, nil
 }
 
@@ -467,6 +473,17 @@ func (r *candidateRunner) resume(ctx context.Context, c *candidateClaim, out *Ca
 //     persisted envelope, enforced as abort. budget.on_exceed: warn is
 //     deliberately not honoured inside a candidate: a warning per candidate
 //     is N runs with no ceiling at all;
+//   - PauseOnCancel is always on, whatever the parent was given. One Ctrl-C
+//     has to leave every candidate resumable, and a candidate ended as
+//     aborted could never be continued — the money its run had already
+//     spent would buy nothing. The parent's own setting is not consulted,
+//     because a candidate has no other way to be resumed: nothing but its
+//     parent's fanout node ever reaches it;
+//   - PauseAfter is zero, explicitly. It pauses a run part-way through a
+//     call, which is how a fork runs exactly one node; a candidate paused
+//     like that would be neither finished nor resumable, since the fanout
+//     node that adopts it would find a run its own registry cannot
+//     continue past;
 //   - Isolator and VCS are nil: a candidate never fans out again, and it
 //     commits nothing — promote commits the winner's work;
 //   - the agent, runner, linter and reviewer are shared, which pkg/belay
@@ -479,18 +496,20 @@ func (r *candidateRunner) childOptions(c *candidateClaim, store *state.Store) Op
 		agent = r.agentFor(c.spec.ID)
 	}
 	return Options{
-		Store:       store,
-		Registry:    r.registry,
-		Config:      candidateConfig(p.cfg, c.envelope),
-		Entry:       NodeCode,
-		Logger:      p.logger.With(slog.String("candidate", c.spec.ID)),
-		Now:         p.now,
-		Redact:      p.redact,
-		Fingerprint: p.fingerprint,
-		Agent:       agent,
-		Runner:      p.runner,
-		Linter:      p.linter,
-		Reviewer:    p.reviewer,
+		Store:         store,
+		Registry:      r.registry,
+		Config:        candidateConfig(p.cfg, c.envelope),
+		Entry:         NodeCode,
+		Logger:        p.logger.With(slog.String("candidate", c.spec.ID)),
+		Now:           p.now,
+		Redact:        p.redact,
+		PauseOnCancel: true,
+		PauseAfter:    0,
+		Fingerprint:   p.fingerprint,
+		Agent:         agent,
+		Runner:        p.runner,
+		Linter:        p.linter,
+		Reviewer:      p.reviewer,
 	}
 }
 
