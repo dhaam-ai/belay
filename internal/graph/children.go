@@ -349,7 +349,9 @@ func (r *candidateRunner) Run(ctx context.Context, specs []CandidateSpec) ([]Can
 // order, rather than a goroutine per candidate waiting on a semaphore. Two
 // things follow from that shape, and both are the point of it: candidates
 // are admitted in index order, and a candidate that has not been admitted
-// has no goroutine of its own, so nothing about it has started.
+// has no goroutine of its own, so nothing about it has started. A worker
+// checks the cancellation again before it admits one, because the feeder
+// stopping and the cancellation arriving are ready at the same moment.
 //
 // Each worker writes into outcomes[i], a slot no other goroutine touches, so
 // the result is in index order however the candidates finish and no lock is
@@ -377,6 +379,17 @@ func (r *candidateRunner) drive(ctx context.Context, claims []*candidateClaim, o
 		go func() {
 			defer wg.Done()
 			for i := range next {
+				// The feeder stops sending on a cancellation, and the
+				// two are ready at the same moment when a worker is
+				// between candidates, so which one the runtime picks is
+				// a coin toss. This makes the answer the same either
+				// way: a candidate the cancellation reached first is
+				// left claimed and unprovisioned, which is what a
+				// resume adopts. Admitting it would copy a whole tree
+				// for a workspace nobody asked for.
+				if ctx.Err() != nil {
+					continue
+				}
 				r.one(ctx, claims[i], &outcomes[i])
 			}
 		}()

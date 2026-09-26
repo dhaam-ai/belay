@@ -2001,3 +2001,58 @@ func TestAResumeKillsACandidatesOrphanedProcessBeforeItsNodeRunsAgain(t *testing
 		t.Errorf("records left behind: %v; a later resume could signal a pid that by then is somebody else's", left)
 	}
 }
+
+// TestACancelledPoolAdmitsNoFurtherCandidate: a candidate that has not been
+// admitted must stay claimed and untouched, because that is exactly what a
+// resume adopts. Admitting one after the cancellation would copy a whole
+// tree for a workspace nobody asked for and write a run_paused into an
+// otherwise empty journal, which the next resume would then have to reclaim.
+//
+// The window is the moment a worker is between candidates: the goroutine
+// feeding the pool and the cancellation are both ready, and which one the
+// runtime picks is a coin toss. So the cancellation is thrown from inside
+// the first candidate, when a worker is about to come back for the next one,
+// and there are enough candidates behind it that the toss cannot come up
+// heads every time.
+func TestACancelledPoolAdmitsNoFurtherCandidate(t *testing.T) {
+	h := newRun(t, budgetCfg(9.00, 0), "admit nothing more once it is stopping")
+	iso := newFakeIsolator(h.layout.CandidatesDir())
+	specs := poolSpecs(h, 9)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	code := newCandidateNode(graph.NodeCode, func(_ context.Context, id string, _ *graph.RunContext) (graph.Result, error) {
+		if id == "cand-01" {
+			cancel()
+		}
+		return Result{Next: graph.End, Status: journal.StatusOK, Note: id}, nil
+	})
+
+	node := &runsCandidates{specs: specs}
+	if _, err := h.poolDispatcher(t, pool{
+		registry: candidateRegistry(t, code), isolator: iso, concurrency: 1, pauseOnCancel: true,
+	}, node).Run(ctx); err == nil {
+		t.Fatal("Run() error = nil, want the cancellation")
+	}
+	if !errors.Is(node.err, context.Canceled) {
+		t.Fatalf("CandidateRuns.Run() error = %v, want one wrapping context.Canceled", node.err)
+	}
+
+	for _, spec := range specs[1:] {
+		if n := iso.creates(spec.ID); n != 0 {
+			t.Errorf("%s had a workspace made (%d times) after the pool was cancelled", spec.ID, n)
+		}
+		if n := code.ran(spec.ID); n != 0 {
+			t.Errorf("%s ran %d nodes after the pool was cancelled", spec.ID, n)
+		}
+		if recs := candidateRecords(t, h, spec.ID); len(recs) != 0 {
+			t.Errorf("%s has %d journal records; a candidate that was never admitted has no run yet",
+				spec.ID, len(recs))
+		}
+		// Claimed all the same, which is what makes the resume cheap.
+		man := candidateManifest(t, h, spec.ID)
+		if man.Candidate == nil || man.Candidate.Provision != state.ProvisionPending {
+			t.Errorf("%s = %+v, want it claimed and not provisioned", spec.ID, man.Candidate)
+		}
+	}
+}
