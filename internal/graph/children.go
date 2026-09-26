@@ -36,11 +36,12 @@ import (
 // Next for fanout, and journal.ResolveStart still never guesses the graph's
 // shape.
 //
-// Nothing in the dispatcher builds a CandidateRunner yet, so
-// RunContext.CandidateRuns is nil in every run belay performs today and a
-// node handed one refuses with ErrNoCandidateRunner. The types are here
-// first, and on their own, so the node can be written and table-tested
-// against a fake before the pool that really runs candidates exists.
+// The Dispatcher builds one when it is given Options.CandidateRegistry, and
+// leaves RunContext.CandidateRuns nil otherwise, which is every run belay
+// performs until a caller wires that registry: a node handed a nil one
+// refuses with ErrNoCandidateRunner. The interface stays the seam the node
+// is table-tested against, so the decisions can be tested with no
+// filesystem and the pool with no node.
 
 // Errors this seam reports. Callers match them with errors.Is.
 var (
@@ -73,9 +74,17 @@ var (
 // exited, so a node may act on what it returns without waiting for anything
 // else.
 //
-// An error means the run as a whole could not be carried out — the caller's
-// context was cancelled, a candidate could not be claimed. Outcomes may
-// still be returned alongside it for the candidates that did end.
+// An error means the run as a whole could not be carried out: the caller's
+// context was cancelled, or the parent run could not be read to claim
+// against. A fault that stopped one candidate is not one of those — it
+// belongs on that candidate's CandidateOutcome.Err, because the node has to
+// be able to pause the run over it rather than end the run, and because the
+// candidates that did end still have end states worth reporting.
+//
+// Outcomes are returned either way, one per spec and in the order the specs
+// came in, each naming the candidate it belongs to. A node places them by
+// index, so a set missing the candidate that went wrong would quietly drop
+// one the run has already paid for.
 type CandidateRunner interface {
 	Run(ctx context.Context, specs []CandidateSpec) ([]CandidateOutcome, error)
 }
@@ -199,18 +208,66 @@ var candidateRunEntries = map[string]bool{
 	"artifacts": true, "snapshots": true, "nodes": true, "worktree": true,
 }
 
-// candidateRunner is the Dispatcher's CandidateRunner: it gives each
-// candidate a run of its own and reports how each one ended.
+// candidateRunner is the Dispatcher's CandidateRunner: a bounded pool that
+// gives each candidate a run of its own and waits for all of them.
+//
+// # One writer per file
 //
 // Every durable file a candidate produces belongs to the candidate. Each one
 // gets its own state.Store, its own journal and its own Dispatcher, under
-// candidate-runs/<id>/, and the runner writes nothing in the parent run at
-// all — it only reads the parent's manifest, once, for the run id and the
-// goal. That is not an optimisation: internal/journal refuses a node_started
+// candidate-runs/<id>/, and the pool writes nothing in the parent run at all
+// — it only reads the parent's manifest, once, for the run id and the goal.
+// That is not an optimisation: internal/journal refuses a node_started
 // opened while another is still open, so two candidates sharing one journal
 // would corrupt it on the second append and journal.Open would refuse the
 // file forever after. Directory nesting makes that unreachable rather than
 // merely avoided.
+//
+// # Claim every candidate before any of them runs
+//
+// Run works in two phases. It claims all N first — a directory, the seed
+// blackboard, the plan, and the manifest written last — in index order, on
+// the calling goroutine, and only then starts anything. Three things rest on
+// that order:
+//
+//   - the envelope split is computed once. Nothing later re-divides the
+//     parent's remaining ceiling, so no crash, resume or edit to belay.yaml
+//     can make the envelopes total more than what was left;
+//   - a Ctrl-C finds every candidate durable. One that never reached a
+//     goroutine still has a directory and an envelope, so a resume adopts it
+//     instead of inventing a new one;
+//   - the estimated charge an interrupted attempt is given cannot shrink a
+//     later candidate's share, because no share is computed after the first
+//     attempt.
+//
+// A candidate that cannot be claimed stops the phase from completing, and
+// then nothing runs. Claiming is cheap and spends nothing, so refusing a
+// fanout that cannot be whole costs a person nothing and saves them paying
+// for candidates whose results could never be compared with the missing
+// one's.
+//
+// # Adopt or create
+//
+// A candidate whose run directory already exists is adopted, never started a
+// second time. That is what makes the parent's resume correct when it died
+// with some candidates finished, some inside a node and some never started:
+// the finished ones are read back with no node executed at all, the
+// interrupted ones heal their own journals and re-run their own open node,
+// and the unprovisioned ones are reclaimed and given a workspace. Ids are
+// derived from the index alone, so the directory a resume looks for is the
+// one the crashed attempt made.
+//
+// # What it reports, and what it refuses to decide
+//
+// The pool reports; the node decides. An outcome carries what the
+// candidate's own files say, and CandidateOutcome.Err carries a fault a
+// resume could fix — a full disk, a directory belay cannot recognise, a
+// panic. Nothing durable is recorded about such a fault and the candidate's
+// journal is left as it is, so the node can pause the run and a resume
+// retries exactly that provisioning. A refusal the isolator says can never
+// work here (belay.ErrUnsupported) is the opposite: it is written into the
+// candidate's own manifest and reproduced on every adoption afterwards,
+// without the isolator being asked again.
 type candidateRunner struct {
 	parent      *Dispatcher
 	registry    *Registry
