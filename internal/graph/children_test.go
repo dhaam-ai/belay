@@ -1616,3 +1616,141 @@ func TestOneCancelLeavesEveryCandidateResumable(t *testing.T) {
 		}
 	}
 }
+
+// TestAnAdoptedEnvelopeIsNeverLoweredAndMayRise: an envelope is a
+// reservation, and part of it may already be spent, so taking it back
+// returns no money. It may rise, because the settled rule for every limit
+// belay enforces is that raising it and resuming continues the run that met
+// it — and a candidate that stopped on its envelope has no other way
+// forward.
+func TestAnAdoptedEnvelopeIsNeverLoweredAndMayRise(t *testing.T) {
+	t.Run("the persisted envelope and the current share, whichever is larger", func(t *testing.T) {
+		cases := []struct {
+			id        string
+			persisted state.Envelope
+			share     state.Envelope
+			want      state.Envelope
+		}{
+			{"cand-01", state.Envelope{LimitUSD: 1.00, LimitTokens: 1000},
+				state.Envelope{LimitUSD: 2.00, LimitTokens: 5000},
+				state.Envelope{LimitUSD: 2.00, LimitTokens: 5000}},
+			{"cand-02", state.Envelope{LimitUSD: 1.00, LimitTokens: 1000},
+				state.Envelope{LimitUSD: 0.50, LimitTokens: 400},
+				state.Envelope{LimitUSD: 1.00, LimitTokens: 1000}},
+			// Zero is uncapped, here as everywhere else belay reads a
+			// ceiling, so it is the larger of the two rather than the
+			// smaller: a candidate claimed while budget.max_tokens was
+			// unset is not capped by one set afterwards.
+			{"cand-03", state.Envelope{LimitUSD: 1.00, LimitTokens: 0},
+				state.Envelope{LimitUSD: 1.00, LimitTokens: 500},
+				state.Envelope{LimitUSD: 1.00, LimitTokens: 0}},
+			{"cand-04", state.Envelope{LimitUSD: 1.00, LimitTokens: 1000},
+				state.Envelope{LimitUSD: 1.00, LimitTokens: 0},
+				state.Envelope{LimitUSD: 1.00, LimitTokens: 0}},
+		}
+
+		h := newRun(t, budgetCfg(8.00, 0), "envelopes only ever rise")
+		iso := reclaimingIsolator{newFakeIsolator(h.layout.CandidatesDir())}
+		specs := poolSpecs(h, len(cases))
+		for i, c := range cases {
+			specs[i].Envelope = c.share
+			seedCandidate(t, h, iso.fakeIsolator, seeded{
+				id: c.id, index: i + 1, provision: state.ProvisionOK,
+				envelope: c.persisted, status: state.RunStatusRunning,
+			})
+		}
+
+		code := newCandidateNode(graph.NodeCode, finishes(0.10))
+		node := &runsCandidates{specs: specs}
+		if _, err := h.poolDispatcher(t, pool{
+			registry: candidateRegistry(t, code), isolator: iso, concurrency: 4,
+		}, node).Run(context.Background()); err != nil {
+			t.Fatalf("Run() error = %v, want nil", err)
+		}
+
+		for i, c := range cases {
+			man := candidateManifest(t, h, c.id)
+			if man.Candidate == nil {
+				t.Fatalf("%s has no candidate block", c.id)
+			}
+			if man.Candidate.Envelope != c.want {
+				t.Errorf("%s persisted envelope = %+v, want %+v (was %+v, share %+v)",
+					c.id, man.Candidate.Envelope, c.want, c.persisted, c.share)
+			}
+			if got := node.outcomes[i].Envelope; got != c.want {
+				t.Errorf("%s outcome envelope = %+v, want %+v", c.id, got, c.want)
+			}
+			if man.Budget.LimitUSD != c.persisted.LimitUSD && man.Budget.LimitUSD != c.want.LimitUSD {
+				t.Errorf("%s manifest budget ceiling = %v, want its envelope", c.id, man.Budget.LimitUSD)
+			}
+		}
+	})
+
+	t.Run("a candidate that met its envelope continues when the ceiling rises", func(t *testing.T) {
+		h := newRun(t, budgetCfg(9.00, 0), "raise it and resume")
+		iso := reclaimingIsolator{newFakeIsolator(h.layout.CandidatesDir())}
+		// cand-01 stopped at its own ceiling: it has spent 1.20 against an
+		// envelope of 1.00, and its run is paused before test.
+		seedCandidate(t, h, iso.fakeIsolator, seeded{
+			id: "cand-01", index: 1, provision: state.ProvisionOK,
+			envelope: state.Envelope{LimitUSD: 1.00}, status: state.RunStatusPaused, step: 1,
+			records: []journal.Record{
+				{Event: journal.EventRunStarted},
+				{Event: journal.EventNodeStarted, Node: graph.NodeCode, Attempt: 1},
+				{Event: journal.EventNodeFinished, Node: graph.NodeCode, Attempt: 1,
+					Status: journal.StatusOK, Next: graph.NodeTest, Usage: &journal.Usage{USD: 1.20}},
+				{Event: journal.EventRunPaused, Note: "budget ceiling reached before \"test\""},
+			},
+		})
+
+		code := newCandidateNode(graph.NodeCode, finishes(0.10))
+		testNode := newCandidateNode(graph.NodeTest, finishes(0.10))
+		specs := poolSpecs(h, 1)
+		specs[0].Envelope = state.Envelope{LimitUSD: 0.50}
+		node := &runsCandidates{
+			specs: specs, rounds: 2,
+			// The second round is the resume after budget.max_usd was
+			// raised: the share is now bigger than what cand-01 holds.
+			between: func(int) { specs[0].Envelope = state.Envelope{LimitUSD: 3.00} },
+		}
+
+		if _, err := h.poolDispatcher(t, pool{
+			registry: candidateRegistry(t, code, testNode), isolator: iso,
+		}, node).Run(context.Background()); err != nil {
+			t.Fatalf("Run() error = %v, want nil", err)
+		}
+
+		// A smaller share changes nothing: it keeps the 1.00 it was
+		// promised, and stops at it again having run nothing.
+		first := node.results[0][0]
+		if first.Envelope.LimitUSD != 1.00 {
+			t.Errorf("first round envelope = %v, want the 1.00 it was claimed with", first.Envelope.LimitUSD)
+		}
+		if first.Status != state.RunStatusPaused {
+			t.Errorf("first round Status = %v, want paused at its own ceiling", first.Status)
+		}
+		if !closeTo(first.Spent.USD, 1.20) {
+			t.Errorf("first round Spent.USD = %v, want the 1.20 it had already spent and nothing more",
+				first.Spent.USD)
+		}
+
+		// A bigger one lets it finish.
+		second := node.results[1][0]
+		if second.Envelope.LimitUSD != 3.00 {
+			t.Errorf("second round envelope = %v, want it raised to the current share of 3.00",
+				second.Envelope.LimitUSD)
+		}
+		if second.Status != state.RunStatusCompleted || second.Err != nil {
+			t.Errorf("second round = {%v, err %v}, want completed", second.Status, second.Err)
+		}
+		if testNode.ran("cand-01") != 1 {
+			t.Errorf("cand-01 ran test %d times, want 1 once its ceiling rose", testNode.ran("cand-01"))
+		}
+		if code.ran("cand-01") != 0 {
+			t.Errorf("cand-01 re-ran code; only the node its journal stopped before runs")
+		}
+		if man := candidateManifest(t, h, "cand-01"); man.Candidate.Envelope.LimitUSD != 3.00 {
+			t.Errorf("cand-01 persisted envelope = %v, want 3.00", man.Candidate.Envelope.LimitUSD)
+		}
+	})
+}

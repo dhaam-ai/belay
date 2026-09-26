@@ -702,10 +702,23 @@ func removeTornClaim(dir string) error {
 // adopt takes over the run directory a previous attempt of the fanout node
 // left, rather than starting the candidate a second time beside it.
 //
-// Nothing in the directory is rewritten. The blackboard holds what that
-// candidate reached, the journal is what its end state is read from and what
-// its own dispatcher heals, and the plan is part of the record of what it
-// worked from.
+// Nothing in the directory is rewritten but the envelope. The blackboard
+// holds what that candidate reached, the journal is what its end state is
+// read from and what its own dispatcher heals, and the plan is part of the
+// record of what it worked from.
+//
+// The envelope it continues with is the larger of the one it was claimed
+// with and the share the node has just computed. It is never lowered: part
+// of it may already be spent, so taking it back returns no money, and a
+// candidate that stopped at its own envelope has to be continuable by
+// raising budget.max_usd and resuming, which is the settled rule for every
+// limit belay enforces. It may rise, and it is written back when it does, so
+// that the next adoption starts from the raised figure and the candidate's
+// own ledger enforces it. See budget.PartitionAtLeast, which states the same
+// rule for the arithmetic that produces the share.
+//
+// The cost, and ADR-0019 states it: lowering budget.max_usd mid-fanout does
+// not claw back what was already reserved.
 func (r *candidateRunner) adopt(spec CandidateSpec, layout state.Layout, runDir string) (*candidateClaim, error) {
 	man, err := state.LoadManifest(layout.ManifestPath())
 	if err != nil {
@@ -716,11 +729,24 @@ func (r *candidateRunner) adopt(spec CandidateSpec, layout state.Layout, runDir 
 			ErrCandidateRunCorrupt, layout.RunDir())
 	}
 
+	envelope := raiseEnvelope(man.Candidate.Envelope, spec.Envelope)
+	if envelope != man.Candidate.Envelope {
+		block := *man.Candidate
+		block.Envelope = envelope
+		man.SetCandidate(block)
+		man.Budget.LimitUSD = envelope.LimitUSD
+		if err := state.SaveManifest(layout.ManifestPath(), man); err != nil {
+			return nil, fmt.Errorf("graph: raise the envelope of candidate %q: %w", spec.ID, err)
+		}
+		r.parent.logger.Info("belay/graph: raised an adopted candidate's envelope to the current share",
+			slog.String("candidate", spec.ID), slog.Float64("envelope_usd", envelope.LimitUSD))
+	}
+
 	r.parent.logger.Info("belay/graph: adopted a candidate run a previous attempt left",
 		slog.String("candidate", spec.ID), slog.String("provision", string(man.Candidate.Provision)))
 	return &candidateClaim{
 		spec: spec, layout: layout, man: man, runDir: runDir,
-		envelope:  man.Candidate.Envelope,
+		envelope:  envelope,
 		provision: man.Candidate.Provision,
 		workspace: man.Candidate.Workspace,
 		note:      man.Candidate.ProvisionNote,
@@ -771,6 +797,32 @@ func (r *candidateRunner) claimFresh(
 	return &candidateClaim{
 		spec: spec, layout: layout, man: man, runDir: runDir, envelope: spec.Envelope,
 	}, nil
+}
+
+// raiseEnvelope returns the envelope an adopted candidate continues with:
+// the higher of what it was promised and what it would be given now, in each
+// dimension separately.
+//
+// Zero is uncapped, here as everywhere else belay reads a ceiling, so it
+// counts as the higher of the two rather than the lower — a candidate
+// claimed while budget.max_tokens was unset is not retroactively capped by
+// one set afterwards.
+//
+// It is a pure function of the persisted value and the share, and the share
+// is itself a pure function of the live ceiling, the parent's spend before
+// the fanout and N — never of what any sibling actually spent, or of the
+// order the goroutines ran in. So two resumes of the same run with the same
+// configuration produce the same envelopes, and a fanout a crash interrupted
+// converges rather than drifting.
+func raiseEnvelope(persisted, share state.Envelope) state.Envelope {
+	var env state.Envelope
+	if persisted.LimitUSD > 0 && share.LimitUSD > 0 {
+		env.LimitUSD = max(persisted.LimitUSD, share.LimitUSD)
+	}
+	if persisted.LimitTokens > 0 && share.LimitTokens > 0 {
+		env.LimitTokens = max(persisted.LimitTokens, share.LimitTokens)
+	}
+	return env
 }
 
 // writePlan copies the plan into the candidate's own artifacts directory, so
