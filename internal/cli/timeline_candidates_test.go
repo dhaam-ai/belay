@@ -912,3 +912,46 @@ func TestLoadCandidateTimelineRefusesAnEscapingID(t *testing.T) {
 		}
 	}
 }
+
+// TestTimelineCommandShowsLanesForARunOnDisk walks the whole path once — the
+// command, the run directory, the candidate runs, the renderer — because
+// every other test here holds one end of it. It is a guard rather than a RED
+// step: the pieces it joins each have their own test above.
+func TestTimelineCommandShowsLanesForARunOnDisk(t *testing.T) {
+	t.Parallel()
+
+	ws, runID := timelineFanoutWorkspace(t)
+
+	out, err := timelineRunCmd(t, runID, "--workspace", ws)
+	if err != nil {
+		t.Fatalf("timeline: %v", err)
+	}
+	const want = "\nCandidates:\n" +
+		"  candidate  outcome   tests       issues  duration    cost\n" +
+		"  cand-01    finished  passed           0     24.1s  $0.250\n" +
+		"  cand-02    failed    not passed       0     24.1s  $0.110\n" +
+		"\n" +
+		"  2 candidates have spent $0.360 so far, each capped at $2.00. The fanout has\n" +
+		"  not settled, so these are running totals from each candidate's own journal.\n"
+	if !strings.HasSuffix(out, want) {
+		t.Errorf("timeline output does not end with the candidate section:\n-want %q\n+got  %s", want, out)
+	}
+	// Nothing rewrote either candidate's journal on the way through.
+	parent, err := state.NewLayout(ws, runID)
+	if err != nil {
+		t.Fatalf("NewLayout: %v", err)
+	}
+	for _, id := range []string{"cand-01", "cand-02"} {
+		layout, err := state.NewCandidateRunLayout(parent, id)
+		if err != nil {
+			t.Fatalf("NewCandidateRunLayout(%q): %v", id, err)
+		}
+		res, err := journal.ReadFile(layout.JournalPath())
+		if err != nil {
+			t.Fatalf("ReadFile(%q): %v", id, err)
+		}
+		if err := journal.Validate(res.Records); err != nil {
+			t.Errorf("candidate %q journal no longer validates: %v", id, err)
+		}
+	}
+}
