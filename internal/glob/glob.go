@@ -72,10 +72,10 @@ func Compile(pattern string) (Pattern, error) {
 	// person who wrote it would have got a rule quietly aimed somewhere else.
 	segs := make([]string, 0, strings.Count(raw, "/")+1)
 	for _, seg := range strings.Split(strings.TrimSuffix(raw, "/"), "/") {
-		switch {
-		case seg == "..":
+		switch seg {
+		case "..":
 			return Pattern{}, fmt.Errorf("%w: %q leaves the workspace, so it can never match a file belay would change", ErrBadPattern, pattern)
-		case seg == "" || seg == ".":
+		case "", ".":
 			// "./src" and "src//main.go" name the path "src/main.go" does.
 			continue
 		}
@@ -94,8 +94,11 @@ func Compile(pattern string) (Pattern, error) {
 		// path.Match reports a malformed character class only when it has a
 		// name to match against, so it is asked here with one that cannot
 		// short-circuit the scan.
+		// Both errors are wrapped: a caller branching on ErrBadPattern is the
+		// common case, and path.ErrBadPattern stays reachable for anything
+		// that wants to know the segment itself was the malformed part.
 		if _, err := path.Match(seg, ""); err != nil {
-			return Pattern{}, fmt.Errorf("%w: %q: %v", ErrBadPattern, pattern, err)
+			return Pattern{}, fmt.Errorf("%w: %q: %w", ErrBadPattern, pattern, err)
 		}
 	}
 	return Pattern{raw: raw, segs: segs}, nil

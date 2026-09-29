@@ -151,8 +151,12 @@ func TestEvaluate(t *testing.T) {
 			want:    []string{},
 		},
 		{
-			name:    "forbidden content",
-			policy:  policy.Policy{ForbiddenContent: []policy.ContentRule{{Pattern: `AKIA[0-9A-Z]{16}`, Reason: "an AWS key"}}},
+			name:   "forbidden content",
+			policy: policy.Policy{ForbiddenContent: []policy.ContentRule{{Pattern: `AKIA[0-9A-Z]{16}`, Reason: "an AWS key"}}},
+			// #nosec G101 -- the point of the rule is to catch a string
+			// shaped like this one, so the fixture has to be shaped like it.
+			// The value is not a credential: it is twenty characters of the
+			// alphabet AWS key ids are drawn from.
 			files:   map[string]string{"a.go": "package a\n\nconst k = \"AKIA0123456789ABCDEF\"\n"},
 			changed: []string{"a.go"},
 			want:    []string{"policy:forbidden_content"},
