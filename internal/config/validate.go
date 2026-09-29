@@ -4,9 +4,12 @@ import (
 	"errors"
 	"fmt"
 	"path"
+	"regexp"
 	"slices"
 	"strconv"
 	"strings"
+
+	"github.com/dhaam-ai/belay/internal/glob"
 )
 
 // enumField describes one field whose value must come from a closed set.
@@ -115,6 +118,7 @@ func (c Config) Validate() error {
 	errs = append(errs, c.budgetErrors()...)
 	errs = append(errs, c.fanoutErrors()...)
 	errs = append(errs, c.planErrors()...)
+	errs = append(errs, c.policyErrors()...)
 	return errors.Join(errs...)
 }
 
@@ -274,6 +278,80 @@ func (c Config) planErrors() []error {
 		return nil
 	}
 	return []error{textError("plan.archive_dir", dir, want)}
+}
+
+// policyErrors checks every rule in the policy section, whether or not this
+// run would reach the gate that enforces them.
+//
+// A rule belay cannot honour is the one kind of configuration mistake that
+// must never load. Every other bad setting stops something from happening; a
+// bad guardrail lets something happen. Somebody who wrote forbidden_paths and
+// saw belay accept it believes their repository is protected, so an
+// uncompilable glob or a pattern that is not a regular expression is refused
+// here, where they wrote it, and named with the index of the rule it is in.
+//
+// Each rule is reported on its own rather than stopping at the first, because
+// a policy is written in one sitting and fixing it one error per run is three
+// rounds of frustration.
+func (c Config) policyErrors() []error {
+	var errs []error
+	p := c.Policy
+	for i, pattern := range p.ForbiddenPaths {
+		if err := checkGlob(pattern); err != nil {
+			errs = append(errs, textError(fmt.Sprintf("policy.forbidden_paths[%d]", i), pattern, err.Error()))
+		}
+	}
+	if p.MaxChangedFiles < 0 {
+		errs = append(errs, intError("policy.max_changed_files", p.MaxChangedFiles,
+			"want 0 for no ceiling, or the most files one change may touch"))
+	}
+	if p.MaxChangedLines < 0 {
+		errs = append(errs, intError("policy.max_changed_lines", p.MaxChangedLines,
+			"want 0 for no ceiling, or the most lines the files one change touches may hold"))
+	}
+	for i, rule := range p.RequiredTests {
+		for _, field := range []struct {
+			name, value, want string
+		}{
+			{"when", rule.When, "want a path glob selecting the changed files this rule is about, such as \"**/*.go\""},
+			{"require", rule.Require, "want a path glob the change must also touch, such as \"**/*_test.go\""},
+		} {
+			key := fmt.Sprintf("policy.required_tests[%d].%s", i, field.name)
+			if strings.TrimSpace(field.value) == "" {
+				errs = append(errs, textError(key, field.value, field.want))
+				continue
+			}
+			if err := checkGlob(field.value); err != nil {
+				errs = append(errs, textError(key, field.value, err.Error()))
+			}
+		}
+	}
+	for i, rule := range p.ForbiddenContent {
+		key := fmt.Sprintf("policy.forbidden_content[%d].pattern", i)
+		switch {
+		case strings.TrimSpace(rule.Pattern) == "":
+			errs = append(errs, textError(key, rule.Pattern, "want a Go regular expression a changed file may not match"))
+		default:
+			if _, err := regexp.Compile(rule.Pattern); err != nil {
+				errs = append(errs, textError(key, rule.Pattern, "want a Go regular expression: "+err.Error()))
+			}
+		}
+		for j, pattern := range rule.Paths {
+			if err := checkGlob(pattern); err != nil {
+				errs = append(errs, textError(fmt.Sprintf("policy.forbidden_content[%d].paths[%d]", i, j), pattern, err.Error()))
+			}
+		}
+	}
+	return errs
+}
+
+// checkGlob reports why a path glob cannot be honoured, in words that fit
+// after "is not valid (".
+func checkGlob(pattern string) error {
+	if _, err := glob.Compile(pattern); err != nil {
+		return errors.New("want a path glob belay can match: " + strings.TrimPrefix(err.Error(), "glob: bad pattern: "))
+	}
+	return nil
 }
 
 func textError(field, value, want string) error {

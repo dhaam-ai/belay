@@ -52,6 +52,7 @@ var knownCapabilities = map[string]bool{
 	CapabilityOutputBranch:        true,
 	CapabilityPlanRegenerate:      true,
 	CapabilityFanoutCandidateRuns: true,
+	CapabilityPolicyGate:          true,
 }
 
 // CapabilityPlanRegenerate is the capability a run declares, in its

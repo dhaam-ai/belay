@@ -13,6 +13,7 @@ import (
 	"github.com/dhaam-ai/belay/internal/budget"
 	"github.com/dhaam-ai/belay/internal/config"
 	"github.com/dhaam-ai/belay/internal/journal"
+	"github.com/dhaam-ai/belay/internal/policy"
 	"github.com/dhaam-ai/belay/internal/state"
 	"github.com/dhaam-ai/belay/internal/vcs"
 	"github.com/dhaam-ai/belay/pkg/belay"
@@ -130,6 +131,40 @@ func TestRunContextGivesANodeTheConfigThisRunPinned(t *testing.T) {
 	}
 }
 
+// A run created with no policy must reach its nodes with no pin at all, not
+// with an empty rule set that reads as "every guardrail is switched off". The
+// gate distinguishes the two: no pin means this run never took a baseline, so
+// there is nothing its change could honestly be judged against.
+func TestRunContextGivesAnUnguardedRunNoPolicyAtAll(t *testing.T) {
+	const runID = "20260101T000000Z-0123456789ab"
+	ws := t.TempDir()
+	layout, err := state.NewLayout(ws, runID)
+	if err != nil {
+		t.Fatalf("NewLayout: %v", err)
+	}
+	// A policy in the file, and none in the manifest: exactly the run that
+	// crashed unguarded and was resumed after somebody added a policy.
+	live := config.Default()
+	live.Policy = config.Policy{ForbiddenPaths: []string{"added/after/the/run/started/**"}}
+
+	reg := NewRegistry()
+	reg.MustRegister(rcIdle{})
+	d, err := NewDispatcher(Options{Store: state.NewStore(layout), Registry: reg, Config: live})
+	if err != nil {
+		t.Fatalf("NewDispatcher: %v", err)
+	}
+	man := state.NewManifest(time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC), runID, ws, "ship it", live)
+
+	rc := d.runContext(&man, state.NewState("ship it"), budget.New(), NodeCode, 1, 1)
+	if rc.Policy != nil {
+		t.Errorf("RunContext.Policy = %+v, want nil: this run was never given a baseline", rc.Policy)
+	}
+	if len(rc.Config.Policy.ForbiddenPaths) != 0 {
+		t.Errorf("RunContext.Config.Policy = %+v, want empty: a node must not be able to reach the live rules",
+			rc.Config.Policy)
+	}
+}
+
 func TestRunContextCarriesEverythingANodeIsAllowedToSee(t *testing.T) {
 	const runID = "20260101T000000Z-0123456789ab"
 	ws := t.TempDir()
@@ -166,6 +201,11 @@ func TestRunContextCarriesEverythingANodeIsAllowedToSee(t *testing.T) {
 	// Not the directory belay.yaml says, for the same reason: where a run
 	// files its plan comes from what the manifest pinned when it started.
 	man.ArchivedPlan.Dir = "notes/plans"
+	// A guarded run, for the reason the branch output above is a branch: the
+	// gate's whole contract is that the rules and the baseline come from the
+	// manifest, and a nil pin could not tell that apart from a field nothing
+	// fills in.
+	man.SetPolicy(state.PolicyPin{Policy: policy.Policy{ForbiddenPaths: []string{"infra/**"}}})
 	st := state.NewState("ship it")
 	st.Fix.Attempts = 2
 	// Spend something, so a Budget that was never filled in cannot pass as
@@ -200,6 +240,7 @@ func TestRunContextCarriesEverythingANodeIsAllowedToSee(t *testing.T) {
 		// is resumed.
 		{"Output", rc.Output, man.Output},
 		{"ArchiveDir", rc.ArchiveDir, "notes/plans"},
+		{"Policy", rc.Policy, man.Policy},
 		{"VCS", rc.VCS, repo},
 	} {
 		if !reflect.DeepEqual(tc.got, tc.want) {

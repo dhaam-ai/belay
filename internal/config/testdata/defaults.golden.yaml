@@ -39,3 +39,10 @@ output:
 plan:
     archive: true
     archive_dir: docs/plans
+policy:
+    forbidden_paths: []
+    max_changed_files: 0
+    max_changed_lines: 0
+    no_new_dependencies: false
+    required_tests: []
+    forbidden_content: []

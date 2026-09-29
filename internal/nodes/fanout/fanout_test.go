@@ -16,6 +16,7 @@ import (
 	"github.com/dhaam-ai/belay/internal/graph"
 	"github.com/dhaam-ai/belay/internal/journal"
 	"github.com/dhaam-ai/belay/internal/nodes/fanout"
+	"github.com/dhaam-ai/belay/internal/policy"
 	"github.com/dhaam-ai/belay/internal/state"
 	"github.com/dhaam-ai/belay/pkg/belay"
 	"github.com/google/go-cmp/cmp"
@@ -879,5 +880,43 @@ func TestRunCancelledBeforeAnythingIsClaimed(t *testing.T) {
 	}
 	if got := runs.callCount(); got != 0 {
 		t.Errorf("the candidate runner was called %d time(s) on a cancelled context", got)
+	}
+}
+
+// join refuses a candidate that broke a guardrail, and it can only do that
+// if this node carries the count across from the candidate's own blackboard.
+// A candidate whose violations were dropped here would be offered to the
+// selection rule as though its change were acceptable, which would make
+// best-of-N the way around a policy.
+func TestFanoutRecordsEachCandidatesPolicyViolations(t *testing.T) {
+	cfg := enabledConfig(2)
+	layout, _ := newLayout(t)
+
+	broke := completed(1, "cand-01", 0, 0.20, 300)
+	broke.State.Policy = state.NewPolicy(policy.Report{Violations: []policy.Violation{
+		{Rule: policy.RuleRequiredTests, Class: policy.ClassFix, Path: "a.go", Message: "no test beside it"},
+		{Rule: policy.RuleForbiddenContent, Class: policy.ClassFix, Path: "a.go", Line: 3, Message: "a key"},
+	}}.QualityReport(), "artifacts/policy-0006.json")
+
+	runs := &recordingRunner{outcomes: []graph.CandidateOutcome{
+		broke, completed(2, "cand-02", 0, 0.20, 300),
+	}}
+	res, err := fanout.New().Run(context.Background(),
+		newRunContext(cfg, layout, runs, state.Budget{LimitUSD: 10}))
+	if err != nil {
+		t.Fatalf("Run() error = %v", err)
+	}
+	if res.Patch.Candidates == nil {
+		t.Fatal("Patch.Candidates is nil")
+	}
+	got := *res.Patch.Candidates
+	if len(got) != 2 {
+		t.Fatalf("got %d candidates, want 2", len(got))
+	}
+	if got[0].PolicyViolations != 2 {
+		t.Errorf("cand-01 PolicyViolations = %d, want 2", got[0].PolicyViolations)
+	}
+	if got[1].PolicyViolations != 0 {
+		t.Errorf("cand-02 PolicyViolations = %d, want 0: its gate recorded nothing", got[1].PolicyViolations)
 	}
 }

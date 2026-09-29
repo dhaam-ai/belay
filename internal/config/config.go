@@ -226,6 +226,62 @@ type Config struct {
 	Output Output `yaml:"output"`
 	// Plan configures what becomes of a run's plan once the run is over.
 	Plan Plan `yaml:"plan"`
+	// Policy configures the guardrails a run's change must obey.
+	Policy Policy `yaml:"policy"`
+}
+
+// Policy is the rules a run's change must obey whatever its tests say: the
+// paths it may not touch, how big it may be, and what it may not contain.
+//
+// It is last in Config, and so last in a rendered belay.yaml, for the reason
+// Output gives: sections are appended in the order they arrived.
+//
+// Every field defaults to nothing, so a repository that declares no policy
+// runs exactly as it always did and never reaches a gate. The rules are read
+// once, when a run is created, and pinned in the run's manifest; ADR-0014
+// records why a guardrail may not be read live when a model route may.
+type Policy struct {
+	// ForbiddenPaths are path globs the change may not touch. See
+	// internal/glob for what a pattern means.
+	ForbiddenPaths []string `yaml:"forbidden_paths"`
+	// MaxChangedFiles is the most files one run's change may touch. Zero
+	// means no ceiling.
+	MaxChangedFiles int `yaml:"max_changed_files"`
+	// MaxChangedLines is the most lines the files a change touches may hold
+	// together. Zero means no ceiling.
+	MaxChangedLines int `yaml:"max_changed_lines"`
+	// NoNewDependencies forbids declaring a dependency the workspace did not
+	// declare when the run was created.
+	NoNewDependencies bool `yaml:"no_new_dependencies"`
+	// RequiredTests are the rules that make a change of one kind bring a
+	// change of another with it.
+	RequiredTests []TestRule `yaml:"required_tests"`
+	// ForbiddenContent are the regular expressions a changed file may not
+	// match.
+	ForbiddenContent []ContentRule `yaml:"forbidden_content"`
+}
+
+// TestRule requires that a change touching a file matching When also touches
+// a file matching Require -- typically, that a change to a source file brings
+// a change to a test.
+type TestRule struct {
+	// When selects the changed files the rule is about, such as "**/*.go".
+	When string `yaml:"when"`
+	// Require is what the change must also touch, such as "**/*_test.go".
+	Require string `yaml:"require"`
+}
+
+// ContentRule forbids a regular expression in the changed files it covers.
+type ContentRule struct {
+	// Pattern is a Go regular expression, matched line by line.
+	Pattern string `yaml:"pattern"`
+	// Paths limits the rule to the changed files matching one of these path
+	// globs. Empty means every changed file.
+	Paths []string `yaml:"paths"`
+	// Reason is what a person is told when the rule fires, in place of the
+	// pattern. A bare regular expression explains nothing to whoever has to
+	// act on it.
+	Reason string `yaml:"reason"`
 }
 
 // Plan configures what becomes of a run's plan once the run is over.
@@ -880,6 +936,7 @@ func (c Config) Snapshot() Snapshot {
 		c.Fanout.snapshot(),
 		c.Output.snapshot(),
 		c.Plan.snapshot(),
+		c.Policy.snapshot(),
 	} {
 		maps.Copy(s, section)
 	}
@@ -961,6 +1018,40 @@ func (p Plan) snapshot() Snapshot {
 	return Snapshot{
 		"plan.archive":     strconv.FormatBool(p.Archive),
 		"plan.archive_dir": p.ArchiveDir,
+	}
+}
+
+// snapshot returns the policy.* settings for [Config.Snapshot].
+//
+// A list is rendered as one line rather than one key per element, unlike
+// agent.models. The reason is what a reader does with the difference: a model
+// moved to another node is one setting changed, and a rule added to a list is
+// the list changed -- there is no "policy.forbidden_paths.2" a person could
+// act on, and numbering them would make inserting a rule at the top read as
+// every rule having changed.
+//
+// A run with no policy renders every key empty or zero, so its digest is what
+// it was before this section existed.
+func (p Policy) snapshot() Snapshot {
+	tests := make([]string, 0, len(p.RequiredTests))
+	for _, rule := range p.RequiredTests {
+		tests = append(tests, rule.When+" requires "+rule.Require)
+	}
+	content := make([]string, 0, len(p.ForbiddenContent))
+	for _, rule := range p.ForbiddenContent {
+		where := "every changed file"
+		if len(rule.Paths) > 0 {
+			where = strings.Join(rule.Paths, ", ")
+		}
+		content = append(content, rule.Pattern+" in "+where)
+	}
+	return Snapshot{
+		"policy.forbidden_paths":     strings.Join(p.ForbiddenPaths, ", "),
+		"policy.max_changed_files":   strconv.Itoa(p.MaxChangedFiles),
+		"policy.max_changed_lines":   strconv.Itoa(p.MaxChangedLines),
+		"policy.no_new_dependencies": strconv.FormatBool(p.NoNewDependencies),
+		"policy.required_tests":      strings.Join(tests, "; "),
+		"policy.forbidden_content":   strings.Join(content, "; "),
 	}
 }
 

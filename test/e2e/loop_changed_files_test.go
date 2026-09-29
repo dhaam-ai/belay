@@ -120,7 +120,7 @@ func TestLoop_FixLoopEditsAreRecordedInChangedFiles(t *testing.T) {
 
 			timeline := h.timeline()
 			if tt.crashInFix {
-				for _, want := range []string{"fix#1 finished aborted -> fix", "fix#2 started", "fix#2 finished ok -> test"} {
+				for _, want := range []string{"fix#1 finished aborted -> fix", "fix#2 started", "fix#2 finished ok -> write"} {
 					if !slices.Contains(timeline, want) {
 						t.Errorf("timeline has no %q; the resume did not re-run fix through crash recovery:\n%v", want, timeline)
 					}

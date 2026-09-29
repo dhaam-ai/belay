@@ -26,11 +26,11 @@ const (
 	maxMessageChars   = 1500
 )
 
-// cause is what routed the run into the fix node: a failing test suite or a
-// failed quality gate. It exists because the fix node has two entry paths
-// and one prompt builder, and building the prompt from the wrong one — a
-// stale review from before the code changed, say — is the most likely way
-// to waste a whole attempt.
+// cause is what routed the run into the fix node: a failing test suite, a
+// failed quality gate, or a policy violation. It exists because the fix node
+// has three entry paths and one prompt builder, and building the prompt from
+// the wrong one — a stale review from before the code changed, say — is the
+// most likely way to waste a whole attempt.
 type cause int
 
 const (
@@ -40,6 +40,9 @@ const (
 	causeTests
 	// causeReview means the recorded quality gate verdict was GateFail.
 	causeReview
+	// causePolicy means the recorded policy gate verdict was GateFail: the
+	// change broke a guardrail the agent can be asked to put right.
+	causePolicy
 )
 
 // String returns a short, stable, lowercase label suitable for a log field.
@@ -51,6 +54,8 @@ func (c cause) String() string {
 		return "failing_tests"
 	case causeReview:
 		return "failed_review_gate"
+	case causePolicy:
+		return "policy_violation"
 	default:
 		return fmt.Sprintf("cause(%d)", int(c))
 	}
@@ -65,11 +70,26 @@ func (c cause) String() string {
 // change anyway. Correctness first, then quality: repairing behaviour that
 // does not work is never wasted, whereas polishing it might be.
 //
+// A policy violation outranks both, and for the same reason rather than a
+// different one. The policy gate runs between write and test, so a run whose
+// gate failed never reached the tests on this pass: whatever test result the
+// blackboard holds was computed against the code as it stood before the
+// change the gate has just judged, and the quality gate's is older still. A
+// failing policy verdict is therefore proof the run arrived here from the
+// gate, and it is the only cause that can be established with certainty --
+// the gate routes to fix on a repairable violation and ends the run on any
+// other kind, so test and review are never reached with one outstanding.
+//
 // A GateError verdict is deliberately not a cause. It means the gate
 // computation itself broke rather than that the code is bad (see
 // belay.GateError), so there is nothing concrete for an agent to repair;
-// that case belongs to a human, not to the fix loop.
+// that case belongs to a human, not to the fix loop. The policy gate never
+// records GateError at all: a policy belay could not evaluate is no verdict,
+// and it stops the node rather than the blackboard.
 func detectCause(st state.State) cause {
+	if st.Policy.Gate == belay.GateFail {
+		return causePolicy
+	}
 	if testsFailing(st.Test) {
 		return causeTests
 	}
@@ -100,9 +120,10 @@ type promptInput struct {
 	// counts towards.
 	Attempt int
 	GiveUp  int
-	// Test and Review are the blackboard's failure records.
+	// Test, Review and Policy are the blackboard's failure records.
 	Test   state.Test
 	Review state.Review
+	Policy state.Policy
 	// ChangedFiles is what the run has recorded as changed: the files the
 	// code node reported, and those every earlier repair reported.
 	ChangedFiles []string
@@ -127,6 +148,8 @@ func buildPrompt(in promptInput) string {
 		writeTestSection(&b, in.Test)
 	case causeReview:
 		writeReviewSection(&b, in.Review)
+	case causePolicy:
+		writePolicySection(&b, in.Policy)
 	case causeNone:
 		// Unreachable: Run refuses to prompt without a cause, precisely so
 		// that no agent is ever asked to fix nothing in particular.
@@ -243,6 +266,54 @@ func writeReviewSection(b *strings.Builder, r state.Review) {
 	}
 }
 
+// writePolicySection renders the guardrails the change broke.
+//
+// It reads exactly like the quality-gate section, because a violation is a
+// belay.Issue like any other finding and the agent has already been taught to
+// act on that shape. What differs is the framing above the list: a policy
+// violation is not a defect in the code, it is the change being outside what
+// this repository allows, and an agent told "fix these issues" would
+// reasonably try to make the checker happy. Saying where the rules come from
+// is what makes the difference legible.
+func writePolicySection(b *strings.Builder, p state.Policy) {
+	b.WriteString("## Policy violations\n\n")
+	b.WriteString("This repository declares rules in belay.yaml that a change must obey whatever its tests " +
+		"say, and this change breaks the ones below.\n")
+	if summary := strings.TrimSpace(p.Summary); summary != "" {
+		fmt.Fprintf(b, "Gate summary: %s\n", summary)
+	}
+	if p.ReportPath != "" {
+		fmt.Fprintf(b, "Full report: %s\n", p.ReportPath)
+	}
+	b.WriteString("\n")
+
+	violations := slices.Clone(p.Violations)
+	slices.SortStableFunc(violations, compareIssues)
+	shown := violations
+	if len(shown) > maxPromptIssues {
+		shown = shown[:maxPromptIssues]
+	}
+	for i, v := range shown {
+		rule := strings.TrimSpace(v.RuleID)
+		if rule == "" {
+			rule = "(no rule id)"
+		}
+		fmt.Fprintf(b, "%d. [%s] %s\n", i+1, rule, location(v.File, v.Line))
+		if msg := strings.TrimSpace(v.Message); msg != "" {
+			b.WriteString(indent(truncate(msg, maxMessageChars), "   "))
+			b.WriteString("\n")
+		}
+		b.WriteString("\n")
+	}
+	if extra := len(violations) - len(shown); extra > 0 {
+		fmt.Fprintf(b, "...and %d more violations not listed here.\n\n", extra)
+	}
+	if len(violations) == 0 {
+		b.WriteString("The gate failed without listing individual violations. Work from the summary above, " +
+			"and if it is not actionable, say so rather than guessing at changes.\n\n")
+	}
+}
+
 // writeChangedFiles reminds the agent which files this run already touched.
 // It matters most when the session could not be resumed: without it a cold
 // agent has the failures but no idea which of its own edits caused them.
@@ -264,28 +335,54 @@ func writeChangedFiles(b *strings.Builder, files []string) {
 	b.WriteString("\n")
 }
 
-// writeInstructions renders the rules of the repair, which differ by cause:
-// a failing test is repaired by changing code, whereas a failed gate can be
-// "repaired" by suppressing the rule, and the prompt has to say that is not
-// what repair means here.
+// writeInstructions renders the rules of the repair, which differ by cause.
+//
+// A failing test is repaired by changing code. A failed quality gate can be
+// "repaired" by suppressing the finding, and a policy violation by rewriting
+// the policy, so each of those has to say in as many words that this is not
+// what repair means. The policy case is the sharpest of the three: the rules
+// are the repository's rather than the task's, and belay judges the run
+// against the rules it started with whatever belay.yaml says by the end, so
+// an agent that edited the file would have spent an attempt achieving
+// nothing.
+//
+// The list is numbered as it is written rather than in literals, because the
+// cause-specific part is three items for some causes and four for others,
+// and a hard-coded tail leaves a gap in the numbering for the rest.
 func writeInstructions(b *strings.Builder, in promptInput) {
 	b.WriteString("## What to do\n\n")
 
-	if in.Cause == causeReview {
-		b.WriteString("1. Fix the issues above, most severe first.\n")
-		b.WriteString("2. Fix the underlying problem, not the report. Do not silence a finding with a " +
-			"suppression comment, a lint exclusion, or a config change unless the finding is genuinely " +
-			"wrong — and if it is, say so explicitly in your summary.\n")
-		b.WriteString("3. Keep the existing tests passing: the suite runs again as soon as you finish.\n")
-	} else {
-		b.WriteString("1. Diagnose the root cause of each failure above before changing anything.\n")
-		b.WriteString("2. Change the least code that makes those tests pass.\n")
-		b.WriteString("3. Do not delete, skip, rename, or weaken a test to make the suite green. If a " +
-			"test itself is wrong, fix the test and say so explicitly in your summary.\n")
+	n := 0
+	item := func(text string) {
+		n++
+		fmt.Fprintf(b, "%d. %s\n", n, text)
 	}
-	b.WriteString("4. Do not touch code unrelated to what is listed above.\n")
-	b.WriteString("5. Finish with a short summary: what was broken, what you changed, and why. " +
-		"Then list the files you changed, as below.\n\n")
+
+	switch in.Cause {
+	case causePolicy:
+		item("Bring the change within the rules above.")
+		item("Do NOT edit belay.yaml, and do not add, widen or remove a policy rule. The rules are this " +
+			"repository's, not this task's; belay judges this run against the rules it started with " +
+			"whatever the file says by the end, so rewriting the gate spends an attempt and changes nothing.")
+		item("If a rule genuinely cannot be satisfied for this goal, do not work around it: say so " +
+			"explicitly in your summary and change nothing, so a person can decide.")
+		item("Keep the existing tests passing: the suite runs as soon as the change is within the rules.")
+	case causeReview:
+		item("Fix the issues above, most severe first.")
+		item("Fix the underlying problem, not the report. Do not silence a finding with a suppression " +
+			"comment, a lint exclusion, or a config change unless the finding is genuinely wrong — and if " +
+			"it is, say so explicitly in your summary.")
+		item("Keep the existing tests passing: the suite runs again as soon as you finish.")
+	case causeTests, causeNone:
+		item("Diagnose the root cause of each failure above before changing anything.")
+		item("Change the least code that makes those tests pass.")
+		item("Do not delete, skip, rename, or weaken a test to make the suite green. If a test itself is " +
+			"wrong, fix the test and say so explicitly in your summary.")
+	}
+	item("Do not touch code unrelated to what is listed above.")
+	item("Finish with a short summary: what was broken, what you changed, and why. Then list the files " +
+		"you changed, as below.")
+	b.WriteString("\n")
 
 	writeReportRequest(b, in.ChangedFiles)
 

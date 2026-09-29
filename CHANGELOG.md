@@ -10,6 +10,36 @@ that only `pkg/belay` carries a compatibility promise. Everything under
 
 ### Added
 
+- **Guardrails a run's change must obey, whatever its tests say.** The new
+  `policy` section in `belay.yaml` declares paths a change may not touch
+  (`forbidden_paths`), ceilings on its size (`max_changed_files`,
+  `max_changed_lines`), a ban on declaring a dependency the workspace did not
+  already declare (`no_new_dependencies`), a rule that a change of one kind
+  must bring a change of another with it (`required_tests`, typically a test
+  beside the code), and text a changed file may not contain
+  (`forbidden_content`). A guarded run gains a `policy` step between `write`
+  and `test`, so the change is judged before anything else is spent on it and
+  again on every pass of the fix loop. A forbidden path or an exceeded ceiling
+  ends the run, because a change that touched what it may not touch is not
+  something to ask an agent to repair; the other rules go to the fix loop,
+  which tells the agent what it broke and asks for a repair, bounded by
+  `graph.give_up`. Violations reach you as the same report a linter's findings
+  do, archived per step, and `belay run --dry-run` prints every rule and says
+  which ones would end a run. A rule belay cannot honour — an unusable path
+  glob, a pattern that is not a regular expression — is refused when the
+  configuration loads rather than skipped at the gate: a guardrail that
+  silently does nothing is worse than none, because somebody is relying on it.
+  The rules, and a survey of what your workspace declared, are recorded when
+  the run starts, so `belay resume` holds a run to the rules it began with and
+  warns if `belay.yaml` has changed since — a policy added mid-run has no
+  record of the tree from before the agent ran, and could only fail the run
+  for something it did not do. `max_changed_lines` counts the whole of every
+  file the change touches rather than a diff, because belay keeps no copy of
+  the tree from before; a one-line edit to a 900-line file counts 900.
+  Best-of-N is not a way around a rule: `join` will not promote a candidate
+  whose change broke one. Repositories that declare no policy run exactly as
+  they did. ADR-0014 records the decision, and `docs/config.md` documents
+  every setting.
 - **`belay timeline` shows what a best-of-N run's candidates did.** A run
   that fans out now gets a lane per candidate after its totals: how each one
   ended, whether its tests passed, how many issues its quality gate found,
@@ -198,6 +228,14 @@ that only `pkg/belay` carries a compatibility promise. Everything under
   `belay runs` lists such a run as waiting and `belay resume` accepts it.
 
 ### Fixed
+
+- **A repair's file list is checked against the disk, not taken on trust.**
+  The fix step routed straight back to the tests, so a repair was the one
+  change in a run that nothing verified: no claimed path was proven to be a
+  regular file inside the workspace, no diff of the repair was recorded, and
+  the run's `last_diff` still pointed at the original change however many
+  repairs had happened since. A repair now goes back through the `write` step,
+  which does all three.
 
 - **A step that stops because of the budget ceiling now pauses the run, like
   every other limit.** belay's own guards pause a run that reaches

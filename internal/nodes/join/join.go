@@ -19,11 +19,11 @@
 // the order fanout recorded them, and the outcome is deterministic for a
 // given input.
 //
-// Eligible means the candidate's tests passed AND its own candidate run
-// completed — see eligible, which argues the second half. It is one
-// predicate rather than a term inside each row, so no rule can opt out of
-// it and the next thing that disqualifies a candidate is added in one
-// place.
+// Eligible means the candidate's tests passed, its own candidate run
+// completed, and its change broke none of the repository's guardrails — see
+// eligible, which argues each term. It is one predicate rather than a term
+// inside each row, so no rule can opt out of it and the next thing that
+// disqualifies a candidate is added in one place.
 //
 // Determinism is not a nicety here. The dispatcher re-runs a node whose
 // start has no matching finish, which is exactly how a crash inside join

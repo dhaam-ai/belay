@@ -23,6 +23,7 @@ import (
 	"github.com/dhaam-ai/belay/internal/isolate/worktree"
 	"github.com/dhaam-ai/belay/internal/linter"
 	"github.com/dhaam-ai/belay/internal/nodes"
+	"github.com/dhaam-ai/belay/internal/policy"
 	"github.com/dhaam-ai/belay/internal/runner"
 	"github.com/dhaam-ai/belay/internal/sonar/scanner"
 	"github.com/dhaam-ai/belay/internal/state"
@@ -102,6 +103,12 @@ type runPlan struct {
 	// end. gh runs the GitHub command line, and is nil outside a test.
 	remote string
 	gh     ghRunner
+	// policy is the guardrails this run is held to, or nil for a run that
+	// declares none. It is a pin, not a reading of the file: resolvePolicy
+	// builds it for a new run from belay.yaml, createRun completes it with
+	// the baseline it surveys, and bindPolicy replaces it on a resume with
+	// what the run's own manifest recorded.
+	policy *state.PolicyPin
 	// goal is what the person asked for, which a pull request's title and
 	// body are written from. startRun sets it; a resume reads it from the
 	// run's manifest.
@@ -295,6 +302,9 @@ func resolve(req resolveRequest) (*runPlan, error) {
 	// from it: a branch run has a promote node and an in-place run does not.
 	p.resolveOutput(req.ctx())
 	p.resolvePullRequest(req.ctx(), runFlags.pullRequest, lookGh)
+	// The policy comes before the registry, for the reason the output does:
+	// whether a run has a gate follows from it.
+	p.resolvePolicy()
 	p.resolveRegistry()
 	p.resolveModels()
 	p.warnAboutFanout()
@@ -611,17 +621,40 @@ func (p *runPlan) resolveReplayAgent() {
 	p.agent = backend
 }
 
+// resolvePolicy settles the guardrails a NEW run would be held to, from
+// belay.yaml as it stands now.
+//
+// It records the rules and not the baseline. The baseline is a survey of the
+// tree the run's nodes will work in, and for a branch run that tree does not
+// exist until createRun has made the worktree, so createRun completes the pin
+// (see pinPolicy). What this decides is the part the registry and the dry run
+// need: whether this run has a gate at all.
+//
+// A policy that asks for nothing is no policy. Pinning an empty rule set
+// would put a gate on the route of a run with nothing to judge, and would
+// make every run declare a capability that older belays would then refuse,
+// for guardrails nobody configured.
+func (p *runPlan) resolvePolicy() {
+	rules := policy.From(p.config.Policy)
+	if rules.Empty() {
+		p.policy = nil
+		return
+	}
+	p.policy = &state.PolicyPin{Policy: rules}
+}
+
 // resolveRegistry builds the node graph the dispatcher walks, and the route
 // belay shows a person, together. Whatever options nodes.Default is given,
 // nodes.Route must be given too, or belay shows one graph and walks another.
 //
-// It reads p.output, never p.config.Output, and that is the whole rule
-// internal/nodes states from the other side: whether a run has the promote
-// node is pinned in its manifest when the run is created, and belay.yaml may
-// have changed by the time the run is resumed. resolveOutput sets p.output
-// for a new run from belay.yaml; bindOutput sets it for a resume from the
-// chosen run's manifest, and calls this again. It never refuses a run: a pin
-// this plan cannot honour is resumePreflight's to report.
+// It reads p.output and p.policy, never p.config.Output or p.config.Policy,
+// and that is the whole rule internal/nodes states from the other side:
+// whether a run has the promote node or the policy gate is pinned in its
+// manifest when the run is created, and belay.yaml may have changed by the
+// time the run is resumed. resolveOutput and resolvePolicy set them for a new
+// run from belay.yaml; bindOutput and bindPolicy set them for a resume from
+// the chosen run's manifest, and call this again. It never refuses a run: a
+// pin this plan cannot honour is resumePreflight's to report.
 //
 // The route is set even when the registry cannot be built, so that a dry run
 // refusing to start still shows the route it would have taken.
@@ -629,6 +662,9 @@ func (p *runPlan) resolveRegistry() {
 	var opts []nodes.Option
 	if p.output.Branched() {
 		opts = append(opts, nodes.WithBranchOutput())
+	}
+	if p.policy != nil {
+		opts = append(opts, nodes.WithPolicyGate())
 	}
 	p.route = nodes.Route(p.config, opts...)
 	registry, err := nodes.Default(p.config, opts...)

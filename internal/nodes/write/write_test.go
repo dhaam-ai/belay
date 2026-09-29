@@ -486,3 +486,47 @@ func TestNodeRegistersWithTheDispatcher(t *testing.T) {
 		t.Fatalf("Get(%q) error = %v; want ErrUnknownNode", graph.NodeTest, err)
 	}
 }
+
+// A run whose change is held to a policy sends every verified change set to
+// the gate first, and the gate sends it on to the tests. The successor is an
+// Option rather than something the node works out from configuration,
+// because whether a run has a gate is pinned in its manifest when the run is
+// created -- internal/nodes explains why an edge may not be read from a file
+// that can change mid-run.
+func TestWithOnVerifiedSendsTheChangeSetToTheGate(t *testing.T) {
+	rc, root := newRC(t, 7, []string{"src/main.go"})
+	mustWrite(t, filepath.Join(root, "src", "main.go"), "package main\n")
+
+	got, err := New(WithOnVerified(graph.NodePolicy)).Run(context.Background(), rc)
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if got.Next != graph.NodePolicy {
+		t.Errorf("Next = %q, want %q", got.Next, graph.NodePolicy)
+	}
+	if got.Status != journal.StatusOK {
+		t.Errorf("Status = %v, want %v", got.Status, journal.StatusOK)
+	}
+
+	// The default is unchanged, so a run with no policy is exactly the run
+	// belay has always had.
+	plain, err := New().Run(context.Background(), rc)
+	if err != nil {
+		t.Fatalf("Run without the option: %v", err)
+	}
+	if plain.Next != graph.NodeTest {
+		t.Errorf("Next without the option = %q, want %q", plain.Next, graph.NodeTest)
+	}
+
+	// A refusal is a refusal whatever the successor is: it carries no Next
+	// at all, because the run is stopping.
+	refused, root2 := newRC(t, 8, []string{"../escape.go"})
+	_ = root2
+	res, err := New(WithOnVerified(graph.NodePolicy)).Run(context.Background(), refused)
+	if err != nil {
+		t.Fatalf("Run on a refused change set: %v", err)
+	}
+	if res.Status != journal.StatusFailed {
+		t.Errorf("Status = %v, want %v", res.Status, journal.StatusFailed)
+	}
+}

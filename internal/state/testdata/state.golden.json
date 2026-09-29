@@ -45,12 +45,26 @@
     "attempts": 0,
     "give_up": false
   },
+  "policy": {
+    "gate": "pass",
+    "violations": [],
+    "counts": {
+      "blocker": 0,
+      "critical": 0,
+      "major": 0,
+      "minor": 0,
+      "info": 0
+    },
+    "summary": "no policy violations",
+    "report_path": "artifacts/policy-0004.json"
+  },
   "candidates": [
     {
       "id": "c1",
       "dir": "/work/candidates/c1",
       "test_passed": true,
       "issue_count": 0,
+      "policy_violations": 0,
       "ephemeral": true,
       "outcome": "completed",
       "run_dir": "candidate-runs/c1",

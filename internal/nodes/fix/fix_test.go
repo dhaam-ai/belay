@@ -16,6 +16,7 @@ import (
 	"github.com/dhaam-ai/belay/internal/graph"
 	"github.com/dhaam-ai/belay/internal/journal"
 	"github.com/dhaam-ai/belay/internal/nodes/fix"
+	"github.com/dhaam-ai/belay/internal/policy"
 	"github.com/dhaam-ai/belay/internal/state"
 	"github.com/dhaam-ai/belay/pkg/belay"
 	"github.com/dhaam-ai/belay/pkg/belay/belaytest"
@@ -176,8 +177,8 @@ func TestGiveUpBoundary(t *testing.T) {
 				if res.Status != journal.StatusOK {
 					t.Errorf("Status = %v, want StatusOK below the cap", res.Status)
 				}
-				if res.Next != graph.NodeTest {
-					t.Errorf("Next = %q, want %q", res.Next, graph.NodeTest)
+				if res.Next != graph.NodeWrite {
+					t.Errorf("Next = %q, want %q", res.Next, graph.NodeWrite)
 				}
 				if res.Patch.Fix == nil || res.Patch.Fix.Attempts != attempts+1 {
 					t.Errorf("Patch.Fix = %+v, want Attempts=%d", res.Patch.Fix, attempts+1)
@@ -309,8 +310,8 @@ func TestEntryPaths(t *testing.T) {
 			if err != nil {
 				t.Fatalf("Run: %v", err)
 			}
-			if res.Next != graph.NodeTest {
-				t.Errorf("Next = %q, want %q", res.Next, graph.NodeTest)
+			if res.Next != graph.NodeWrite {
+				t.Errorf("Next = %q, want %q", res.Next, graph.NodeWrite)
 			}
 			if !strings.Contains(res.Note, tt.wantNoteHas) {
 				t.Errorf("Note = %q, want it to contain %q", res.Note, tt.wantNoteHas)
@@ -668,8 +669,8 @@ func TestMalformedRawStillArchivesTheResponse(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Run: %v", err)
 	}
-	if res.Status != journal.StatusOK || res.Next != graph.NodeTest {
-		t.Errorf("Result = %+v, want a normal OK->test result", res)
+	if res.Status != journal.StatusOK || res.Next != graph.NodeWrite {
+		t.Errorf("Result = %+v, want a normal OK->write result", res)
 	}
 	if res.Usage.USD != 0.02 {
 		t.Errorf("Usage = %+v, want the spend to still be reported", res.Usage)
@@ -772,5 +773,63 @@ func TestRunCarriesTheBackendsSpendOnAnAgentFailure(t *testing.T) {
 	}
 	if res.Usage != spent {
 		t.Errorf("Result.Usage = %+v, want %+v: the spend the backend reported was dropped", res.Usage, spent)
+	}
+}
+
+// TestRunRoutesBackThroughWrite is the edge Wave 0b deferred to the policy
+// slice. A repair reports the files it changed, and before this the run took
+// that report on trust: fix routed straight to test, so nothing checked the
+// paths against disk, nothing rendered a diff of the repair, and
+// State.Code.LastDiff still pointed at the diff of the original change.
+//
+// Routing through write fixes all three at once. write is the node that
+// proves a claimed path is a regular file inside the workspace -- a symbolic
+// link out of it is refused there and nowhere else -- and it writes a numbered
+// patch artifact per execution, so every repair leaves its own record.
+func TestRunRoutesBackThroughWrite(t *testing.T) {
+	t.Parallel()
+
+	st := state.NewState("add rate limiting to the login handler")
+	st.Plan = state.Plan{Approved: true}
+	st.Test = failingTests()
+	h := newHarness(t, st)
+
+	res, err := fix.New().Run(context.Background(), h.rc)
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if res.Next != graph.NodeWrite {
+		t.Errorf("Next = %q, want %q: a repair's paths must be checked against the disk before its tests run",
+			res.Next, graph.NodeWrite)
+	}
+	if res.Status != journal.StatusOK {
+		t.Errorf("Status = %s, want %s", res.Status, journal.StatusOK)
+	}
+}
+
+// The journal note says which of the three failures this attempt was spent
+// on. A note that read "quality gate failed" for a run the policy gate sent
+// here would send whoever reads the timeline to the wrong tool.
+func TestCauseNoteNamesThePolicyGate(t *testing.T) {
+	t.Parallel()
+
+	st := state.NewState("add rate limiting to the login handler")
+	st.Plan = state.Plan{Approved: true}
+	st.Policy = state.NewPolicy(policy.Report{Violations: []policy.Violation{
+		{Rule: policy.RuleRequiredTests, Class: policy.ClassFix, Path: "a.go", Message: "no test beside it"},
+	}}.QualityReport(), "artifacts/policy-0006.json")
+	h := newHarness(t, st)
+
+	res, err := fix.New().Run(context.Background(), h.rc)
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	// The default branch of causeNote would render the cause's log label,
+	// "policy_violation", which contains the word and tells a reader
+	// nothing about the run. The note has to say how much is wrong, as it
+	// does for the other two causes.
+	if !strings.Contains(res.Note, "1 policy violation") {
+		t.Errorf("Note = %q; want it to say how much the gate found, as it does for tests and the quality gate",
+			res.Note)
 	}
 }

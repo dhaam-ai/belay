@@ -1,8 +1,11 @@
 package nodes_test
 
 import (
+	"context"
 	"io"
 	"log/slog"
+	"os"
+	"path/filepath"
 	"slices"
 	"testing"
 
@@ -345,5 +348,122 @@ func TestNoUnreachableOrDuplicateNodes(t *testing.T) {
 		if seen[absent] {
 			t.Errorf("%q is registered with fanout disabled", absent)
 		}
+	}
+}
+
+// TestPolicyGateWiresTheGateAndTheEdgeIntoIt: a run whose change is held to
+// a policy has one more node, between write and test, and one edge leading
+// into it. The route a person is shown and the registry the dispatcher
+// resolves names through must gain both together, or belay walks a graph it
+// is not showing.
+func TestPolicyGateWiresTheGateAndTheEdgeIntoIt(t *testing.T) {
+	t.Parallel()
+
+	guarded := []string{
+		graph.NodePlan, graph.NodeApprove, graph.NodeCode, graph.NodeWrite,
+		graph.NodePolicy, graph.NodeTest, graph.NodeFix, graph.NodeReview,
+	}
+	guardedBranch := append(slices.Clone(guarded), graph.NodePromote)
+
+	for _, tc := range []struct {
+		name string
+		opts []nodes.Option
+		want []string
+	}{
+		{name: "a guarded run", opts: []nodes.Option{nodes.WithPolicyGate()}, want: guarded},
+		{
+			// The two options compose whichever way round they are given:
+			// one adds a node after write, the other after review.
+			name: "a guarded run on a branch",
+			opts: []nodes.Option{nodes.WithPolicyGate(), nodes.WithBranchOutput()},
+			want: guardedBranch,
+		},
+		{
+			name: "the same two options in the other order",
+			opts: []nodes.Option{nodes.WithBranchOutput(), nodes.WithPolicyGate()},
+			want: guardedBranch,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			if got := nodes.Route(config.Default(), tc.opts...); !slices.Equal(got, tc.want) {
+				t.Fatalf("Route() = %v, want %v", got, tc.want)
+			}
+			registry, err := nodes.Default(config.Default(), tc.opts...)
+			if err != nil {
+				t.Fatalf("Default: %v", err)
+			}
+			registered := registry.Names()
+			slices.Sort(registered)
+			accounted := slices.Clone(tc.want)
+			slices.Sort(accounted)
+			if !slices.Equal(registered, accounted) {
+				t.Errorf("Default registers %v, the route accounts for %v", registered, accounted)
+			}
+		})
+	}
+}
+
+// The edge into the gate is the whole of what makes it reachable. A registry
+// that held the gate while write still routed to test would walk past it
+// every time, which is exactly the silently-does-nothing failure the gate
+// exists to prevent.
+func TestThePolicyGateIsReachedFromWrite(t *testing.T) {
+	t.Parallel()
+
+	registry, err := nodes.Default(config.Default(), nodes.WithPolicyGate())
+	if err != nil {
+		t.Fatalf("Default: %v", err)
+	}
+	write, err := registry.Get(graph.NodeWrite)
+	if err != nil {
+		t.Fatalf("Get(write): %v", err)
+	}
+	ws := t.TempDir()
+	if err := os.WriteFile(filepath.Join(ws, "a.go"), []byte("package a\n"), 0o600); err != nil {
+		t.Fatalf("write a.go: %v", err)
+	}
+	layout, err := state.NewLayout(ws, "20260101T000000Z-c0ffee000000")
+	if err != nil {
+		t.Fatalf("NewLayout: %v", err)
+	}
+	if err := os.MkdirAll(layout.ArtifactsDir(), 0o750); err != nil {
+		t.Fatalf("mkdir artifacts: %v", err)
+	}
+	st := state.NewState("ship it")
+	st.Code.ChangedFiles = []string{"a.go"}
+
+	res, err := write.Run(context.Background(), &graph.RunContext{
+		Goal: "ship it", State: st, Config: config.Default(), Layout: layout, Workspace: ws,
+		RunID: layout.RunID(), NodeName: graph.NodeWrite, Step: 4, Attempt: 1,
+		Logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
+	})
+	if err != nil {
+		t.Fatalf("write.Run: %v", err)
+	}
+	if res.Next != graph.NodePolicy {
+		t.Fatalf("write routes to %q in a guarded run, want %q", res.Next, graph.NodePolicy)
+	}
+	if _, err := registry.Get(res.Next); err != nil {
+		t.Errorf("write routes to %q, which the registry does not hold: %v", res.Next, err)
+	}
+}
+
+// A run with no policy is exactly the run belay has always had: no gate in
+// the registry, and write still routing to test. Guardrails are opt-in, and
+// nothing about the graph of a repository that declares none may change.
+func TestAnUnguardedRunHasNoGateAtAll(t *testing.T) {
+	t.Parallel()
+
+	registry, err := nodes.Default(config.Default())
+	if err != nil {
+		t.Fatalf("Default: %v", err)
+	}
+	if _, err := registry.Get(graph.NodePolicy); err == nil {
+		t.Error("Default registered a policy gate for a run that declared no policy")
+	}
+	if slices.Contains(nodes.Route(config.Default()), graph.NodePolicy) {
+		t.Error("Route shows a policy gate for a run that declared no policy")
 	}
 }

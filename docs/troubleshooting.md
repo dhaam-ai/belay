@@ -451,6 +451,31 @@ A run stopped between finishing and moving its plan leaves it in the run directo
 
 <!-- slice:queue -->
 
-<!-- slice:policy -->
+## A Run Stopped on a Policy Rule
+
+**Symptom**: A run ended at the `policy` step, with a note naming a rule such as `policy:forbidden_path` or `policy:max_changed_files`.
+
+**Cause**: `belay.yaml` declares guardrails the change must obey whatever its tests say, and the change broke one belay will not ask an agent to repair. `forbidden_paths`, `max_changed_files` and `max_changed_lines` end the run: a change that touched a path it may not touch is not something to send back for another attempt. The other rules go to the fix loop instead.
+
+**Diagnosis**:
+- `belay timeline <run-id>` shows the `policy` step and the rules that fired
+- The full report is at `.belay/runs/<run-id>/artifacts/policy-<step>.json`, listing every violation with its file and, for a content match, its line
+- `.belay/runs/<run-id>/artifacts/diff-<step>.patch` is the change that was judged
+
+**Remedy**:
+- If the change should not have touched what it touched, the run did its job: narrow the goal and start a fresh run
+- If the rule is wrong, change it in `belay.yaml` and start a fresh run. `belay resume` will **not** apply the new rule: belay holds a run to the rules it started with, which is why the gate can trust the baseline it recorded then
+- `belay run --dry-run` prints every rule and says which ones end a run, so the next run holds no surprises
+
+## A Policy Was Added and the Run Ignores It
+
+**Symptom**: `belay.yaml` declares a policy, but `belay resume <run-id>` says the run keeps going without one, and no `policy` step appears in its route.
+
+**Cause**: This is deliberate, and belay warns about it. The rules and a survey of what the workspace declared are recorded in the run's `manifest.json` when the run is created. A run that started before the policy existed never took that survey, so there is nothing its change could honestly be judged against — every dependency in the tree would look new, and the run would be failed for work it did not do.
+
+**Remedy**:
+- Start a fresh run; it picks the policy up.
+- The reverse holds too: a run started **with** a policy keeps it even if you delete the rules before resuming, and belay warns about that as well.
+
 
 <!-- slice:backend -->

@@ -1054,6 +1054,7 @@ func (d *Dispatcher) runContext(
 		// the run was created, never from d.cfg.
 		Output:     man.Output,
 		ArchiveDir: man.ArchivedPlan.Dir,
+		Policy:     man.Policy,
 		VCS:        d.vcs,
 		// Nil for every run that does not fan out; see Options.CandidateRegistry.
 		CandidateRuns: d.candidates,
