@@ -567,7 +567,6 @@ policy:
 
 Only the changed files are read, never the whole repository: this is a check on what the run did, not an audit of what was already there. A changed file with a line longer than 1 MiB — a minified bundle, a generated blob — stops the gate with an error rather than being reported as clean, because "belay could not look" must never be recorded as "belay looked and it was fine". Exclude such a file with the rule's `paths`, or name it in `policy.forbidden_paths`.
 
-<!-- slice:policy -->
 
 ## Environment Variables
 

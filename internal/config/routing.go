@@ -91,11 +91,12 @@ func RoutableNodes() []string {
 // does for the budget ceiling: a run stopped by a setting can be resumed
 // once the setting is fixed, rather than having to be started again.
 //
-// Slice 4b, which owns ADR-0014 for routing and the policy gate together,
-// should fold this in. The policy gate is the opposite case and is pinned:
-// it judges a change against a baseline taken when the run began, so a
-// policy that arrived mid-run could only fail the run for something it did
-// not do.
+// ADR-0014 records this beside the opposite case. The policy gate IS pinned,
+// because it changes the graph's shape and because it judges a change against
+// a baseline taken when the run began: a policy that arrived mid-run could
+// only fail the run for something it did not do. Limits are live, routing is
+// live, shape is pinned -- three categories, and the ADR says how to place a
+// new setting in one of them.
 type Models map[string]string
 
 // UnmarshalYAML decodes a mapping of node name to model into a fresh map.
