@@ -22,8 +22,10 @@ import (
 	"io/fs"
 	"os"
 	"slices"
+	"strconv"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/dhaam-ai/belay/internal/journal"
 	"github.com/dhaam-ai/belay/internal/state"
@@ -148,6 +150,18 @@ type TimelineCandidate struct {
 // Live reports whether this lane's figures were read from the candidate's own
 // run while the fanout was still open, and so are true only so far.
 func (c TimelineCandidate) Live() bool { return !c.Settled }
+
+// Ran reports whether this candidate's run recorded anything at all.
+//
+// One that did not gets absences in the table rather than zeros, because "–"
+// and "0.0s" are different facts: a refused candidate never started, and a
+// claimed one may not have started yet.
+func (c TimelineCandidate) Ran() bool {
+	if c.Outcome == TimelineCandidateRefused {
+		return false
+	}
+	return c.Nodes > 0 || c.Duration > 0 || c.SpentUSD != 0
+}
 
 // timelineCandidateLanes returns a fanout run's candidate lanes in index
 // order, and the id of the winner.
@@ -530,4 +544,231 @@ func timelineCandidateIDs(parent state.Layout) []string {
 		ids = append(ids, l.ID)
 	}
 	return ids
+}
+
+// timelineCandidateGutter is the indent a lane's note is written at: under
+// the outcome column, so the sentence reads as belonging to the id above it.
+func timelineCandidateGutter(width int) string { return strings.Repeat(" ", width+4) }
+
+// timelineCandidateColumns are the measured widths of the lane table.
+type timelineCandidateColumns struct{ id, outcome, tests, issues, duration, cost int }
+
+// timelineMeasureCandidates sizes every column to its widest cell, the way
+// the node table is measured, so the numeric columns stack into something a
+// reader can compare down rather than across.
+func timelineMeasureCandidates(lanes []TimelineCandidate) timelineCandidateColumns {
+	c := timelineCandidateColumns{
+		id: len("candidate"), outcome: len("outcome"), tests: len("tests"),
+		issues: len("issues"), duration: len("duration"), cost: len("cost"),
+	}
+	for _, l := range lanes {
+		c.id = max(c.id, utf8.RuneCountInString(timelineDropControl(l.ID)))
+		c.outcome = max(c.outcome, utf8.RuneCountInString(string(l.Outcome)))
+		c.tests = max(c.tests, utf8.RuneCountInString(timelineCandidateTests(l)))
+		c.issues = max(c.issues, utf8.RuneCountInString(timelineCandidateIssues(l)))
+		c.duration = max(c.duration, utf8.RuneCountInString(timelineCandidateDuration(l)))
+		c.cost = max(c.cost, utf8.RuneCountInString(timelineCandidateCost(l)))
+	}
+	return c
+}
+
+// timelineCandidateTests says whether this candidate's tests passed.
+//
+// "passed" has one definition in belay and this is it: a test run that ran
+// something and failed none of it, which is half of what makes a candidate
+// eligible to win. Everything else that recorded work is "not passed" rather
+// than "failed", because a candidate that died before it ever reached its
+// test node did not fail a test — it is simply not a candidate join may
+// select.
+func timelineCandidateTests(c TimelineCandidate) string {
+	switch {
+	case !c.Ran():
+		return timelineNoValue
+	case c.TestPassed:
+		return "passed"
+	default:
+		return "not passed"
+	}
+}
+
+// timelineCandidateIssues renders the quality gate's issue count, or an
+// absence for a candidate whose gate never ran.
+func timelineCandidateIssues(c TimelineCandidate) string {
+	if !c.Ran() {
+		return timelineNoValue
+	}
+	return strconv.Itoa(c.IssueCount)
+}
+
+// timelineCandidateDuration renders a lane's duration column.
+func timelineCandidateDuration(c TimelineCandidate) string {
+	if !c.Ran() {
+		return timelineNoValue
+	}
+	return timelineFormatDuration(c.Duration)
+}
+
+// timelineCandidateCost renders a lane's cost column. A candidate that never
+// ran is an absence rather than $0.000, for the reason timelineFormatUSD
+// gives: costing nothing and never being billed are different facts.
+func timelineCandidateCost(c TimelineCandidate) string {
+	if !c.Ran() {
+		return timelineNoValue
+	}
+	if c.Estimated {
+		return fmt.Sprintf("~$%.3f", c.SpentUSD)
+	}
+	return fmt.Sprintf("$%.3f", c.SpentUSD)
+}
+
+// candidateOutcome paints a lane's outcome word by how much it should pull
+// the eye. A refusal is yellow rather than red: nothing about the person's
+// code failed, belay could not make the candidate a workspace.
+func (s timelineStyle) candidateOutcome(o TimelineCandidateOutcome, text string) string {
+	switch o {
+	case TimelineCandidateFailed:
+		return s.paint(timelineRed, text)
+	case TimelineCandidateRefused, TimelineCandidateStopped, TimelineCandidatePaused,
+		TimelineCandidateUnfinished, TimelineCandidateInterrupted:
+		return s.paint(timelineYellow, text)
+	case TimelineCandidateFinished:
+		return text
+	default:
+		return text
+	}
+}
+
+// timelineWriteCandidates writes the candidate lanes: one row per candidate
+// in index order, and a footer saying whether the figures are the bill or a
+// running total.
+//
+// A run with no candidates gets nothing at all — not a heading over an empty
+// table — which is what keeps every run anybody has today printing exactly
+// what it printed before this section existed.
+//
+// The ids and notes are passed through timelineDropControl. A lane's id is a
+// directory name read off disk, and state's segment validation blocks path
+// separators and NUL but not escape sequences, so a directory could otherwise
+// rewrite the terminal it is printed to.
+func timelineWriteCandidates(b *strings.Builder, s timelineStyle, tl Timeline) {
+	if len(tl.Candidates) == 0 {
+		return
+	}
+	c := timelineMeasureCandidates(tl.Candidates)
+	gutter := timelineCandidateGutter(c.id)
+
+	fmt.Fprintf(b, "\n%s\n", s.paint(timelineDim, "Candidates:"))
+	fmt.Fprintf(b, "  %s  %s  %s  %s  %s  %s\n",
+		s.paint(timelineDim, timelinePadRight("candidate", c.id)),
+		s.paint(timelineDim, timelinePadRight("outcome", c.outcome)),
+		s.paint(timelineDim, timelinePadRight("tests", c.tests)),
+		s.paint(timelineDim, timelinePadLeft("issues", c.issues)),
+		s.paint(timelineDim, timelinePadLeft("duration", c.duration)),
+		s.paint(timelineDim, timelinePadLeft("cost", c.cost)))
+
+	for _, l := range tl.Candidates {
+		row := fmt.Sprintf("  %s  %s  %s  %s  %s  %s",
+			timelinePadRight(timelineDropControl(l.ID), c.id),
+			s.candidateOutcome(l.Outcome, timelinePadRight(string(l.Outcome), c.outcome)),
+			timelinePadRight(timelineCandidateTests(l), c.tests),
+			timelinePadLeft(timelineCandidateIssues(l), c.issues),
+			timelinePadLeft(timelineCandidateDuration(l), c.duration),
+			timelinePadLeft(timelineCandidateCost(l), c.cost))
+		row = strings.TrimRight(row, " ")
+		if l.Winner {
+			row += "  " + s.paint(timelineBold, "← winner")
+		}
+		b.WriteString(row + "\n")
+
+		for _, line := range timelineWrap(timelineDropControl(l.Note), gutter, timelineWrapWidth) {
+			fmt.Fprintf(b, "%s\n", s.paint(timelineDim, line))
+		}
+	}
+
+	b.WriteString("\n")
+	for _, line := range timelineWrap(timelineCandidateFooter(tl), "  ", timelineWrapWidth) {
+		fmt.Fprintf(b, "%s\n", line)
+	}
+}
+
+// timelineCandidateFooter is the sentence under the lanes.
+//
+// It exists to stop a reader taking a mid-flight number for the bill. While
+// the fanout is open every figure above is that candidate's own running
+// total, and the parent's ceiling — which the spend line above prints — is
+// not what bounds a running candidate; its envelope is. So the open form says
+// "so far" and names the envelope, and the settled form does not.
+func timelineCandidateFooter(tl Timeline) string {
+	var (
+		total     float64
+		estimated bool
+	)
+	for _, l := range tl.Candidates {
+		total += l.SpentUSD
+		estimated = estimated || l.Estimated
+	}
+	amount := fmt.Sprintf("$%.3f", total)
+	if estimated {
+		amount = "~" + amount
+	}
+
+	if timelineLanesSettled(tl.Candidates) {
+		outcome := "no candidate won"
+		if tl.Winner != "" {
+			outcome = timelineDropControl(tl.Winner) + " won"
+		}
+		subject, _ := timelineCandidateSubject(tl.Candidates)
+		return fmt.Sprintf("%s spent %s in total; %s", subject, amount, outcome)
+	}
+
+	capped := ""
+	if usd, ok := timelineSharedEnvelope(tl.Candidates); ok {
+		capped = fmt.Sprintf(", each capped at $%.2f", usd)
+	}
+	subject, have := timelineCandidateSubject(tl.Candidates)
+	return fmt.Sprintf("%s %s spent %s so far%s. The fanout has not settled, "+
+		"so these are running totals from each candidate's own journal.",
+		subject, have, amount, capped)
+}
+
+// timelineCandidateSubject names the lanes, and the verb that agrees with
+// them. A run may legitimately fan out to one candidate
+// (fanout.candidates: 1), so the plural is not safe to assume.
+func timelineCandidateSubject(lanes []TimelineCandidate) (subject, have string) {
+	if len(lanes) == 1 {
+		return "1 candidate", "has"
+	}
+	return fmt.Sprintf("%d candidates", len(lanes)), "have"
+}
+
+// timelineLanesSettled reports whether every lane's figures came from the
+// parent blackboard. Mixed is not a state fanout can produce — its Patch sets
+// Candidates whole or not at all — so anything less than all counts as open.
+func timelineLanesSettled(lanes []TimelineCandidate) bool {
+	for _, l := range lanes {
+		if !l.Settled {
+			return false
+		}
+	}
+	return len(lanes) > 0
+}
+
+// timelineSharedEnvelope returns the dollar ceiling every candidate runs
+// under, when they all share one.
+//
+// They normally do: the envelope is one fair share of what the parent had
+// left when the candidates were claimed. When they do not — an adopted
+// candidate keeps a higher envelope than a later claim would get — no single
+// number is true, so none is printed.
+func timelineSharedEnvelope(lanes []TimelineCandidate) (float64, bool) {
+	if len(lanes) == 0 || lanes[0].Envelope.LimitUSD <= 0 {
+		return 0, false
+	}
+	usd := lanes[0].Envelope.LimitUSD
+	for _, l := range lanes[1:] {
+		if l.Envelope.LimitUSD != usd {
+			return 0, false
+		}
+	}
+	return usd, true
 }

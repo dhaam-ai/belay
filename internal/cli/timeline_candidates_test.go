@@ -4,6 +4,7 @@ import (
 	"crypto/sha256"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -425,4 +426,164 @@ func timelineDigest(t *testing.T, path string) string {
 		t.Fatalf("read %s: %v", path, err)
 	}
 	return string(sha256.New().Sum(b))
+}
+
+// timelineSettledLanesFixture is the settled fanout's lanes as the reader
+// model holds them: one failed, one finished and winning with an estimated
+// figure, one refused before it ever ran.
+func timelineSettledLanesFixture() []TimelineCandidate {
+	return []TimelineCandidate{
+		{
+			ID: "cand-01", Index: 1, RunDir: "candidate-runs/cand-01",
+			Outcome: TimelineCandidateFailed, Settled: true,
+			IssueCount: 4, SpentUSD: 0.310, Duration: 24100 * time.Millisecond,
+			Note: "the fix loop gave up",
+		},
+		{
+			ID: "cand-02", Index: 2, RunDir: "candidate-runs/cand-02",
+			Outcome: TimelineCandidateFinished, Winner: true, Settled: true,
+			TestPassed: true, IssueCount: 1, SpentUSD: 0.420, Estimated: true,
+			Duration: 65000 * time.Millisecond,
+		},
+		{
+			ID: "cand-03", Index: 3, RunDir: "candidate-runs/cand-03",
+			Outcome: TimelineCandidateRefused, Settled: true,
+			Note: "the isolator refused this workspace: the source is not a git repository",
+		},
+	}
+}
+
+// timelineLiveLanesFixture is the same fanout while it is still open: the
+// figures come from each candidate's own journal and every candidate is
+// capped by its own envelope, not by the parent's ceiling.
+func timelineLiveLanesFixture() []TimelineCandidate {
+	env := state.Envelope{LimitUSD: 1.5, LimitTokens: 60000}
+	return []TimelineCandidate{
+		{
+			ID: "cand-01", Index: 1, RunDir: "candidate-runs/cand-01",
+			Outcome: TimelineCandidateFinished, TestPassed: true, IssueCount: 1,
+			Provision: state.ProvisionOK, Envelope: env,
+			SpentUSD: 0.25, Duration: 24100 * time.Millisecond, Nodes: 3,
+		},
+		{
+			ID: "cand-02", Index: 2, RunDir: "candidate-runs/cand-02",
+			Outcome: TimelineCandidateUnfinished, Provision: state.ProvisionOK, Envelope: env,
+			SpentUSD: 0.11, Duration: 24100 * time.Millisecond, Nodes: 3,
+		},
+		{
+			ID: "cand-03", Index: 3, RunDir: "candidate-runs/cand-03",
+			Outcome: TimelineCandidateRefused, Provision: state.ProvisionRefused,
+			ProvisionNote: "the source is not a git repository", Envelope: env,
+			Note: "the source is not a git repository",
+		},
+	}
+}
+
+// The candidate section, exactly as belay timeline prints it for each
+// fixture. A settled fanout's figures are final; an open one's are running
+// totals, and the footer says which it is rather than leaving a reader to
+// take a mid-flight number for the bill.
+const (
+	timelineSettledLanesGolden = "\nCandidates:\n" +
+		"  candidate  outcome   tests       issues  duration     cost\n" +
+		"  cand-01    failed    not passed       4     24.1s   $0.310\n" +
+		"             the fix loop gave up\n" +
+		"  cand-02    finished  passed           1  1m 05.0s  ~$0.420  ← winner\n" +
+		"  cand-03    refused   –                –         –        –\n" +
+		"             the isolator refused this workspace: the source is not a git\n" +
+		"             repository\n" +
+		"\n" +
+		"  3 candidates spent ~$0.730 in total; cand-02 won\n"
+
+	timelineLiveLanesGolden = "\nCandidates:\n" +
+		"  candidate  outcome     tests       issues  duration    cost\n" +
+		"  cand-01    finished    passed           1     24.1s  $0.250\n" +
+		"  cand-02    unfinished  not passed       0     24.1s  $0.110\n" +
+		"  cand-03    refused     –                –         –       –\n" +
+		"             the source is not a git repository\n" +
+		"\n" +
+		"  3 candidates have spent $0.360 so far, each capped at $1.50. The fanout has\n" +
+		"  not settled, so these are running totals from each candidate's own journal.\n"
+)
+
+// TestTimelineRenderShowsCandidateLanes pins the candidate section: a lane
+// per candidate in index order, how each ended, whether its tests passed,
+// what it spent, how long it took, and which one won.
+//
+// The third case is the one that matters most: a run that never fanned out
+// prints byte for byte what it printed before candidates existed. The lanes
+// are an addition to the timeline, not a change to it.
+func TestTimelineRenderShowsCandidateLanes(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name   string
+		lanes  []TimelineCandidate
+		winner string
+		want   string
+	}{
+		{
+			name:  "a settled fanout reports the figures the run was billed for",
+			lanes: timelineSettledLanesFixture(), winner: "cand-02",
+			want: timelineGolden + timelineSettledLanesGolden,
+		},
+		{
+			name:  "an open fanout reports each candidate's own running total",
+			lanes: timelineLiveLanesFixture(),
+			want:  timelineGolden + timelineLiveLanesGolden,
+		},
+		{
+			name: "a run without a fanout is unchanged",
+			want: timelineGolden,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			tl := BuildTimeline(timelineDemoSelection(), timelineDemoManifest(),
+				timelineResult(timelineFixLoopRun(), false))
+			tl.Candidates, tl.Winner = tt.lanes, tt.winner
+
+			plain := timelineRender(t, tl, false)
+			if diff := cmp.Diff(tt.want, plain); diff != "" {
+				t.Errorf("rendered timeline mismatch (-want +got):\n%s", diff)
+			}
+			// Colour is decoration only: stripping it leaves the same bytes.
+			colored := timelineRender(t, tl, true)
+			if got := regexpSGR.ReplaceAllString(colored, ""); got != plain {
+				t.Errorf("stripping colour changed the output:\n-want %q\n+got  %q", plain, got)
+			}
+		})
+	}
+}
+
+// TestTimelineCandidateLanesDropControlCharacters keeps a candidate
+// directory from rewriting the terminal it is printed to. A candidate id is a
+// directory name read off disk, and state's segment validation refuses path
+// separators and NUL but says nothing about escape sequences, so the renderer
+// is the only thing standing between a hostile directory name and the
+// reader's screen.
+func TestTimelineCandidateLanesDropControlCharacters(t *testing.T) {
+	t.Parallel()
+
+	tl := BuildTimeline(timelineDemoSelection(), timelineDemoManifest(),
+		timelineResult(timelineFixLoopRun(), false))
+	tl.Candidates = []TimelineCandidate{{
+		ID: "cand\x1b[2J-01", Index: 1, Outcome: TimelineCandidateFailed, Settled: true,
+		SpentUSD: 0.1, Duration: time.Second,
+		Note: "refused\x1b[2J here",
+	}}
+	tl.Winner = "cand\x1b[2J-01"
+
+	got := timelineRender(t, tl, false)
+	if strings.Contains(got, "\x1b") {
+		t.Errorf("the rendered timeline carries an escape sequence:\n%q", got)
+	}
+	for _, want := range []string{"cand[2J-01", "refused[2J here", "1 candidate spent"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("rendered timeline is missing %q:\n%s", want, got)
+		}
+	}
 }

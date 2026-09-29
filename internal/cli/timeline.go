@@ -1033,11 +1033,16 @@ func RenderTimeline(w io.Writer, tl Timeline, color bool) error {
 		for _, line := range timelineWrap(timelineInterruptionMessage(tl), "", timelineWrapWidth) {
 			fmt.Fprintf(&b, "%s\n", line)
 		}
+		// A parent whose own journal was lost may still have N candidate
+		// runs on disk, and those are the reader's only record of what the
+		// run spent; see timelineCandidateLanes.
+		timelineWriteCandidates(&b, s, tl)
 		_, err := io.WriteString(w, b.String())
 		return err
 	}
 	timelineWriteTable(&b, s, tl)
 	timelineWriteSummary(&b, s, tl)
+	timelineWriteCandidates(&b, s, tl)
 	timelineWriteChangedFiles(&b, s, tl)
 
 	_, err := io.WriteString(w, b.String())
