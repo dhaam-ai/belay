@@ -1173,10 +1173,13 @@ func TestTimelineJSONShapeIsStable(t *testing.T) {
 		t.Fatalf("output is not valid JSON: %v\n%s", err, buf.String())
 	}
 
+	// The four candidate keys are additive: nothing already here changed
+	// meaning, so the schema version is unchanged. See timelineJSONDoc.
 	wantKeys := []string{
-		"changed_files", "ended_at", "entries", "goal", "interrupted", "interruption", "loops", "markers",
-		"next", "next_attempt", "run_dir", "run_id", "schema", "selected", "started_at",
-		"status", "total_runs", "totals", "workspace",
+		"candidate", "candidates", "changed_files", "ended_at", "entries", "goal", "interrupted",
+		"interruption", "loops", "markers", "next", "next_attempt", "parent_run_id", "run_dir",
+		"run_id", "schema", "selected", "started_at", "status", "total_runs", "totals", "winner",
+		"workspace",
 	}
 	gotKeys := slices.Sorted(maps.Keys(doc))
 	if diff := cmp.Diff(wantKeys, gotKeys); diff != "" {
@@ -1184,7 +1187,7 @@ func TestTimelineJSONShapeIsStable(t *testing.T) {
 	}
 
 	// Collections are always arrays, so a consumer can iterate unguarded.
-	for _, key := range []string{"entries", "markers", "loops", "changed_files"} {
+	for _, key := range []string{"entries", "markers", "loops", "changed_files", "candidates"} {
 		if b := doc[key]; len(b) == 0 || b[0] != '[' {
 			t.Errorf("%q should always be an array, got %s", key, b)
 		}

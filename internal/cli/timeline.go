@@ -240,6 +240,11 @@ type Timeline struct {
 	// the process is killed between write and the next record: expected, and
 	// reported as such.
 	InterruptedMidWrite bool
+	// Candidates is every fanout candidate's lane, in index order. Empty
+	// for a run that does not fan out.
+	Candidates []TimelineCandidate
+	// Winner is the candidate join selected, or empty.
+	Winner string
 	// ChangedFiles is every file the run has changed so far, relative to the
 	// workspace: state.json's Code.ChangedFiles, which the code node starts
 	// and each fix adds to. LoadTimeline sorts it and lists each file once.
@@ -269,6 +274,12 @@ type TimelineSelection struct {
 	Dir string
 	// Workspace is the repository the run belongs to.
 	Workspace string
+	// Candidate is the candidate id this timeline is about, for a timeline
+	// of one fanout candidate's own run, or empty for an ordinary run.
+	Candidate string
+	// ParentRunID is the run a candidate belongs to, set alongside
+	// Candidate and empty otherwise.
+	ParentRunID string
 	// Implicit is true when no run id was given on the command line and the
 	// most recent run was chosen.
 	Implicit bool
@@ -636,11 +647,30 @@ func timelineLoadManifest(workspace, runID string) (state.Manifest, bool) {
 	if err != nil {
 		return state.Manifest{}, false
 	}
+	return timelineManifestAt(layout)
+}
+
+// timelineManifestAt reads the manifest of whatever run layout describes,
+// reporting failure as "absent". It takes a Layout rather than a run id
+// because a fanout candidate's run is not under .belay/runs/ and so has no
+// id state.NewLayout would accept; see state.NewCandidateRunLayout.
+func timelineManifestAt(layout state.Layout) (state.Manifest, bool) {
 	m, err := state.LoadManifest(layout.ManifestPath())
 	if err != nil {
 		return state.Manifest{}, false
 	}
 	return m, true
+}
+
+// timelineStateAt reads a run's blackboard, reporting failure as absent for
+// the same reason timelineManifestAt does: a timeline of a damaged run must
+// still render.
+func timelineStateAt(layout state.Layout) (state.State, bool) {
+	st, err := state.LoadState(layout.StatePath())
+	if err != nil {
+		return state.State{}, false
+	}
+	return st, true
 }
 
 // ResolveTimelineRun decides which run the timeline is about.
@@ -714,26 +744,28 @@ func LoadTimeline(workspace, runID string) (Timeline, error) {
 	}
 
 	var manifest *state.Manifest
-	if m, ok := timelineLoadManifest(workspace, sel.RunID); ok {
+	if m, ok := timelineManifestAt(layout); ok {
 		manifest = &m
 	}
+	st, stOK := timelineStateAt(layout)
 	tl := BuildTimeline(sel, manifest, res)
-	tl.ChangedFiles = timelineChangedFiles(layout)
+	tl.ChangedFiles = timelineChangedFiles(st, stOK)
+	tl.Candidates, tl.Winner = timelineCandidateLanes(layout, st, stOK)
 	return tl, nil
 }
 
-// timelineChangedFiles reads the files a run has changed from its state.json,
+// timelineChangedFiles reads the files a run has changed from its blackboard,
 // sorted and each once.
 //
-// It reads state.json rather than the journal because that is where the list
-// lives: the code node records it, and each fix adds what its repair touched.
-// Like timelineLoadManifest it reports a file it cannot read as nothing to
-// show rather than as an error, so a timeline of a damaged run still renders.
-// It sorts and de-duplicates itself rather than trusting the list, which the
-// code node records in the order the agent reported it.
-func timelineChangedFiles(layout state.Layout) []string {
-	st, err := state.LoadState(layout.StatePath())
-	if err != nil {
+// It reads the blackboard rather than the journal because that is where the
+// list lives: the code node records it, and each fix adds what its repair
+// touched. Like timelineManifestAt, a blackboard that could not be read is
+// nothing to show rather than an error, so a timeline of a damaged run still
+// renders — which is what ok reports. It sorts and de-duplicates itself
+// rather than trusting the list, which the code node records in the order the
+// agent reported it.
+func timelineChangedFiles(st state.State, ok bool) []string {
+	if !ok {
 		return nil
 	}
 	files := slices.Clone(st.Code.ChangedFiles)
@@ -1001,11 +1033,16 @@ func RenderTimeline(w io.Writer, tl Timeline, color bool) error {
 		for _, line := range timelineWrap(timelineInterruptionMessage(tl), "", timelineWrapWidth) {
 			fmt.Fprintf(&b, "%s\n", line)
 		}
+		// A parent whose own journal was lost may still have N candidate
+		// runs on disk, and those are the reader's only record of what the
+		// run spent; see timelineCandidateLanes.
+		timelineWriteCandidates(&b, s, tl)
 		_, err := io.WriteString(w, b.String())
 		return err
 	}
 	timelineWriteTable(&b, s, tl)
 	timelineWriteSummary(&b, s, tl)
+	timelineWriteCandidates(&b, s, tl)
 	timelineWriteChangedFiles(&b, s, tl)
 
 	_, err := io.WriteString(w, b.String())
@@ -1046,6 +1083,17 @@ func timelineWriteHeader(b *strings.Builder, s timelineStyle, tl Timeline) {
 	label := func(k string) string { return s.paint(timelineDim, timelinePadRight(k, 8)) }
 
 	fmt.Fprintf(b, "%s%s\n", label("run"), s.paint(timelineBold, tl.Run.RunID))
+	if tl.Run.Candidate != "" {
+		// A candidate's run id is its parent's with a suffix, and it shares
+		// the parent's goal and graph, so without this line the two
+		// timelines are nearly indistinguishable.
+		of := ""
+		if tl.Run.ParentRunID != "" {
+			of = " of " + timelineDropControl(tl.Run.ParentRunID)
+		}
+		fmt.Fprintf(b, "%s%s\n", label(""), s.paint(timelineDim,
+			"candidate "+timelineDropControl(tl.Run.Candidate)+of))
+	}
 	if tl.Run.Implicit {
 		// Never act on an implicit target without saying which one was
 		// chosen, and say what it was chosen among.
@@ -1219,7 +1267,32 @@ const TimelineJSONVersion = 1
 //	  "markers":      [ …marker ],
 //	  "loops":        [ {"node": string, "executions": number} ],
 //	  "totals":       { …totals },
-//	  "changed_files": [ string ]  // sorted, each once; always present, possibly empty
+//	  "changed_files": [ string ], // sorted, each once; always present, possibly empty
+//	  "candidate":     string|null, // the candidate this timeline is about
+//	  "parent_run_id": string|null, // its parent, set alongside "candidate"
+//	  "winner":        string|null, // the candidate join selected
+//	  "candidates":    [ …candidate ] // always present, possibly empty
+//	}
+//
+// A candidate is one fanout lane. "settled" says where its figures came
+// from: true means the parent blackboard, which is what the run was billed
+// for, and false means the candidate's own journal while the fanout is still
+// open, so "spent_usd" and "duration_ms" are running totals. "nodes" is 0 for
+// a settled lane, because the blackboard carries no step count.
+//
+//	{
+//	  "id": string, "index": number,
+//	  "outcome": "finished"|"failed"|"stopped"|"paused"|"unfinished"
+//	             |"interrupted"|"refused",
+//	  "winner": bool, "settled": bool,
+//	  "run_id": string, "run_dir": string,      // run_dir is parent-relative
+//	  "workspace_dir": string,                  // may no longer exist
+//	  "tests_passed": bool, "issue_count": number,
+//	  "provision": ""|"ok"|"refused", "provision_note": string,
+//	  "envelope_usd": number, "envelope_tokens": number,
+//	  "spent_usd": number, "estimated": bool,
+//	  "duration_ms": number, "nodes": number,
+//	  "interrupted": bool, "note": string
 //	}
 //
 // An entry is one node execution:
@@ -1258,6 +1331,10 @@ type timelineJSONDoc struct {
 	Loops        []timelineJSONLoop        `json:"loops"`
 	Totals       timelineJSONTotals        `json:"totals"`
 	ChangedFiles []string                  `json:"changed_files"`
+	Candidate    *string                   `json:"candidate"`
+	ParentRunID  *string                   `json:"parent_run_id"`
+	Winner       *string                   `json:"winner"`
+	Candidates   []timelineJSONCandidate   `json:"candidates"`
 }
 
 // timelineJSONInterruption reports a run that stopped without recording an
@@ -1359,6 +1436,7 @@ func timelineToJSON(tl Timeline) timelineJSONDoc {
 		Markers:      make([]timelineJSONMarker, 0, len(tl.Markers)),
 		Loops:        make([]timelineJSONLoop, 0, len(tl.Loops)),
 		ChangedFiles: append(make([]string, 0, len(tl.ChangedFiles)), tl.ChangedFiles...),
+		Candidates:   timelineCandidatesToJSON(tl.Candidates),
 		Totals: timelineJSONTotals{
 			Nodes:           tl.Totals.Nodes,
 			AgentDurationMS: tl.Totals.AgentDuration.Milliseconds(),
@@ -1380,6 +1458,21 @@ func timelineToJSON(tl Timeline) timelineJSONDoc {
 	if tl.Totals.BudgetLimitUSD > 0 {
 		limit := tl.Totals.BudgetLimitUSD
 		doc.Totals.BudgetLimitUSD = &limit
+	}
+	// The three candidate fields are null rather than "" for a run that has
+	// nothing to say about them, so that a consumer can tell "this is not a
+	// candidate timeline" from "this candidate has no id".
+	if tl.Run.Candidate != "" {
+		cand := timelineDropControl(tl.Run.Candidate)
+		doc.Candidate = &cand
+	}
+	if tl.Run.ParentRunID != "" {
+		parent := timelineDropControl(tl.Run.ParentRunID)
+		doc.ParentRunID = &parent
+	}
+	if tl.Winner != "" {
+		winner := timelineDropControl(tl.Winner)
+		doc.Winner = &winner
 	}
 	if tl.Interrupted {
 		doc.Interruption = &timelineJSONInterruption{
@@ -1439,7 +1532,10 @@ func init() {
 
 // newTimelineCmd builds the `belay timeline` command.
 func newTimelineCmd() *cobra.Command {
-	var asJSON bool
+	var (
+		asJSON    bool
+		candidate string
+	)
 
 	cmd := &cobra.Command{
 		Use:   "timeline [run-id]",
@@ -1455,7 +1551,13 @@ loop reads as a loop rather than as a list you have to count.
 A run that was interrupted has a journal whose final line was still being
 written. That is expected: belay flushes every record to disk as it happens,
 so only the unfinished line is ever lost. The timeline renders everything
-before it and says where the run stopped.`,
+before it and says where the run stopped.
+
+A run that fans out lists its candidates at the end: how each ended, what it
+spent, how long it took and which one won. --candidate <id> opens one
+candidate's own run as a timeline in its own right, because a candidate is a
+run -- its own journal, blackboard, manifest and snapshots -- and not an
+entry in its parent's.`,
 		Args:         cobra.MaximumNArgs(1),
 		SilenceUsage: true,
 		RunE: func(cmd *cobra.Command, args []string) error {
@@ -1467,7 +1569,13 @@ before it and says where the run stopped.`,
 			if len(args) == 1 {
 				runID = args[0]
 			}
-			tl, err := LoadTimeline(ws, runID)
+			load := LoadTimeline
+			if candidate != "" {
+				load = func(ws, runID string) (Timeline, error) {
+					return LoadCandidateTimeline(ws, runID, candidate)
+				}
+			}
+			tl, err := load(ws, runID)
 			if err != nil {
 				return err
 			}
@@ -1482,5 +1590,9 @@ before it and says where the run stopped.`,
 
 	cmd.Flags().BoolVar(&asJSON, "json", false,
 		"emit the timeline as JSON (stable, versioned shape) instead of a table")
+	// No default and no implicit choice: picking one of N candidates on the
+	// reader's behalf would be picking which answer they get.
+	cmd.Flags().StringVar(&candidate, "candidate", "",
+		"show one fanout candidate's own timeline instead of the run's (e.g. cand-02)")
 	return cmd
 }

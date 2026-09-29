@@ -333,6 +333,18 @@ Files changed:
   handlers_test.go
 ```
 
+A run that fans out lists its candidates after the totals: how each one
+ended, whether its tests passed, what it spent and how long it took, and
+which one won. While the fanout is still going those figures are each
+candidate's own running total, read from its journal, and the timeline says
+so rather than letting a mid-flight number read as the bill. To open one
+candidate's run in full — it is a run, with its own journal, plan and
+snapshots — name it:
+
+```bash
+belay timeline <run-id> --candidate cand-02
+```
+
 ### 7. The output is yours to keep
 
 Everything belay records about a run lives in `.belay/runs/<run-id>`:
