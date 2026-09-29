@@ -89,7 +89,7 @@ func timelineWriteCandidateRun(t *testing.T, parent state.Layout, parentRunID st
 			RunID:         parentRunID + "-" + c.block.ID,
 			CreatedAt:     timelineBase,
 			UpdatedAt:     timelineBase,
-			Workspace:     workspaceOf(parent),
+			Workspace:     parent.WorkspaceDir(),
 			Goal:          "make the thing fast",
 			Status:        state.RunStatusRunning,
 			Budget:        state.Budget{LimitUSD: c.block.Envelope.LimitUSD},
@@ -114,8 +114,6 @@ func timelineWriteCandidateRun(t *testing.T, parent state.Layout, parentRunID st
 
 // workspaceOf is the parent layout's workspace, which a candidate manifest
 // records as its own.
-func workspaceOf(l state.Layout) string { return l.WorkspaceDir() }
-
 // timelineAppend writes records to a journal, optionally leaving a torn
 // final line behind.
 func timelineAppend(t *testing.T, path string, records []journal.Record, torn bool) {
@@ -775,7 +773,7 @@ func timelineFanoutWorkspace(t *testing.T) (string, string) {
 
 	passed := state.NewState("make the thing fast")
 	passed.Test = state.Test{Total: 12, Passed: 12}
-	for i, c := range []timelineCandidateRun{
+	for _, c := range []timelineCandidateRun{
 		{
 			block: state.CandidateRun{
 				ParentRunID: runID, ID: "cand-01", Index: 1, Provision: state.ProvisionOK,
@@ -793,7 +791,6 @@ func timelineFanoutWorkspace(t *testing.T) (string, string) {
 			records: timelineCandidateJournal(journal.EventRunFailed, 0.11, 1),
 		},
 	} {
-		_ = i
 		timelineWriteCandidateRun(t, parent, runID, c)
 	}
 	return ws, runID
