@@ -1003,6 +1003,7 @@ func (d *Dispatcher) runContext(
 		// the run was created, never from d.cfg.
 		Output:     man.Output,
 		ArchiveDir: man.ArchivedPlan.Dir,
+		Policy:     man.Policy,
 		VCS:        d.vcs,
 	}
 }

@@ -46,6 +46,7 @@ const (
 	NodeApprove = "approve"
 	NodeCode    = "code"
 	NodeWrite   = "write"
+	NodePolicy  = "policy"
 	NodeTest    = "test"
 	NodeFix     = "fix"
 	NodeReview  = "review"
@@ -260,6 +261,24 @@ type RunContext struct {
 	// run is resumed: read live, a changed plan.archive_dir would put a
 	// second copy somewhere else and make a second commit.
 	ArchiveDir string
+
+	// Policy is the guardrails this run's change must obey and the baseline
+	// they are measured against, as pinned in its manifest when the run was
+	// created. It is nil for a run that declared no policy — which is also
+	// every run started before guardrails existed.
+	//
+	// Nil is not "an empty policy". It means this run never took a baseline,
+	// and the gate node reads it as such: it returns a Result saying so
+	// rather than judging a change against rules that arrived after the run
+	// began. A pointer, rather than a value with an Empty method, because
+	// that difference is the whole safety property and a zero value would
+	// erase it.
+	//
+	// It comes from the manifest for the reason Output and ArchiveDir do,
+	// and Config's own policy section is cleared before a node sees it
+	// (state.Manifest.PinnedConfig), so a node cannot reach the live rules
+	// even by mistake.
+	Policy *state.PolicyPin
 
 	// VCS is the run's version control: what the promote node commits and
 	// integrates through. It is nil unless the run's output is a branch,
