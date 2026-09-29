@@ -371,3 +371,61 @@ func TestEvaluateIsDeterministic(t *testing.T) {
 			"the same files in a different order get the same report", first.Violations[0].Path, "a.go")
 	}
 }
+
+// A resume warns when the policy in belay.yaml has drifted from the one the
+// run was started under, so the comparison has to be about what the rules
+// ask for and not about how the value was built. A nil list and an empty one
+// ask for the same thing, and a run resumed by a process that decoded its
+// pin from JSON must not be reported as drifted from itself.
+func TestSame(t *testing.T) {
+	t.Parallel()
+
+	full := policy.Policy{
+		ForbiddenPaths:   []string{"infra/**"},
+		MaxChangedFiles:  25,
+		RequiredTests:    []policy.TestRule{{When: "**/*.go", Require: "**/*_test.go"}},
+		ForbiddenContent: []policy.ContentRule{{Pattern: "AKIA", Paths: []string{"**/*.go"}}},
+	}
+
+	tests := []struct {
+		name string
+		a, b policy.Policy
+		want bool
+	}{
+		{name: "two empty rule sets", want: true},
+		{name: "a rule set and itself", a: full, b: full, want: true},
+		{
+			name: "a nil list and an empty one",
+			a:    policy.Policy{MaxChangedFiles: 3},
+			b:    policy.Policy{MaxChangedFiles: 3, ForbiddenPaths: []string{}},
+			want: true,
+		},
+		{
+			name: "a rule added",
+			a:    full,
+			b:    policy.Policy{ForbiddenPaths: []string{"infra/**", "docs/**"}, MaxChangedFiles: 25, RequiredTests: full.RequiredTests, ForbiddenContent: full.ForbiddenContent},
+		},
+		{
+			name: "a ceiling raised",
+			a:    full,
+			b:    policy.Policy{ForbiddenPaths: full.ForbiddenPaths, MaxChangedFiles: 50, RequiredTests: full.RequiredTests, ForbiddenContent: full.ForbiddenContent},
+		},
+		{
+			name: "a rule reordered, which is a different rule set to read",
+			a:    policy.Policy{ForbiddenPaths: []string{"a/**", "b/**"}},
+			b:    policy.Policy{ForbiddenPaths: []string{"b/**", "a/**"}},
+		},
+		{name: "one empty and one not", a: full, b: policy.Policy{}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			if got := policy.Same(tt.a, tt.b); got != tt.want {
+				t.Errorf("Same() = %t, want %t", got, tt.want)
+			}
+			if got := policy.Same(tt.b, tt.a); got != tt.want {
+				t.Errorf("Same() is not symmetric: reversed = %t, want %t", got, tt.want)
+			}
+		})
+	}
+}

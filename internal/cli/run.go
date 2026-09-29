@@ -22,6 +22,7 @@ import (
 	"github.com/dhaam-ai/belay/internal/detect"
 	"github.com/dhaam-ai/belay/internal/graph"
 	"github.com/dhaam-ai/belay/internal/planarchive"
+	"github.com/dhaam-ai/belay/internal/policy"
 	"github.com/dhaam-ai/belay/internal/state"
 	"github.com/dhaam-ai/belay/pkg/belay"
 )
@@ -216,6 +217,14 @@ func createRun(ctx context.Context, plan *runPlan, spec runSpec) (*state.Store, 
 	if err := plan.prepareWorkspace(ctx, layout, &manifest); err != nil {
 		return nil, err
 	}
+	// After prepareWorkspace, because the baseline is a survey of the tree
+	// this run's nodes will work in, and for a branch run that tree does not
+	// exist until the worktree has been made. Before the manifest, so the pin
+	// lands in the manifest's one write.
+	if err := plan.pinPolicy(ctx, layout, &manifest); err != nil {
+		plan.unwindWorkspace(ctx, manifest.Output)
+		return nil, err
+	}
 	if err := state.SaveManifest(layout.ManifestPath(), manifest); err != nil {
 		plan.unwindWorkspace(ctx, manifest.Output)
 		return nil, fmt.Errorf("cannot write %s: %w", layout.ManifestPath(), err)
@@ -223,6 +232,45 @@ func createRun(ctx context.Context, plan *runPlan, spec runSpec) (*state.Store, 
 	// Only now, with the run findable, is the Layout pointed at the tree its
 	// nodes work in; workStore is the same step a resume takes.
 	return plan.workStore(layout)
+}
+
+// pinPolicy records the guardrails this run is held to, and the baseline they
+// are measured against, in the run's manifest.
+//
+// The baseline is surveyed here rather than at resolve time because it must
+// describe the tree the run's nodes will really work in: a branch run's
+// worktree, which prepareWorkspace has just created, and whose contents can
+// differ from the person's checkout because the worktree starts from the
+// commit and the checkout may have uncommitted work. Surveying the wrong tree
+// would report a dependency as new the first time the agent touched a
+// manifest.
+//
+// A survey it cannot complete refuses the run. The alternative -- start the
+// run and pin no baseline -- is a run whose belay.yaml declares guardrails and
+// whose graph has no gate, which is the silently-does-nothing failure this
+// whole feature exists to prevent, and the person would have no way to tell.
+//
+// A run that declares no policy pins nothing, surveys nothing, and requires
+// no capability. Guardrails are opt-in, and a repository that declares none
+// starts runs exactly as it always has.
+func (p *runPlan) pinPolicy(ctx context.Context, layout state.Layout, manifest *state.Manifest) error {
+	if p.policy == nil {
+		return nil
+	}
+	dir := layout.WorkspaceDir()
+	if manifest.Output.Branched() {
+		dir = workTreeFor(layout, manifest.Output)
+	}
+	baseline, err := policy.Survey(ctx, dir)
+	if err != nil {
+		return fmt.Errorf("belay.yaml declares a policy, and belay cannot record what %s declares now, "+
+			"so it has nothing to hold this run's change to: %w", dir, err)
+	}
+	// Through SetPolicy, never by assigning Manifest.Policy: the field and
+	// the capability an older belay would have to refuse are one decision
+	// (ADR-0011, and state.CapabilityPolicyGate).
+	manifest.SetPolicy(state.PolicyPin{Policy: p.policy.Policy, Baseline: baseline})
+	return nil
 }
 
 // prepareWorkspace readies the workspace a new run will change, and records in
@@ -937,8 +985,15 @@ func dryRunSections(u *ui, plan *runPlan, want, resuming string) []dryRunSection
 	if models := dryRunModels(plan); len(models.lines) > 0 {
 		sections = append(sections, models)
 	}
+	sections = append(sections, dryRunSettings(plan))
+	// A run with no policy gets no section rather than a heading over
+	// "none": the absence is the whole answer, and a heading claiming it
+	// would be one more thing to read on every dry run of every repository
+	// that has never declared a rule.
+	if guardrails := dryRunPolicy(plan); len(guardrails.lines) > 0 {
+		sections = append(sections, guardrails)
+	}
 	sections = append(sections,
-		dryRunSettings(plan),
 		dryRunRoute(plan),
 		dryRunCreates(plan, want, resuming != ""),
 	)
@@ -1024,6 +1079,67 @@ func dryRunModels(plan *runPlan) dryRunSection {
 		lines = append(lines, plan.modelNote)
 	}
 	return dryRunSection{title: "what each step would cost", lines: lines}
+}
+
+// dryRunPolicy is the guardrails a run's change would be held to.
+//
+// It is the setting a person would most want confirmed before leaving belay
+// running unattended, and the one they cannot confirm any other way: a policy
+// that loads but never fires looks exactly like one that works, right up to
+// the moment something gets through. So every rule is printed, in the words
+// the person wrote it in, rather than summarised as a count.
+//
+// Each line says which kind of violation the rule is, because that is the
+// difference that decides what an unattended run does about it: ending the
+// run brings a person back, and a repair does not. The words match the ones
+// docs/config.md uses for the same split.
+//
+// It reads the pin, not p.config.Policy, so a resumed run is described by the
+// rules it is really held to. That is the same rule the route and the output
+// section follow, and it is what stops a dry run of a resume from showing
+// guardrails the run does not have.
+func dryRunPolicy(plan *runPlan) dryRunSection {
+	if plan.policy == nil {
+		return dryRunSection{}
+	}
+	rules := plan.policy.Policy
+	var lines []string
+	add := func(ends bool, format string, a ...any) {
+		kind := "asks for a repair"
+		if ends {
+			kind = "ends the run"
+		}
+		lines = append(lines, fmt.Sprintf(format, a...)+"  ("+kind+")")
+	}
+	for _, pattern := range rules.ForbiddenPaths {
+		add(true, "must not touch      %s", pattern)
+	}
+	if rules.MaxChangedFiles > 0 {
+		add(true, "at most             %d changed files", rules.MaxChangedFiles)
+	}
+	if rules.MaxChangedLines > 0 {
+		add(true, "at most             %d lines across the files it touches", rules.MaxChangedLines)
+	}
+	if rules.NoNewDependencies {
+		add(false, "no new dependency   beyond what this workspace declares now")
+	}
+	for _, rule := range rules.RequiredTests {
+		add(false, "a change to         %s must bring a change to %s", rule.When, rule.Require)
+	}
+	for _, rule := range rules.ForbiddenContent {
+		where := "any changed file"
+		if len(rule.Paths) > 0 {
+			where = strings.Join(rule.Paths, ", ")
+		}
+		line := fmt.Sprintf("must not contain    %s  in %s", rule.Pattern, where)
+		if reason := strings.TrimSpace(rule.Reason); reason != "" {
+			line += " (" + reason + ")"
+		}
+		add(false, "%s", line)
+	}
+	lines = append(lines, "belay records these rules and this workspace's dependencies when the run starts, and "+
+		"holds the run to them even if belay.yaml changes")
+	return dryRunSection{title: "the guardrails its change must obey", lines: lines}
 }
 
 // dryRunSettings is where the settings came from and the tools they chose.

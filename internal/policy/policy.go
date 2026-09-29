@@ -49,7 +49,9 @@
 package policy
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
 	"slices"
 	"strings"
@@ -218,6 +220,34 @@ func (p Policy) Empty() bool {
 		!p.NoNewDependencies &&
 		len(p.RequiredTests) == 0 &&
 		len(p.ForbiddenContent) == 0
+}
+
+// Same reports whether two rule sets ask for the same thing.
+//
+// A resume warns when the policy in belay.yaml has drifted from the one the
+// run was started under, and that comparison has to be about what the rules
+// ask for rather than how the value was built: a nil list and an empty one
+// ask for the same thing, and a pin decoded from a manifest must not read as
+// having drifted from the very rules it was written from.
+//
+// It compares the canonical JSON, which is the form the manifest already
+// stores, so the answer is exactly "would these two pins have been written
+// identically". A list in a different order is a different rule set, because
+// the order is what a person reads and what a violation quotes back.
+//
+// A rendering that fails is reported as different. The two possible mistakes
+// are a warning nobody needed and a silently dropped guardrail change, and
+// only the first is harmless.
+func Same(a, b Policy) bool {
+	x, err := json.Marshal(a)
+	if err != nil {
+		return false
+	}
+	y, err := json.Marshal(b)
+	if err != nil {
+		return false
+	}
+	return bytes.Equal(x, y)
 }
 
 // Change is the change one evaluation judges.

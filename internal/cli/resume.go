@@ -16,6 +16,7 @@ import (
 	"github.com/dhaam-ai/belay/internal/git"
 	"github.com/dhaam-ai/belay/internal/graph"
 	"github.com/dhaam-ai/belay/internal/journal"
+	"github.com/dhaam-ai/belay/internal/policy"
 	"github.com/dhaam-ai/belay/internal/state"
 )
 
@@ -165,7 +166,54 @@ func (p *runPlan) resumePreflight(ctx context.Context, store *state.Store) error
 		return fmt.Errorf("cannot read this run's manifest: %w", err)
 	}
 	p.bindOutput(ctx, manifest)
+	p.bindPolicy(manifest)
 	return nil
+}
+
+// bindPolicy makes this plan hold the resumed run to the guardrails that run
+// started under, from its manifest and never from belay.yaml as it is now.
+//
+// Both directions of drift are wrong, and each is wrong in its own way. A run
+// started with no policy and resumed with one would route into a gate whose
+// baseline was never captured: it never surveyed the tree before the agent
+// touched it, so the gate could only fail it for something it did not do. A
+// run started with a policy and resumed without one would finish without the
+// check it was started under, and say nothing about it. So the pin wins, and
+// the registry and the route are rebuilt from it.
+//
+// It runs after bindOutput, which has already rebuilt the registry from the
+// output pin; rebuilding it again here is what adds or removes the gate. The
+// order does not matter to the result -- nodes.Default applies the options it
+// is given -- but doing it in one place each keeps either pin from having to
+// know about the other.
+//
+// Drift is a warning, not a refusal, exactly as it is for the output. The run
+// is fine: it is finishing the way it started. Somebody who changed the
+// policy and then resumed is entitled to know their change is not what this
+// run is doing.
+func (p *runPlan) bindPolicy(manifest state.Manifest) {
+	pinned, live := manifest.Policy, p.policy
+	if pinned == nil && live == nil {
+		return
+	}
+	p.policy = pinned
+	switch {
+	case pinned == nil:
+		p.warn("this run was started with no policy, and belay.yaml now declares one. belay holds a run to the " +
+			"rules it started with, and this run never recorded what its workspace looked like beforehand, so " +
+			"there is nothing its change could be judged against; the policy applies to the next run you start.")
+	case live == nil:
+		p.warn("belay.yaml no longer declares a policy, and this run was started with one. belay holds a run to " +
+			"the rules it started with, so this run keeps its guardrails; the change applies to the next run " +
+			"you start.")
+	case !policy.Same(pinned.Policy, live.Policy):
+		p.warn("this run's policy has changed in belay.yaml since it started. belay holds a run to the rules it " +
+			"started with, so this run keeps the ones recorded in its manifest; the new rules apply to the next " +
+			"run you start.")
+	}
+	// The registry and the route follow the pin, so rebuilding one without
+	// the other shows a person a graph the dispatcher is not walking.
+	p.resolveRegistry()
 }
 
 // bindOutput makes this plan continue the run the way that run started: from
