@@ -1,0 +1,428 @@
+package cli
+
+import (
+	"crypto/sha256"
+	"os"
+	"path/filepath"
+	"testing"
+	"time"
+
+	"github.com/dhaam-ai/belay/internal/journal"
+	"github.com/dhaam-ai/belay/internal/state"
+	"github.com/dhaam-ai/belay/pkg/belay"
+	"github.com/google/go-cmp/cmp"
+)
+
+// timelineCandidateRun is one candidate run to synthesize on disk: its
+// manifest block, the blackboard it ended with, and its own journal.
+type timelineCandidateRun struct {
+	block   state.CandidateRun
+	final   state.State
+	records []journal.Record
+	// noManifest models a candidate directory a torn claim left behind.
+	noManifest bool
+	// tornTail appends an incomplete final line, which is what a journal
+	// looks like when the process was killed between write and flush.
+	tornTail bool
+}
+
+// timelineWriteParentRun writes a parent fanout run: a manifest carrying the
+// fanout pin, a blackboard, and a journal whose fanout node is the last
+// thing in it.
+func timelineWriteParentRun(t *testing.T, workspace, runID string, pin state.FanoutPin,
+	st state.State, records []journal.Record,
+) state.Layout {
+	t.Helper()
+
+	layout, err := state.NewLayout(workspace, runID)
+	if err != nil {
+		t.Fatalf("NewLayout(%q, %q): %v", workspace, runID, err)
+	}
+	if err := os.MkdirAll(layout.RunDir(), 0o750); err != nil {
+		t.Fatalf("mkdir %s: %v", layout.RunDir(), err)
+	}
+
+	m := state.Manifest{
+		SchemaVersion: state.ManifestSchemaVersion,
+		RunID:         runID,
+		CreatedAt:     timelineBase,
+		UpdatedAt:     timelineBase,
+		Workspace:     workspace,
+		Goal:          "make the thing fast",
+		Status:        state.RunStatusCompleted,
+		Budget:        state.Budget{LimitUSD: 5},
+	}
+	m.SetFanout(pin)
+	if err := state.SaveManifest(layout.ManifestPath(), m); err != nil {
+		t.Fatalf("SaveManifest: %v", err)
+	}
+	if err := state.SaveState(layout.StatePath(), st); err != nil {
+		t.Fatalf("SaveState: %v", err)
+	}
+	timelineAppend(t, layout.JournalPath(), records, false)
+	return layout
+}
+
+// timelineWriteCandidateRun writes one candidate's own run directory under
+// parent, exactly as the candidate runner leaves it: its own manifest with a
+// candidate block, its own blackboard, and its own journal.
+func timelineWriteCandidateRun(t *testing.T, parent state.Layout, parentRunID string, c timelineCandidateRun) state.Layout {
+	t.Helper()
+
+	layout, err := state.NewCandidateRunLayout(parent, c.block.ID)
+	if err != nil {
+		t.Fatalf("NewCandidateRunLayout(%q): %v", c.block.ID, err)
+	}
+	if err := os.MkdirAll(layout.RunDir(), 0o750); err != nil {
+		t.Fatalf("mkdir %s: %v", layout.RunDir(), err)
+	}
+
+	if !c.noManifest {
+		m := state.Manifest{
+			SchemaVersion: state.ManifestSchemaVersion,
+			RunID:         parentRunID + "-" + c.block.ID,
+			CreatedAt:     timelineBase,
+			UpdatedAt:     timelineBase,
+			Workspace:     workspaceOf(parent),
+			Goal:          "make the thing fast",
+			Status:        state.RunStatusRunning,
+			Budget:        state.Budget{LimitUSD: c.block.Envelope.LimitUSD},
+		}
+		m.SetCandidate(c.block)
+		if err := state.SaveManifest(layout.ManifestPath(), m); err != nil {
+			t.Fatalf("SaveManifest(%s): %v", c.block.ID, err)
+		}
+	}
+	final := c.final
+	if final.SchemaVersion == 0 {
+		// A zero State is not a blackboard any belay wrote; give a
+		// candidate with nothing to say a valid empty one.
+		final = state.NewState("make the thing fast")
+	}
+	if err := state.SaveState(layout.StatePath(), final); err != nil {
+		t.Fatalf("SaveState(%s): %v", c.block.ID, err)
+	}
+	timelineAppend(t, layout.JournalPath(), c.records, c.tornTail)
+	return layout
+}
+
+// workspaceOf is the parent layout's workspace, which a candidate manifest
+// records as its own.
+func workspaceOf(l state.Layout) string { return l.WorkspaceDir() }
+
+// timelineAppend writes records to a journal, optionally leaving a torn
+// final line behind.
+func timelineAppend(t *testing.T, path string, records []journal.Record, torn bool) {
+	t.Helper()
+
+	j, err := journal.Open(path)
+	if err != nil {
+		t.Fatalf("journal.Open(%s): %v", path, err)
+	}
+	for _, rec := range records {
+		rec.Seq = 0 // Append assigns it.
+		if _, err := j.Append(rec); err != nil {
+			t.Fatalf("journal.Append(%+v): %v", rec, err)
+		}
+	}
+	if err := j.Close(); err != nil {
+		t.Fatalf("journal.Close: %v", err)
+	}
+	if !torn {
+		return
+	}
+	f, err := os.OpenFile(path, os.O_APPEND|os.O_WRONLY, 0o600) //nolint:gosec // the fixture journal this test just wrote
+	if err != nil {
+		t.Fatalf("reopen %s: %v", path, err)
+	}
+	if _, err := f.WriteString(`{"seq":99,"event":"node_star`); err != nil {
+		t.Fatalf("write a torn line: %v", err)
+	}
+	if err := f.Close(); err != nil {
+		t.Fatalf("close %s: %v", path, err)
+	}
+}
+
+// timelineCandidateJournal is one candidate's own journal: a short run that
+// ends with the marker given.
+func timelineCandidateJournal(end journal.Event, spend float64, failed int) []journal.Record {
+	b := newTimelineBuilder().run(journal.EventRunStarted)
+	b.node(timelineNodeSpec{node: "code", status: journal.StatusOK, durationMS: 20000, next: "write",
+		usage: usd(9000, 3000, spend, false), note: "code: 2 file(s)"})
+	b.node(timelineNodeSpec{node: "write", status: journal.StatusOK, durationMS: 100, next: "test",
+		usage: usd(0, 0, 0, false), note: "verified 2 changed file(s)"})
+	status := journal.StatusOK
+	if failed > 0 {
+		status = journal.StatusFailed
+	}
+	b.node(timelineNodeSpec{node: "test", status: status, durationMS: 4000,
+		usage: usd(0, 0, 0, false), note: "go-test: 12 tests, 1 failed"})
+	if end != journal.EventUnknown {
+		b.run(end)
+	}
+	return b.records
+}
+
+// timelineSettledFixture is a fanout run whose fanout node returned: the
+// parent blackboard carries every candidate's settled figures and the
+// winner.
+func timelineSettledFixture() state.State {
+	st := state.NewState("make the thing fast")
+	st.Candidates = []state.Candidate{
+		{
+			ID: "cand-01", Dir: "/ws/.belay/runs/p/candidates/cand-01",
+			TestPassed: false, IssueCount: 4, Ephemeral: true,
+			Outcome: "failed", RunDir: "candidate-runs/cand-01",
+			SpentUSD: 0.310, DurationMS: 24100, Note: "the fix loop gave up",
+		},
+		{
+			ID: "cand-02", Dir: "/ws/.belay/runs/p/candidates/cand-02",
+			TestPassed: true, IssueCount: 1, Ephemeral: true,
+			Outcome: "completed", RunDir: "candidate-runs/cand-02",
+			SpentUSD: 0.420, Estimated: true, DurationMS: 65000, Note: "",
+		},
+		{
+			ID: "cand-03", Dir: "", TestPassed: false, IssueCount: 0,
+			Outcome: "error", RunDir: "candidate-runs/cand-03",
+			SpentUSD: 0, DurationMS: 0,
+			Note: "the isolator refused this workspace: the source is not a git repository",
+		},
+	}
+	st.Winner = "cand-02"
+	return st
+}
+
+// TestTimelineLanesComeFromTheSettledBlackboard pins where a finished
+// fanout's figures come from: once the fanout node returns, the parent
+// blackboard holds what the run was actually billed for, and the lanes must
+// agree with the parent's own spend line rather than re-deriving numbers
+// from journals a promote may since have cleaned up around.
+func TestTimelineLanesComeFromTheSettledBlackboard(t *testing.T) {
+	t.Parallel()
+
+	ws := t.TempDir()
+	const runID = "20260905T142530Z-aaaaaaaaaaaa"
+	timelineWriteParentRun(t, ws, runID, state.FanoutPin{Candidates: 3, Select: "fewest_issues"},
+		timelineSettledFixture(), timelineFixLoopRun())
+
+	tl, err := LoadTimeline(ws, runID)
+	if err != nil {
+		t.Fatalf("LoadTimeline: %v", err)
+	}
+
+	if got, want := tl.Winner, "cand-02"; got != want {
+		t.Errorf("Winner = %q, want %q", got, want)
+	}
+	want := []TimelineCandidate{
+		{
+			ID: "cand-01", Index: 1, RunID: runID + "-cand-01", RunDir: "candidate-runs/cand-01",
+			WorkspaceDir: "/ws/.belay/runs/p/candidates/cand-01",
+			Outcome:      TimelineCandidateFailed, Settled: true,
+			IssueCount: 4, SpentUSD: 0.310, Duration: 24100 * time.Millisecond,
+			Note: "the fix loop gave up",
+		},
+		{
+			ID: "cand-02", Index: 2, RunID: runID + "-cand-02", RunDir: "candidate-runs/cand-02",
+			WorkspaceDir: "/ws/.belay/runs/p/candidates/cand-02",
+			Outcome:      TimelineCandidateFinished, Winner: true, Settled: true,
+			TestPassed: true, IssueCount: 1, SpentUSD: 0.420, Estimated: true,
+			Duration: 65000 * time.Millisecond,
+		},
+		{
+			ID: "cand-03", Index: 3, RunID: runID + "-cand-03", RunDir: "candidate-runs/cand-03",
+			Outcome: TimelineCandidateRefused, Settled: true,
+			Note: "the isolator refused this workspace: the source is not a git repository",
+		},
+	}
+	if diff := cmp.Diff(want, tl.Candidates); diff != "" {
+		t.Errorf("candidate lanes mismatch (-want +got):\n%s", diff)
+	}
+}
+
+// TestTimelineLanesAreReadLiveWhileTheFanoutIsOpen pins the other half: a
+// fanout that has not settled leaves the parent blackboard empty on purpose
+// (the node's Patch is empty so join never sees a partial field), so the
+// lanes are read from each candidate's own run — the manifest for its
+// identity and envelope, the journal for what it has spent so far.
+func TestTimelineLanesAreReadLiveWhileTheFanoutIsOpen(t *testing.T) {
+	t.Parallel()
+
+	ws := t.TempDir()
+	const runID = "20260905T142530Z-bbbbbbbbbbbb"
+	parent := timelineWriteParentRun(t, ws, runID, state.FanoutPin{Candidates: 3, Select: "fewest_issues"},
+		state.NewState("make the thing fast"), timelineFixLoopRun())
+
+	passed := state.NewState("make the thing fast")
+	passed.Test = state.Test{Total: 12, Passed: 12}
+	passed.Review.Issues = []belay.Issue{{Severity: belay.SeverityMajor, Message: "one"}}
+
+	// Written out of index order, to prove the lanes are ordered by the
+	// index each candidate's manifest records and not by directory order.
+	for _, c := range []timelineCandidateRun{
+		{
+			block: state.CandidateRun{
+				ParentRunID: runID, ID: "cand-03", Index: 3,
+				Provision: state.ProvisionRefused, ProvisionNote: "the source is not a git repository",
+				Envelope: state.Envelope{LimitUSD: 1.5, LimitTokens: 60000},
+			},
+		},
+		{
+			block: state.CandidateRun{
+				ParentRunID: runID, ID: "cand-01", Index: 1,
+				Provision: state.ProvisionOK, Envelope: state.Envelope{LimitUSD: 1.5, LimitTokens: 60000},
+				Workspace: belay.Workspace{Dir: filepath.Join(parent.CandidatesDir(), "cand-01"), Ephemeral: true},
+			},
+			final:   passed,
+			records: timelineCandidateJournal(journal.EventRunCompleted, 0.25, 0),
+		},
+		{
+			block: state.CandidateRun{
+				ParentRunID: runID, ID: "cand-02", Index: 2,
+				Provision: state.ProvisionOK, Envelope: state.Envelope{LimitUSD: 1.5, LimitTokens: 60000},
+				Workspace: belay.Workspace{Dir: filepath.Join(parent.CandidatesDir(), "cand-02"), Ephemeral: true},
+			},
+			final:   state.NewState("make the thing fast"),
+			records: timelineCandidateJournal(journal.EventUnknown, 0.11, 1),
+		},
+	} {
+		timelineWriteCandidateRun(t, parent, runID, c)
+	}
+
+	tl, err := LoadTimeline(ws, runID)
+	if err != nil {
+		t.Fatalf("LoadTimeline: %v", err)
+	}
+	if tl.Winner != "" {
+		t.Errorf("Winner = %q, want empty: nothing has selected one yet", tl.Winner)
+	}
+
+	want := []TimelineCandidate{
+		{
+			ID: "cand-01", Index: 1, RunID: runID + "-cand-01", RunDir: "candidate-runs/cand-01",
+			WorkspaceDir: filepath.Join(parent.CandidatesDir(), "cand-01"),
+			Outcome:      TimelineCandidateFinished,
+			TestPassed:   true, IssueCount: 1,
+			Provision: state.ProvisionOK,
+			Envelope:  state.Envelope{LimitUSD: 1.5, LimitTokens: 60000},
+			SpentUSD:  0.25, Duration: 24100 * time.Millisecond, Nodes: 3,
+		},
+		{
+			ID: "cand-02", Index: 2, RunID: runID + "-cand-02", RunDir: "candidate-runs/cand-02",
+			WorkspaceDir: filepath.Join(parent.CandidatesDir(), "cand-02"),
+			Outcome:      TimelineCandidateUnfinished,
+			Provision:    state.ProvisionOK,
+			Envelope:     state.Envelope{LimitUSD: 1.5, LimitTokens: 60000},
+			SpentUSD:     0.11, Duration: 24100 * time.Millisecond, Nodes: 3,
+		},
+		{
+			ID: "cand-03", Index: 3, RunID: runID + "-cand-03", RunDir: "candidate-runs/cand-03",
+			Outcome:       TimelineCandidateRefused,
+			Provision:     state.ProvisionRefused,
+			ProvisionNote: "the source is not a git repository",
+			Envelope:      state.Envelope{LimitUSD: 1.5, LimitTokens: 60000},
+			Note:          "the source is not a git repository",
+		},
+	}
+	if diff := cmp.Diff(want, tl.Candidates); diff != "" {
+		t.Errorf("live candidate lanes mismatch (-want +got):\n%s", diff)
+	}
+}
+
+// TestTimelineOfARunWithoutFanoutHasNoLanes is the guard that keeps every
+// run anybody has today printing exactly what it prints today: no fanout
+// pin, no candidate directories, no lanes, no winner.
+func TestTimelineOfARunWithoutFanoutHasNoLanes(t *testing.T) {
+	t.Parallel()
+
+	ws := t.TempDir()
+	const runID = "20260905T142530Z-cccccccccccc"
+	timelineWriteRun(t, ws, runID, "make the thing fast", timelineBase, timelineFixLoopRun())
+
+	tl, err := LoadTimeline(ws, runID)
+	if err != nil {
+		t.Fatalf("LoadTimeline: %v", err)
+	}
+	if len(tl.Candidates) != 0 {
+		t.Errorf("Candidates = %+v, want none", tl.Candidates)
+	}
+	if tl.Winner != "" {
+		t.Errorf("Winner = %q, want empty", tl.Winner)
+	}
+}
+
+// TestTimelineNeverRewritesACandidateJournal is the rule that keeps a reader
+// from corrupting a run: journal.Open heals a torn tail by rewriting the
+// file, and a candidate's journal belongs to a goroutine that may still be
+// writing it. Reading it must leave every byte where it was, and must report
+// the candidate as interrupted rather than tidying the evidence away.
+func TestTimelineNeverRewritesACandidateJournal(t *testing.T) {
+	t.Parallel()
+
+	ws := t.TempDir()
+	const runID = "20260905T142530Z-dddddddddddd"
+	parent := timelineWriteParentRun(t, ws, runID, state.FanoutPin{Candidates: 1, Select: "fewest_issues"},
+		state.NewState("make the thing fast"), timelineFixLoopRun())
+
+	// A journal whose last node_started never got its node_finished, and
+	// whose final line was itself cut in half: both halves of a kill -9.
+	open := newTimelineBuilder().
+		run(journal.EventRunStarted)
+	open.node(timelineNodeSpec{node: "code", status: journal.StatusOK, durationMS: 20000, next: "write",
+		usage: usd(9000, 3000, 0.19, false)})
+	open.add(journal.Record{Event: journal.EventNodeStarted, Node: "write", Attempt: 1})
+
+	cand := timelineWriteCandidateRun(t, parent, runID, timelineCandidateRun{
+		block: state.CandidateRun{
+			ParentRunID: runID, ID: "cand-01", Index: 1, Provision: state.ProvisionOK,
+			Envelope: state.Envelope{LimitUSD: 5},
+		},
+		final:    state.NewState("make the thing fast"),
+		records:  open.records,
+		tornTail: true,
+	})
+
+	before := timelineDigest(t, cand.JournalPath())
+
+	tl, err := LoadTimeline(ws, runID)
+	if err != nil {
+		t.Fatalf("LoadTimeline: %v", err)
+	}
+	if got := timelineDigest(t, cand.JournalPath()); got != before {
+		t.Errorf("belay timeline rewrote a candidate journal: %s -> %s", before, got)
+	}
+	if len(tl.Candidates) != 1 {
+		t.Fatalf("Candidates = %+v, want one lane", tl.Candidates)
+	}
+	if got, want := tl.Candidates[0].Outcome, TimelineCandidateInterrupted; got != want {
+		t.Errorf("lane outcome = %q, want %q", got, want)
+	}
+	if !tl.Candidates[0].Interrupted {
+		t.Error("lane Interrupted = false, want true for a journal with an open node and a torn tail")
+	}
+
+	// --candidate opens the same journal, and must be just as read-only.
+	ctl, err := LoadCandidateTimeline(ws, runID, "cand-01")
+	if err != nil {
+		t.Fatalf("LoadCandidateTimeline: %v", err)
+	}
+	if got := timelineDigest(t, cand.JournalPath()); got != before {
+		t.Errorf("belay timeline --candidate rewrote a candidate journal: %s -> %s", before, got)
+	}
+	if !ctl.Interrupted {
+		t.Error("the candidate's own timeline should report the interruption")
+	}
+	if got, want := ctl.Run.Candidate, "cand-01"; got != want {
+		t.Errorf("selection Candidate = %q, want %q", got, want)
+	}
+}
+
+// timelineDigest is the sha256 of a file, so a test can prove a reader left
+// it alone byte for byte.
+func timelineDigest(t *testing.T, path string) string {
+	t.Helper()
+	b, err := os.ReadFile(path) //nolint:gosec // a fixture path this test built
+	if err != nil {
+		t.Fatalf("read %s: %v", path, err)
+	}
+	return string(sha256.New().Sum(b))
+}

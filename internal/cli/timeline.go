@@ -240,6 +240,11 @@ type Timeline struct {
 	// the process is killed between write and the next record: expected, and
 	// reported as such.
 	InterruptedMidWrite bool
+	// Candidates is every fanout candidate's lane, in index order. Empty
+	// for a run that does not fan out.
+	Candidates []TimelineCandidate
+	// Winner is the candidate join selected, or empty.
+	Winner string
 	// ChangedFiles is every file the run has changed so far, relative to the
 	// workspace: state.json's Code.ChangedFiles, which the code node starts
 	// and each fix adds to. LoadTimeline sorts it and lists each file once.
@@ -269,6 +274,12 @@ type TimelineSelection struct {
 	Dir string
 	// Workspace is the repository the run belongs to.
 	Workspace string
+	// Candidate is the candidate id this timeline is about, for a timeline
+	// of one fanout candidate's own run, or empty for an ordinary run.
+	Candidate string
+	// ParentRunID is the run a candidate belongs to, set alongside
+	// Candidate and empty otherwise.
+	ParentRunID string
 	// Implicit is true when no run id was given on the command line and the
 	// most recent run was chosen.
 	Implicit bool
@@ -636,11 +647,30 @@ func timelineLoadManifest(workspace, runID string) (state.Manifest, bool) {
 	if err != nil {
 		return state.Manifest{}, false
 	}
+	return timelineManifestAt(layout)
+}
+
+// timelineManifestAt reads the manifest of whatever run layout describes,
+// reporting failure as "absent". It takes a Layout rather than a run id
+// because a fanout candidate's run is not under .belay/runs/ and so has no
+// id state.NewLayout would accept; see state.NewCandidateRunLayout.
+func timelineManifestAt(layout state.Layout) (state.Manifest, bool) {
 	m, err := state.LoadManifest(layout.ManifestPath())
 	if err != nil {
 		return state.Manifest{}, false
 	}
 	return m, true
+}
+
+// timelineStateAt reads a run's blackboard, reporting failure as absent for
+// the same reason timelineManifestAt does: a timeline of a damaged run must
+// still render.
+func timelineStateAt(layout state.Layout) (state.State, bool) {
+	st, err := state.LoadState(layout.StatePath())
+	if err != nil {
+		return state.State{}, false
+	}
+	return st, true
 }
 
 // ResolveTimelineRun decides which run the timeline is about.
@@ -714,26 +744,28 @@ func LoadTimeline(workspace, runID string) (Timeline, error) {
 	}
 
 	var manifest *state.Manifest
-	if m, ok := timelineLoadManifest(workspace, sel.RunID); ok {
+	if m, ok := timelineManifestAt(layout); ok {
 		manifest = &m
 	}
+	st, stOK := timelineStateAt(layout)
 	tl := BuildTimeline(sel, manifest, res)
-	tl.ChangedFiles = timelineChangedFiles(layout)
+	tl.ChangedFiles = timelineChangedFiles(st, stOK)
+	tl.Candidates, tl.Winner = timelineCandidateLanes(layout, st, stOK)
 	return tl, nil
 }
 
-// timelineChangedFiles reads the files a run has changed from its state.json,
+// timelineChangedFiles reads the files a run has changed from its blackboard,
 // sorted and each once.
 //
-// It reads state.json rather than the journal because that is where the list
-// lives: the code node records it, and each fix adds what its repair touched.
-// Like timelineLoadManifest it reports a file it cannot read as nothing to
-// show rather than as an error, so a timeline of a damaged run still renders.
-// It sorts and de-duplicates itself rather than trusting the list, which the
-// code node records in the order the agent reported it.
-func timelineChangedFiles(layout state.Layout) []string {
-	st, err := state.LoadState(layout.StatePath())
-	if err != nil {
+// It reads the blackboard rather than the journal because that is where the
+// list lives: the code node records it, and each fix adds what its repair
+// touched. Like timelineManifestAt, a blackboard that could not be read is
+// nothing to show rather than an error, so a timeline of a damaged run still
+// renders — which is what ok reports. It sorts and de-duplicates itself
+// rather than trusting the list, which the code node records in the order the
+// agent reported it.
+func timelineChangedFiles(st state.State, ok bool) []string {
+	if !ok {
 		return nil
 	}
 	files := slices.Clone(st.Code.ChangedFiles)
