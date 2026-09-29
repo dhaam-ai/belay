@@ -254,8 +254,9 @@ type Outcome struct {
 	// them ever ran" — two results a person would act on very differently,
 	// and which a single "no winner" would report identically.
 	Completed int
-	// Passed is how many candidates were eligible: their tests passed AND
-	// their own run completed. Only these were offered to the rule.
+	// Passed is how many candidates were eligible: their tests passed, their
+	// own run completed, and their change broke no guardrail. Only these
+	// were offered to the rule.
 	Passed int
 }
 
@@ -263,25 +264,37 @@ type Outcome struct {
 func (o Outcome) Selected() bool { return o.Passed > 0 }
 
 // eligible reports whether a candidate may be offered to a selection rule:
-// its tests passed AND its own candidate run completed.
+// its tests passed, its own candidate run completed, AND its change broke
+// none of the repository's guardrails.
 //
-// The second half is not redundant. A candidate whose tests passed and whose
+// The second term is not redundant. A candidate whose tests passed and whose
 // quality gate then rejected the work, until its fix loop gave up, ends
 // run_failed — and letting it win would promote code a single run would
 // never have promoted. So would a candidate that aborted part-way through
 // its envelope with a green test result from an earlier round, or one whose
 // workspace was refused and which therefore has no result at all.
 //
-// An empty Outcome stays eligible. That is every candidate on a blackboard
-// written before candidate runs existed, where nothing recorded how a
-// candidate ended, and reading "unrecorded" as "did not complete" would make
-// every one of those runs unable to select a winner it had already selected.
+// The third is what stops best-of-N being the way around a policy. A policy
+// holds whatever the tests say, so a candidate that broke one must not win
+// however good its tests and its review look; otherwise the way past a
+// guardrail would be to run the change N times and promote whichever copy
+// the gate happened not to stop. Such a candidate reaches here because a
+// repairable violation can outlive the candidate's own fix loop giving up,
+// which ends that candidate's run.
+//
+// An empty Outcome stays eligible, and so does a zero violation count. Those
+// are every candidate on a blackboard written before candidate runs and
+// before guardrails existed, where nothing recorded how a candidate ended or
+// what its change touched, and reading "unrecorded" as "broke something"
+// would make every one of those runs unable to select a winner it had
+// already selected.
 //
 // It is one function rather than a term inside each row so that a rule
 // cannot opt out of it, and so that the next thing that makes a candidate
-// ineligible — a policy violation, say — is added in one place.
+// ineligible is added in one place. The policy term is what that sentence
+// was written in anticipation of.
 func eligible(c state.Candidate) bool {
-	return c.TestPassed && completedRun(c)
+	return c.TestPassed && completedRun(c) && c.PolicyViolations == 0
 }
 
 // completedRun reports whether a candidate's own run reached a verdict about

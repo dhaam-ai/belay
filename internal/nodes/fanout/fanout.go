@@ -430,20 +430,26 @@ func settled(log *slog.Logger, outcomes []graph.CandidateOutcome) graph.Result {
 // that destroying it is safe. TestPassed is derived rather than carried,
 // because "passed" has one definition in belay — a test run that ran
 // something and failed none of it — and a candidate that never reached its
-// test node must not read as passing.
+// test node must not read as passing. PolicyViolations is what stops
+// best-of-N being the way around a guardrail; see join's eligible.
 func asCandidate(o graph.CandidateOutcome) state.Candidate {
 	return state.Candidate{
 		ID:         o.ID,
 		Dir:        o.Workspace.Dir,
 		TestPassed: o.State.Test.Total > 0 && o.State.Test.Failed == 0,
 		IssueCount: len(o.State.Review.Issues),
-		Ephemeral:  o.Workspace.Ephemeral,
-		Outcome:    outcomeWord(o),
-		RunDir:     o.RunDir,
-		SpentUSD:   o.Spent.USD,
-		Estimated:  o.Spent.Estimated,
-		DurationMS: o.DurationMS,
-		Note:       o.Note,
+		// Counted from the candidate's own blackboard, like its review
+		// issues: join refuses a candidate that broke a guardrail, and a
+		// count assembled anywhere else could disagree with the verdict the
+		// candidate's gate actually recorded.
+		PolicyViolations: len(o.State.Policy.Violations),
+		Ephemeral:        o.Workspace.Ephemeral,
+		Outcome:          outcomeWord(o),
+		RunDir:           o.RunDir,
+		SpentUSD:         o.Spent.USD,
+		Estimated:        o.Spent.Estimated,
+		DurationMS:       o.DurationMS,
+		Note:             o.Note,
 	}
 }
 

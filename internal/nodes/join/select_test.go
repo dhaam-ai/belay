@@ -573,3 +573,71 @@ func TestAnExactSelectionDoesNotRewriteTheTable(t *testing.T) {
 		}
 	}
 }
+
+// guarded is a candidate whose own run completed with n policy violations
+// outstanding.
+func guarded(id string, violations int) state.Candidate {
+	c := ran(id, true, 0, "completed")
+	c.PolicyViolations = violations
+	return c
+}
+
+// A candidate whose change breaks the repository's guardrails must not win,
+// however good its tests and its review look. The whole point of a policy is
+// that it holds whatever the tests say, and best-of-N would otherwise be the
+// one way around it: run the change N times and promote whichever copy the
+// gate happened not to stop.
+//
+// It reaches join at all because a repairable violation can survive a
+// candidate's own fix loop giving up, which ends the candidate's run — and
+// because a candidate run recorded by a belay that judged no policy carries
+// zero, which is what keeps every existing blackboard selecting the winner
+// it already selected.
+func TestSelectRefusesACandidateThatBrokeThePolicy(t *testing.T) {
+	tests := []struct {
+		name       string
+		candidates []state.Candidate
+		wantWinner string
+		wantPassed int
+	}{
+		{
+			name:       "no violations anywhere",
+			candidates: []state.Candidate{guarded("c1", 0), guarded("c2", 0)},
+			wantWinner: "c1",
+			wantPassed: 2,
+		},
+		{
+			name:       "the candidate with violations loses to the one without",
+			candidates: []state.Candidate{guarded("c1", 2), guarded("c2", 0)},
+			wantWinner: "c2",
+			wantPassed: 1,
+		},
+		{
+			name:       "one violation is enough",
+			candidates: []state.Candidate{guarded("c1", 1), guarded("c2", 0)},
+			wantWinner: "c2",
+			wantPassed: 1,
+		},
+		{
+			name:       "every candidate broke the policy: there is no winner",
+			candidates: []state.Candidate{guarded("c1", 1), guarded("c2", 3)},
+			wantWinner: "",
+			wantPassed: 0,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := join.Select(tt.candidates, config.SelectFewestIssues)
+			if err != nil {
+				t.Fatalf("Select() error = %v, want nil", err)
+			}
+			if got.Winner.ID != tt.wantWinner {
+				t.Errorf("Winner = %q, want %q", got.Winner.ID, tt.wantWinner)
+			}
+			if got.Passed != tt.wantPassed {
+				t.Errorf("Passed = %d, want %d", got.Passed, tt.wantPassed)
+			}
+		})
+	}
+}
