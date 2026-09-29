@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"crypto/sha256"
 	"encoding/json"
+	"errors"
 	"maps"
 	"os"
 	"path/filepath"
@@ -732,5 +733,182 @@ func TestTimelineJSONNamesTheCandidateItIsAbout(t *testing.T) {
 	}
 	if got, want := doc.RunID, "r-cand-02"; got != want {
 		t.Errorf("run_id = %q, want %q", got, want)
+	}
+}
+
+// TestTimelineRenderNamesTheCandidateAndItsParent keeps a candidate's own
+// timeline from being mistaken for its parent's. They have the same goal, the
+// same graph and nearly the same run id, so the header has to say which one
+// this is.
+func TestTimelineRenderNamesTheCandidateAndItsParent(t *testing.T) {
+	t.Parallel()
+
+	tl := BuildTimeline(TimelineSelection{
+		RunID: "20260905T142530Z-9f3a21bc4d7e-cand-02", Workspace: "/ws",
+		Candidate: "cand-02", ParentRunID: "20260905T142530Z-9f3a21bc4d7e", TotalRuns: 1,
+	}, timelineDemoManifest(), timelineResult(timelineFixLoopRun(), false))
+
+	got := timelineRender(t, tl, false)
+	const want = "run     20260905T142530Z-9f3a21bc4d7e-cand-02\n" +
+		"        candidate cand-02 of 20260905T142530Z-9f3a21bc4d7e\n"
+	if !strings.HasPrefix(got, want) {
+		t.Errorf("header does not name the candidate and its parent:\n-want prefix %q\n+got        %q",
+			want, got[:min(len(got), len(want)+40)])
+	}
+	// The parent's own timeline says nothing about a candidate.
+	parent := timelineRender(t, BuildTimeline(timelineDemoSelection(), timelineDemoManifest(),
+		timelineResult(timelineFixLoopRun(), false)), false)
+	if strings.Contains(parent, "candidate ") {
+		t.Errorf("a parent run's header mentions a candidate:\n%s", parent)
+	}
+}
+
+// timelineFanoutWorkspace writes a parent fanout run with two candidate runs
+// under it, and returns the workspace and the parent run id.
+func timelineFanoutWorkspace(t *testing.T) (string, string) {
+	t.Helper()
+
+	ws := t.TempDir()
+	const runID = "20260905T142530Z-eeeeeeeeeeee"
+	parent := timelineWriteParentRun(t, ws, runID, state.FanoutPin{Candidates: 2, Select: "fewest_issues"},
+		state.NewState("make the thing fast"), timelineFixLoopRun())
+
+	passed := state.NewState("make the thing fast")
+	passed.Test = state.Test{Total: 12, Passed: 12}
+	for i, c := range []timelineCandidateRun{
+		{
+			block: state.CandidateRun{
+				ParentRunID: runID, ID: "cand-01", Index: 1, Provision: state.ProvisionOK,
+				Envelope: state.Envelope{LimitUSD: 2},
+			},
+			final:   passed,
+			records: timelineCandidateJournal(journal.EventRunCompleted, 0.25, 0),
+		},
+		{
+			block: state.CandidateRun{
+				ParentRunID: runID, ID: "cand-02", Index: 2, Provision: state.ProvisionOK,
+				Envelope: state.Envelope{LimitUSD: 2},
+			},
+			final:   state.NewState("make the thing fast"),
+			records: timelineCandidateJournal(journal.EventRunFailed, 0.11, 1),
+		},
+	} {
+		_ = i
+		timelineWriteCandidateRun(t, parent, runID, c)
+	}
+	return ws, runID
+}
+
+// TestTimelineCommandCandidateFlagOpensOneCandidatesTimeline is the whole
+// point of --candidate: a candidate is a run, so it renders through the same
+// timeline as any other run, with its own nodes rather than the parent's.
+func TestTimelineCommandCandidateFlagOpensOneCandidatesTimeline(t *testing.T) {
+	t.Parallel()
+
+	ws, runID := timelineFanoutWorkspace(t)
+
+	out, err := timelineRunCmd(t, runID, "--workspace", ws, "--candidate", "cand-02", "--json")
+	if err != nil {
+		t.Fatalf("timeline --candidate: %v", err)
+	}
+	var doc struct {
+		RunID       string  `json:"run_id"`
+		Candidate   *string `json:"candidate"`
+		ParentRunID *string `json:"parent_run_id"`
+		Status      string  `json:"status"`
+		Entries     []struct {
+			Node string `json:"node"`
+		} `json:"entries"`
+		Totals struct {
+			USD float64 `json:"usd"`
+		} `json:"totals"`
+		Candidates []timelineJSONCandidate `json:"candidates"`
+	}
+	if err := json.Unmarshal([]byte(out), &doc); err != nil {
+		t.Fatalf("--json output is not valid JSON: %v\n%s", err, out)
+	}
+	if got, want := doc.RunID, runID+"-cand-02"; got != want {
+		t.Errorf("run_id = %q, want %q", got, want)
+	}
+	if doc.Candidate == nil || *doc.Candidate != "cand-02" {
+		t.Errorf("candidate = %v, want cand-02", doc.Candidate)
+	}
+	if doc.ParentRunID == nil || *doc.ParentRunID != runID {
+		t.Errorf("parent_run_id = %v, want %q", doc.ParentRunID, runID)
+	}
+	if got, want := doc.Status, "failed"; got != want {
+		t.Errorf("status = %q, want %q", got, want)
+	}
+	nodes := make([]string, 0, len(doc.Entries))
+	for _, e := range doc.Entries {
+		nodes = append(nodes, e.Node)
+	}
+	if diff := cmp.Diff([]string{"code", "write", "test"}, nodes); diff != "" {
+		t.Errorf("the candidate's own nodes mismatch (-want +got):\n%s", diff)
+	}
+	if got, want := doc.Totals.USD, 0.11; got != want {
+		t.Errorf("totals.usd = %v, want %v: the candidate's own spend, not the parent's", got, want)
+	}
+	// A candidate never fans out, so it has no lanes of its own.
+	if len(doc.Candidates) != 0 {
+		t.Errorf("candidates = %+v, want none for a candidate's own timeline", doc.Candidates)
+	}
+}
+
+// TestTimelineCommandCandidateFlagNamesTheOnesThatExist makes a mistyped
+// candidate id self-correcting: the ids are short and guessable, so seeing
+// the real ones is the fix.
+func TestTimelineCommandCandidateFlagNamesTheOnesThatExist(t *testing.T) {
+	t.Parallel()
+
+	ws, runID := timelineFanoutWorkspace(t)
+
+	_, err := timelineRunCmd(t, runID, "--workspace", ws, "--candidate", "cand-09")
+	if err == nil {
+		t.Fatal("expected an error for a candidate that does not exist")
+	}
+	if !errors.Is(err, ErrTimelineCandidateNotFound) {
+		t.Errorf("error does not match ErrTimelineCandidateNotFound: %v", err)
+	}
+	for _, want := range []string{"cand-09", "cand-01", "cand-02", runID} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("error %q does not name %q", err, want)
+		}
+	}
+}
+
+// TestTimelineCommandCandidateFlagOnARunWithoutFanout says the useful thing
+// rather than only reporting a miss: this run has no candidates because it
+// never fanned out.
+func TestTimelineCommandCandidateFlagOnARunWithoutFanout(t *testing.T) {
+	t.Parallel()
+
+	ws := t.TempDir()
+	const runID = "20260905T142530Z-ffffffffffff"
+	timelineWriteRun(t, ws, runID, "a goal", timelineBase, timelineFixLoopRun())
+
+	_, err := timelineRunCmd(t, runID, "--workspace", ws, "--candidate", "cand-01")
+	if err == nil {
+		t.Fatal("expected an error for a run with no candidates")
+	}
+	if !errors.Is(err, ErrTimelineCandidateNotFound) {
+		t.Errorf("error does not match ErrTimelineCandidateNotFound: %v", err)
+	}
+	if !strings.Contains(err.Error(), "fans out") {
+		t.Errorf("error %q does not say why there are no candidates", err)
+	}
+}
+
+// TestLoadCandidateTimelineRefusesAnEscapingID keeps --candidate from
+// resolving anywhere but under the parent's candidate-runs directory.
+func TestLoadCandidateTimelineRefusesAnEscapingID(t *testing.T) {
+	t.Parallel()
+
+	ws, runID := timelineFanoutWorkspace(t)
+
+	for _, id := range []string{"../../etc", "..", "a/b", ""} {
+		if _, err := LoadCandidateTimeline(ws, runID, id); err == nil {
+			t.Errorf("LoadCandidateTimeline(%q) returned no error", id)
+		}
 	}
 }

@@ -1083,6 +1083,17 @@ func timelineWriteHeader(b *strings.Builder, s timelineStyle, tl Timeline) {
 	label := func(k string) string { return s.paint(timelineDim, timelinePadRight(k, 8)) }
 
 	fmt.Fprintf(b, "%s%s\n", label("run"), s.paint(timelineBold, tl.Run.RunID))
+	if tl.Run.Candidate != "" {
+		// A candidate's run id is its parent's with a suffix, and it shares
+		// the parent's goal and graph, so without this line the two
+		// timelines are nearly indistinguishable.
+		of := ""
+		if tl.Run.ParentRunID != "" {
+			of = " of " + timelineDropControl(tl.Run.ParentRunID)
+		}
+		fmt.Fprintf(b, "%s%s\n", label(""), s.paint(timelineDim,
+			"candidate "+timelineDropControl(tl.Run.Candidate)+of))
+	}
 	if tl.Run.Implicit {
 		// Never act on an implicit target without saying which one was
 		// chosen, and say what it was chosen among.
@@ -1521,7 +1532,10 @@ func init() {
 
 // newTimelineCmd builds the `belay timeline` command.
 func newTimelineCmd() *cobra.Command {
-	var asJSON bool
+	var (
+		asJSON    bool
+		candidate string
+	)
 
 	cmd := &cobra.Command{
 		Use:   "timeline [run-id]",
@@ -1537,7 +1551,13 @@ loop reads as a loop rather than as a list you have to count.
 A run that was interrupted has a journal whose final line was still being
 written. That is expected: belay flushes every record to disk as it happens,
 so only the unfinished line is ever lost. The timeline renders everything
-before it and says where the run stopped.`,
+before it and says where the run stopped.
+
+A run that fans out lists its candidates at the end: how each ended, what it
+spent, how long it took and which one won. --candidate <id> opens one
+candidate's own run as a timeline in its own right, because a candidate is a
+run -- its own journal, blackboard, manifest and snapshots -- and not an
+entry in its parent's.`,
 		Args:         cobra.MaximumNArgs(1),
 		SilenceUsage: true,
 		RunE: func(cmd *cobra.Command, args []string) error {
@@ -1549,7 +1569,13 @@ before it and says where the run stopped.`,
 			if len(args) == 1 {
 				runID = args[0]
 			}
-			tl, err := LoadTimeline(ws, runID)
+			load := LoadTimeline
+			if candidate != "" {
+				load = func(ws, runID string) (Timeline, error) {
+					return LoadCandidateTimeline(ws, runID, candidate)
+				}
+			}
+			tl, err := load(ws, runID)
 			if err != nil {
 				return err
 			}
@@ -1564,5 +1590,9 @@ before it and says where the run stopped.`,
 
 	cmd.Flags().BoolVar(&asJSON, "json", false,
 		"emit the timeline as JSON (stable, versioned shape) instead of a table")
+	// No default and no implicit choice: picking one of N candidates on the
+	// reader's behalf would be picking which answer they get.
+	cmd.Flags().StringVar(&candidate, "candidate", "",
+		"show one fanout candidate's own timeline instead of the run's (e.g. cand-02)")
 	return cmd
 }
