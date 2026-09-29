@@ -20,10 +20,10 @@
 // # A conditional node is decided once, when the run is created
 //
 // Some nodes belong only to some runs: the one that promotes the change onto
-// a branch (WithBranchOutput), a gate that checks it against the policy in
-// belay.yaml. Each is added by an Option, and every Option follows one rule. Whether a run has
-// the node is decided once, when the run is created, and pinned in its
-// manifest. Every later call to Default or Route for that run, including the
+// a branch (WithBranchOutput), the gate that holds it to the policy in
+// belay.yaml (WithPolicyGate). Each is added by an Option, and every Option
+// follows one rule. Whether a run has the node is decided once, when the run
+// is created, and pinned in its manifest. Every later call to Default or Route for that run, including the
 // one a resume makes days later, is given options built from the manifest,
 // never from the configuration on disk at the time.
 //
@@ -67,6 +67,7 @@ import (
 	"github.com/dhaam-ai/belay/internal/nodes/fix"
 	"github.com/dhaam-ai/belay/internal/nodes/join"
 	"github.com/dhaam-ai/belay/internal/nodes/plan"
+	"github.com/dhaam-ai/belay/internal/nodes/policy"
 	"github.com/dhaam-ai/belay/internal/nodes/promote"
 	"github.com/dhaam-ai/belay/internal/nodes/review"
 	"github.com/dhaam-ai/belay/internal/nodes/test"
@@ -145,6 +146,36 @@ func WithBranchOutput() Option {
 	}
 }
 
+// WithPolicyGate builds the graph of a run whose change is held to the
+// guardrails in belay.yaml: the policy gate is registered and put on the
+// route between write and test, and write is rewired to lead into it.
+//
+// Both halves are this one Option, because a gate nothing routes into is the
+// failure the whole feature exists to prevent -- a guardrail configured,
+// accepted, and walked past on every run. A registry holding the node while
+// write still routed to test would be exactly that, and it would look
+// correct in every listing.
+//
+// It is opt-in, and a run without it is exactly the run belay has always
+// had. Whether a run gets it is decided once, when the run is created, and
+// pinned in the manifest as state.Manifest.Policy; every later call for that
+// run, a resume included, is given the same option. See this package's
+// documentation for why an edge may not be read from configuration that can
+// change mid-run -- the gate is the case that documentation was written
+// about, because a policy that arrived mid-run could only fail a run for
+// something it did not do.
+//
+// The gate needs no rewiring of its own successors. It sends a clean change
+// to the test node and a repairable violation to the fix node, and both are
+// on every route; the fix node routes back through write, so the gate is
+// re-entered on every pass of the repair loop rather than only the first.
+func WithPolicyGate() Option {
+	return func(w *wiring) {
+		w.replace(write.New(write.WithOnVerified(graph.NodePolicy)))
+		w.after(graph.NodeWrite, policy.New())
+	}
+}
+
 // wire builds the graph for cfg, then applies opts in the order given, each
 // to the graph the ones before it built.
 //
@@ -193,8 +224,11 @@ func wire(cfg config.Config, opts []Option) *wiring {
 //	plan → approve → code → write → test → fix → review → END
 //
 // with test failures and failed quality gates both routing back through fix,
-// bounded by graph.give_up. WithBranchOutput adds promote after review, for a
-// run that commits its change to a branch. When fanout is enabled the registry also carries
+// bounded by graph.give_up, and fix routing back through write so that a
+// repair's paths are verified like any other change. WithBranchOutput adds
+// promote after review, for a run that commits its change to a branch;
+// WithPolicyGate adds the policy gate between write and test, for a run whose
+// change is held to guardrails. When fanout is enabled the registry also carries
 // fanout and join, off the route: no node routes into fanout yet, so no run
 // reaches either, and nothing runs a candidate (ADR-0019 is reserved for
 // that). Each Option adds to or changes that graph.

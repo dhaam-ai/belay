@@ -17,14 +17,14 @@
 // The cost is one more step per repair against graph.max_steps, which is 60
 // by default against a give_up of 3.
 //
-// # Two entry paths, one node
+// # Three entry paths, one node
 //
-// The graph reaches fix from a failing test node and from a failed review
-// gate. Both are repairs, both resume the same agent session, and both
-// route back to test afterwards, so they are one node with two prompts
-// rather than two nodes. When both records look failing, the test failure
-// wins — see detectCause for why a review computed against already-red code
-// is not worth an attempt.
+// The graph reaches fix from a failing test node, from a failed review gate,
+// and from a policy gate that found a violation the agent can put right. All
+// three are repairs, all three resume the same agent session, and all three
+// route back through write afterwards, so they are one node with three
+// prompts rather than three nodes. When several records look failing,
+// detectCause decides which one the attempt is spent on, and argues why.
 //
 // # This node owns the give-up cap
 //
@@ -124,6 +124,7 @@ import (
 	"fmt"
 	"log/slog"
 	"slices"
+	"strings"
 
 	"github.com/dhaam-ai/belay/internal/graph"
 	"github.com/dhaam-ai/belay/internal/journal"
@@ -258,6 +259,7 @@ func (n *Node) Run(ctx context.Context, rc *graph.RunContext) (graph.Result, err
 		GiveUp:       giveUp,
 		Test:         rc.State.Test,
 		Review:       rc.State.Review,
+		Policy:       rc.State.Policy,
 		ChangedFiles: rc.State.Code.ChangedFiles,
 	})
 
@@ -392,6 +394,15 @@ func causeNote(c cause, st state.State) string {
 		return fmt.Sprintf("%d of %d tests failing", st.Test.Failed, st.Test.Total)
 	case causeReview:
 		return fmt.Sprintf("quality gate failed with %d issues", issueCount(st.Review))
+	case causePolicy:
+		// The gate's own summary, rather than a count assembled here: it
+		// already distinguishes the violations a run can be asked to repair
+		// from the ones it cannot, and two phrasings of one verdict would
+		// eventually disagree.
+		if summary := strings.TrimSpace(st.Policy.Summary); summary != "" {
+			return summary
+		}
+		return fmt.Sprintf("policy gate failed with %d violations", len(st.Policy.Violations))
 	case causeNone:
 		return "nothing recorded as failing"
 	default:

@@ -29,6 +29,7 @@ import (
 type Node struct {
 	root         string
 	maxFileBytes int64
+	onVerified   string
 }
 
 // Node implements graph.Node. Asserted at compile time so a signature drift
@@ -50,6 +51,20 @@ type Option func(*Node)
 // other safety property in this package is measured against.
 func WithWorkspaceRoot(dir string) Option {
 	return func(n *Node) { n.root = dir }
+}
+
+// WithOnVerified sends a verified change set to next instead of straight to
+// the test node. A run whose change is held to a policy passes
+// graph.NodePolicy, because the gate judges the change before anything else
+// is spent on it.
+//
+// It is an Option and not something the node reads from configuration,
+// because whether a run has a gate is decided once, when the run is created,
+// and pinned in its manifest; internal/nodes explains why an edge may not
+// come from a file that can change between a run and its resume. A refusal
+// is unaffected: it carries no successor at all, because the run is stopping.
+func WithOnVerified(next string) Option {
+	return func(n *Node) { n.onVerified = next }
 }
 
 // WithMaxFileBytes caps how much of a single file the patch artifact quotes.
@@ -77,8 +92,9 @@ func (n *Node) Name() string { return graph.NodeWrite }
 //
 // A verified change set — including an empty one — is a success: Run writes
 // the patch artifact, returns a state.Patch whose Code carries the artifact's
-// run-relative path and the verified file list, and routes to
-// graph.NodeTest. An empty change set means the agent proposed nothing; the
+// run-relative path and the verified file list, and routes to the test node —
+// or to whatever WithOnVerified named, which for a guarded run is the policy
+// gate. An empty change set means the agent proposed nothing; the
 // artifact is zero bytes, and the test node then runs against the workspace
 // exactly as it stands, which normally reproduces the previous test result.
 // That repetition is the signal the fix loop needs in order to notice it is
@@ -153,11 +169,21 @@ func (n *Node) Run(ctx context.Context, rc *graph.RunContext) (graph.Result, err
 	)
 
 	return graph.Result{
-		Next:   graph.NodeTest,
+		Next:   n.next(),
 		Status: journal.StatusOK,
 		Patch:  state.Patch{Code: &code},
 		Note:   sanitizeNote(note(present, absent, rel)),
 	}, nil
+}
+
+// next returns where a verified change set goes: the node WithOnVerified
+// named, or the test node, which is where it went before a run could have a
+// policy gate.
+func (n *Node) next() string {
+	if n.onVerified != "" {
+		return n.onVerified
+	}
+	return graph.NodeTest
 }
 
 // materialize verifies the claimed change set and renders its patch.

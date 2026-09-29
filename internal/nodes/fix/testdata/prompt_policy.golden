@@ -1,0 +1,44 @@
+You are belay's fix step. A change was made to this repository to reach the goal below, and it does not pass. Repair it.
+
+## Goal
+
+add rate limiting to the login handler
+
+## Policy violations
+
+This repository declares rules in belay.yaml that a change must obey whatever its tests say, and this change breaks the ones below.
+Gate summary: 2 policy violations to repair
+Full report: artifacts/policy-0006.json
+
+1. [policy:required_tests] internal/auth/limiter.go
+   this change touches 2 files matching policy.required_tests "**/*.go" (internal/auth/limiter.go, internal/auth/login.go), and nothing in it matches the "**/*_test.go" it requires
+
+2. [policy:forbidden_content] internal/auth/login.go:88
+   internal/auth/login.go:88 is forbidden content: a lint suppression; fix the finding instead
+
+## Files this run has already changed
+
+- internal/auth/login.go
+- internal/auth/limiter.go
+
+## What to do
+
+1. Bring the change within the rules above.
+2. Do NOT edit belay.yaml, and do not add, widen or remove a policy rule. The rules are this repository's, not this task's; belay judges this run against the rules it started with whatever the file says by the end, so rewriting the gate spends an attempt and changes nothing.
+3. If a rule genuinely cannot be satisfied for this goal, do not work around it: say so explicitly in your summary and change nothing, so a person can decide.
+4. Keep the existing tests passing: the suite runs as soon as the change is within the rules.
+5. Do not touch code unrelated to what is listed above.
+6. Finish with a short summary: what was broken, what you changed, and why. Then list the files you changed, as below.
+
+## Files you changed
+
+After the summary, emit exactly one fenced block tagged "changed-files", holding the repository-relative path of every file this repair created, modified or deleted, one path per line and nothing else:
+
+```changed-files
+internal/calc/calc.go
+internal/calc/calc_test.go
+```
+
+No absolute paths, no ".." segments, no quotes, no bullets: a path outside the repository fails the run. The files under "Files this run has already changed" stay recorded whether or not you list them again. A file you change but do not list is recorded nowhere, and nothing later in the run will know it changed. If this repair changed no file, emit no block.
+
+This is fix attempt 1 of 3. The suite runs again as soon as you finish; after attempt 3 the run stops and hands the problem to a human.

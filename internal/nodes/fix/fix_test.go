@@ -16,6 +16,7 @@ import (
 	"github.com/dhaam-ai/belay/internal/graph"
 	"github.com/dhaam-ai/belay/internal/journal"
 	"github.com/dhaam-ai/belay/internal/nodes/fix"
+	"github.com/dhaam-ai/belay/internal/policy"
 	"github.com/dhaam-ai/belay/internal/state"
 	"github.com/dhaam-ai/belay/pkg/belay"
 	"github.com/dhaam-ai/belay/pkg/belay/belaytest"
@@ -803,5 +804,32 @@ func TestRunRoutesBackThroughWrite(t *testing.T) {
 	}
 	if res.Status != journal.StatusOK {
 		t.Errorf("Status = %s, want %s", res.Status, journal.StatusOK)
+	}
+}
+
+// The journal note says which of the three failures this attempt was spent
+// on. A note that read "quality gate failed" for a run the policy gate sent
+// here would send whoever reads the timeline to the wrong tool.
+func TestCauseNoteNamesThePolicyGate(t *testing.T) {
+	t.Parallel()
+
+	st := state.NewState("add rate limiting to the login handler")
+	st.Plan = state.Plan{Approved: true}
+	st.Policy = state.NewPolicy(policy.Report{Violations: []policy.Violation{
+		{Rule: policy.RuleRequiredTests, Class: policy.ClassFix, Path: "a.go", Message: "no test beside it"},
+	}}.QualityReport(), "artifacts/policy-0006.json")
+	h := newHarness(t, st)
+
+	res, err := fix.New().Run(context.Background(), h.rc)
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	// The default branch of causeNote would render the cause's log label,
+	// "policy_violation", which contains the word and tells a reader
+	// nothing about the run. The note has to say how much is wrong, as it
+	// does for the other two causes.
+	if !strings.Contains(res.Note, "1 policy violation") {
+		t.Errorf("Note = %q; want it to say how much the gate found, as it does for tests and the quality gate",
+			res.Note)
 	}
 }

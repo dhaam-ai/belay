@@ -11,6 +11,7 @@ import (
 
 	"github.com/dhaam-ai/belay/internal/graph"
 	"github.com/dhaam-ai/belay/internal/nodes/code"
+	"github.com/dhaam-ai/belay/internal/policy"
 	"github.com/dhaam-ai/belay/internal/state"
 	"github.com/dhaam-ai/belay/pkg/belay"
 )
@@ -103,6 +104,28 @@ func TestDetectCause(t *testing.T) {
 			name: "failures reported without counts",
 			st:   state.State{Test: state.Test{Failures: []belay.TestFailure{{Name: "TestX"}}}},
 			want: causeTests, label: "failing_tests",
+		},
+		{
+			name: "a policy violation",
+			st:   state.State{Policy: brokenPolicy()},
+			want: causePolicy, label: "policy_violation",
+		},
+		{
+			// A failing gate on the blackboard is proof the run came from
+			// the gate: the gate runs before test, so a run whose gate
+			// failed never reached the tests, and whatever test result is
+			// recorded is from before the change the gate has just judged.
+			name: "a policy violation beside a stale test failure wins",
+			st:   state.State{Test: failingTestState(), Policy: brokenPolicy()},
+			want: causePolicy, label: "policy_violation",
+		},
+		{
+			name: "a gate that passed is not a cause",
+			st: state.State{
+				Test:   state.Test{Total: 14, Passed: 14, ReportPath: "artifacts/test.json"},
+				Policy: state.Policy{Gate: belay.GatePass, Summary: "no policy violations"},
+			},
+			want: causeNone, label: "none",
 		},
 	}
 	for _, tt := range tests {
@@ -391,6 +414,22 @@ func TestTruncateCutsOnRuneBoundary(t *testing.T) {
 	}
 }
 
+// brokenPolicy is a gate verdict with one repairable violation in it.
+func brokenPolicy() state.Policy {
+	return state.NewPolicy(policy.Report{Violations: []policy.Violation{
+		{
+			Rule: policy.RuleRequiredTests, Class: policy.ClassFix, Path: "internal/auth/limiter.go",
+			Message: "this change touches 2 files matching policy.required_tests \"**/*.go\" " +
+				"(internal/auth/limiter.go, internal/auth/login.go), and nothing in it matches the " +
+				"\"**/*_test.go\" it requires",
+		},
+		{
+			Rule: policy.RuleForbiddenContent, Class: policy.ClassFix, Path: "internal/auth/login.go", Line: 88,
+			Message: "internal/auth/login.go:88 is forbidden content: a lint suppression; fix the finding instead",
+		},
+	}}.QualityReport(), "artifacts/policy-0006.json")
+}
+
 func makeFiles(n int) []string {
 	out := make([]string, 0, n)
 	for range n {
@@ -423,6 +462,18 @@ func TestBuildPromptGolden(t *testing.T) {
 				Attempt:      2,
 				GiveUp:       3,
 				Test:         failingTestState(),
+				ChangedFiles: []string{"internal/auth/login.go", "internal/auth/limiter.go"},
+			},
+		},
+		{
+			name:   "policy violations",
+			golden: "testdata/prompt_policy.golden",
+			in: promptInput{
+				Goal:         "add rate limiting to the login handler",
+				Cause:        causePolicy,
+				Attempt:      1,
+				GiveUp:       3,
+				Policy:       brokenPolicy(),
 				ChangedFiles: []string{"internal/auth/login.go", "internal/auth/limiter.go"},
 			},
 		},
