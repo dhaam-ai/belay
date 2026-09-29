@@ -1,19 +1,3 @@
-// Candidate lanes for `belay timeline`.
-//
-// This file is the reader's half of best-of-N: it turns a fanout run's N
-// candidate runs into lanes a person can scan, and opens one candidate's own
-// run as a timeline in its own right. It is deliberately separate from
-// timeline.go, which knows only about one run's journal, because everything
-// here reads files that belong to *other* runs.
-//
-// It is READ-ONLY, and that is not a style preference. A candidate's journal
-// belongs to the goroutine executing that candidate (ADR-0002: one writer per
-// file). journal.Open heals a torn final line by rewriting the file, so a
-// reader that used it would rewrite a journal a live dispatcher is appending
-// to, and turn the one shape belay guarantees is recoverable into corruption.
-// Every read here goes through journal.ReadFile, state.LoadState and
-// state.LoadManifest, none of which write anything. See
-// TestTimelineNeverRewritesACandidateJournal.
 package cli
 
 import (
@@ -30,6 +14,21 @@ import (
 	"github.com/dhaam-ai/belay/internal/journal"
 	"github.com/dhaam-ai/belay/internal/state"
 )
+
+// This file is the reader's half of best-of-N: it turns a fanout run's N
+// candidate runs into lanes a person can scan, and opens one candidate's own
+// run as a timeline in its own right. It is kept apart from timeline.go,
+// which knows only about one run's own journal, because everything here reads
+// files belonging to *other* runs.
+//
+// That makes it READ-ONLY, and not as a style preference. A candidate's
+// journal belongs to the goroutine executing that candidate (ADR-0002: one
+// writer per file). journal.Open heals a torn final line by rewriting the
+// file, so a reader that used it would rewrite a journal a live dispatcher is
+// appending to, and turn the one failure shape belay guarantees is
+// recoverable into corruption. Every read below goes through
+// journal.ReadFile, state.LoadState and state.LoadManifest, none of which
+// write anything. See TestTimelineNeverRewritesACandidateJournal.
 
 // TimelineCandidateOutcome is how one fanout candidate ended, in the
 // reader's vocabulary.
