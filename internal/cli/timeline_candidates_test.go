@@ -1,9 +1,13 @@
 package cli
 
 import (
+	"bytes"
 	"crypto/sha256"
+	"encoding/json"
+	"maps"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -585,5 +589,148 @@ func TestTimelineCandidateLanesDropControlCharacters(t *testing.T) {
 		if !strings.Contains(got, want) {
 			t.Errorf("rendered timeline is missing %q:\n%s", want, got)
 		}
+	}
+}
+
+// TestTimelineJSONCarriesTheCandidates pins the additive half of the --json
+// contract: four new top-level keys and one object per candidate, with the
+// same figures the table shows. The document's schema does not change,
+// because nothing already in it changes meaning.
+func TestTimelineJSONCarriesTheCandidates(t *testing.T) {
+	t.Parallel()
+
+	tl := BuildTimeline(timelineDemoSelection(), timelineDemoManifest(),
+		timelineResult(timelineFixLoopRun(), false))
+	tl.Candidates, tl.Winner = timelineSettledLanesFixture(), "cand-02"
+	tl.Candidates[0].RunID = "r-cand-01"
+	tl.Candidates[0].WorkspaceDir = "/ws/candidates/cand-01"
+	tl.Candidates[0].Provision = state.ProvisionOK
+	tl.Candidates[0].Envelope = state.Envelope{LimitUSD: 1.5, LimitTokens: 60000}
+	tl.Candidates[0].Nodes = 4
+
+	var buf bytes.Buffer
+	if err := RenderTimelineJSON(&buf, tl); err != nil {
+		t.Fatalf("RenderTimelineJSON: %v", err)
+	}
+	var doc map[string]json.RawMessage
+	if err := json.Unmarshal(buf.Bytes(), &doc); err != nil {
+		t.Fatalf("output is not valid JSON: %v\n%s", err, buf.String())
+	}
+
+	// candidates is always an array, so a consumer can iterate unguarded.
+	if b := doc["candidates"]; len(b) == 0 || b[0] != '[' {
+		t.Errorf("%q should always be an array, got %s", "candidates", b)
+	}
+	if got, want := string(doc["winner"]), `"cand-02"`; got != want {
+		t.Errorf("winner = %s, want %s", got, want)
+	}
+	for _, key := range []string{"candidate", "parent_run_id"} {
+		if got := string(doc[key]); got != "null" {
+			t.Errorf("%s = %s, want null for a parent run's own timeline", key, got)
+		}
+	}
+
+	var lanes []map[string]json.RawMessage
+	if err := json.Unmarshal(doc["candidates"], &lanes); err != nil {
+		t.Fatalf("decode candidates: %v", err)
+	}
+	if got, want := len(lanes), 3; got != want {
+		t.Fatalf("len(candidates) = %d, want %d", got, want)
+	}
+	wantKeys := []string{
+		"duration_ms", "envelope_tokens", "envelope_usd", "estimated", "id", "index",
+		"interrupted", "issue_count", "nodes", "note", "outcome", "provision",
+		"provision_note", "run_dir", "run_id", "settled", "spent_usd", "tests_passed",
+		"winner", "workspace_dir",
+	}
+	if diff := cmp.Diff(wantKeys, slices.Sorted(maps.Keys(lanes[0]))); diff != "" {
+		t.Errorf("candidate keys changed (-want +got):\n%s", diff)
+	}
+
+	var typed []timelineJSONCandidate
+	if err := json.Unmarshal(doc["candidates"], &typed); err != nil {
+		t.Fatalf("decode candidates into the documented shape: %v", err)
+	}
+	want := []timelineJSONCandidate{
+		{
+			ID: "cand-01", Index: 1, Outcome: TimelineCandidateFailed,
+			RunID: "r-cand-01", RunDir: "candidate-runs/cand-01",
+			WorkspaceDir: "/ws/candidates/cand-01", Settled: true,
+			IssueCount: 4, Provision: "ok", EnvelopeUSD: 1.5, EnvelopeTokens: 60000,
+			SpentUSD: 0.310, DurationMS: 24100, Nodes: 4, Note: "the fix loop gave up",
+		},
+		{
+			ID: "cand-02", Index: 2, Outcome: TimelineCandidateFinished, Winner: true,
+			RunDir: "candidate-runs/cand-02", Settled: true,
+			TestPassed: true, IssueCount: 1, SpentUSD: 0.420, Estimated: true, DurationMS: 65000,
+		},
+		{
+			ID: "cand-03", Index: 3, Outcome: TimelineCandidateRefused,
+			RunDir: "candidate-runs/cand-03", Settled: true,
+			Note: "the isolator refused this workspace: the source is not a git repository",
+		},
+	}
+	if diff := cmp.Diff(want, typed); diff != "" {
+		t.Errorf("candidates mismatch (-want +got):\n%s", diff)
+	}
+}
+
+// TestTimelineJSONOfARunWithoutFanout keeps the shape iterable without
+// claiming a fanout: an empty array and three nulls.
+func TestTimelineJSONOfARunWithoutFanout(t *testing.T) {
+	t.Parallel()
+
+	tl := BuildTimeline(timelineDemoSelection(), timelineDemoManifest(),
+		timelineResult(timelineFixLoopRun(), false))
+
+	var buf bytes.Buffer
+	if err := RenderTimelineJSON(&buf, tl); err != nil {
+		t.Fatalf("RenderTimelineJSON: %v", err)
+	}
+	var doc map[string]json.RawMessage
+	if err := json.Unmarshal(buf.Bytes(), &doc); err != nil {
+		t.Fatalf("output is not valid JSON: %v", err)
+	}
+	if got, want := string(doc["candidates"]), "[]"; got != want {
+		t.Errorf("candidates = %s, want %s", got, want)
+	}
+	for _, key := range []string{"winner", "candidate", "parent_run_id"} {
+		if got := string(doc[key]); got != "null" {
+			t.Errorf("%s = %s, want null", key, got)
+		}
+	}
+}
+
+// TestTimelineJSONNamesTheCandidateItIsAbout makes a --candidate document
+// self-describing: a script that is handed one must be able to tell it apart
+// from the parent run's without comparing ids by hand.
+func TestTimelineJSONNamesTheCandidateItIsAbout(t *testing.T) {
+	t.Parallel()
+
+	tl := BuildTimeline(TimelineSelection{
+		RunID: "r-cand-02", Dir: "/ws/.belay/runs/r/candidate-runs/cand-02",
+		Workspace: "/ws", Candidate: "cand-02", ParentRunID: "r", TotalRuns: 1,
+	}, nil, timelineResult(timelineFixLoopRun(), false))
+
+	var buf bytes.Buffer
+	if err := RenderTimelineJSON(&buf, tl); err != nil {
+		t.Fatalf("RenderTimelineJSON: %v", err)
+	}
+	var doc struct {
+		RunID       string  `json:"run_id"`
+		Candidate   *string `json:"candidate"`
+		ParentRunID *string `json:"parent_run_id"`
+	}
+	if err := json.Unmarshal(buf.Bytes(), &doc); err != nil {
+		t.Fatalf("output is not valid JSON: %v", err)
+	}
+	if doc.Candidate == nil || *doc.Candidate != "cand-02" {
+		t.Errorf("candidate = %v, want %q", doc.Candidate, "cand-02")
+	}
+	if doc.ParentRunID == nil || *doc.ParentRunID != "r" {
+		t.Errorf("parent_run_id = %v, want %q", doc.ParentRunID, "r")
+	}
+	if got, want := doc.RunID, "r-cand-02"; got != want {
+		t.Errorf("run_id = %q, want %q", got, want)
 	}
 }

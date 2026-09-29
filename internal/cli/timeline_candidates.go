@@ -772,3 +772,62 @@ func timelineSharedEnvelope(lanes []TimelineCandidate) (float64, bool) {
 	}
 	return usd, true
 }
+
+// timelineJSONCandidate is one candidate's lane on the wire.
+type timelineJSONCandidate struct {
+	ID             string                   `json:"id"`
+	Index          int                      `json:"index"`
+	Outcome        TimelineCandidateOutcome `json:"outcome"`
+	Winner         bool                     `json:"winner"`
+	RunID          string                   `json:"run_id"`
+	RunDir         string                   `json:"run_dir"`
+	WorkspaceDir   string                   `json:"workspace_dir"`
+	Settled        bool                     `json:"settled"`
+	TestPassed     bool                     `json:"tests_passed"`
+	IssueCount     int                      `json:"issue_count"`
+	Provision      string                   `json:"provision"`
+	ProvisionNote  string                   `json:"provision_note"`
+	EnvelopeUSD    float64                  `json:"envelope_usd"`
+	EnvelopeTokens int64                    `json:"envelope_tokens"`
+	SpentUSD       float64                  `json:"spent_usd"`
+	Estimated      bool                     `json:"estimated"`
+	DurationMS     int64                    `json:"duration_ms"`
+	Nodes          int                      `json:"nodes"`
+	Interrupted    bool                     `json:"interrupted"`
+	Note           string                   `json:"note"`
+}
+
+// timelineCandidatesToJSON projects the lanes onto the wire shape.
+//
+// It is always an array, never null, so a consumer can iterate it without a
+// nil check — the convention every other collection in the document follows.
+// The ids and notes are passed through timelineDropControl for the reason
+// timelineWriteCandidates gives: they may end up in a terminal either way.
+func timelineCandidatesToJSON(lanes []TimelineCandidate) []timelineJSONCandidate {
+	out := make([]timelineJSONCandidate, 0, len(lanes))
+	for _, l := range lanes {
+		out = append(out, timelineJSONCandidate{
+			ID:             timelineDropControl(l.ID),
+			Index:          l.Index,
+			Outcome:        l.Outcome,
+			Winner:         l.Winner,
+			RunID:          timelineDropControl(l.RunID),
+			RunDir:         timelineDropControl(l.RunDir),
+			WorkspaceDir:   timelineDropControl(l.WorkspaceDir),
+			Settled:        l.Settled,
+			TestPassed:     l.TestPassed,
+			IssueCount:     l.IssueCount,
+			Provision:      string(l.Provision),
+			ProvisionNote:  timelineDropControl(l.ProvisionNote),
+			EnvelopeUSD:    l.Envelope.LimitUSD,
+			EnvelopeTokens: l.Envelope.LimitTokens,
+			SpentUSD:       l.SpentUSD,
+			Estimated:      l.Estimated,
+			DurationMS:     l.Duration.Milliseconds(),
+			Nodes:          l.Nodes,
+			Interrupted:    l.Interrupted,
+			Note:           timelineDropControl(l.Note),
+		})
+	}
+	return out
+}

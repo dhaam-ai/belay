@@ -1256,7 +1256,32 @@ const TimelineJSONVersion = 1
 //	  "markers":      [ …marker ],
 //	  "loops":        [ {"node": string, "executions": number} ],
 //	  "totals":       { …totals },
-//	  "changed_files": [ string ]  // sorted, each once; always present, possibly empty
+//	  "changed_files": [ string ], // sorted, each once; always present, possibly empty
+//	  "candidate":     string|null, // the candidate this timeline is about
+//	  "parent_run_id": string|null, // its parent, set alongside "candidate"
+//	  "winner":        string|null, // the candidate join selected
+//	  "candidates":    [ …candidate ] // always present, possibly empty
+//	}
+//
+// A candidate is one fanout lane. "settled" says where its figures came
+// from: true means the parent blackboard, which is what the run was billed
+// for, and false means the candidate's own journal while the fanout is still
+// open, so "spent_usd" and "duration_ms" are running totals. "nodes" is 0 for
+// a settled lane, because the blackboard carries no step count.
+//
+//	{
+//	  "id": string, "index": number,
+//	  "outcome": "finished"|"failed"|"stopped"|"paused"|"unfinished"
+//	             |"interrupted"|"refused",
+//	  "winner": bool, "settled": bool,
+//	  "run_id": string, "run_dir": string,      // run_dir is parent-relative
+//	  "workspace_dir": string,                  // may no longer exist
+//	  "tests_passed": bool, "issue_count": number,
+//	  "provision": ""|"ok"|"refused", "provision_note": string,
+//	  "envelope_usd": number, "envelope_tokens": number,
+//	  "spent_usd": number, "estimated": bool,
+//	  "duration_ms": number, "nodes": number,
+//	  "interrupted": bool, "note": string
 //	}
 //
 // An entry is one node execution:
@@ -1295,6 +1320,10 @@ type timelineJSONDoc struct {
 	Loops        []timelineJSONLoop        `json:"loops"`
 	Totals       timelineJSONTotals        `json:"totals"`
 	ChangedFiles []string                  `json:"changed_files"`
+	Candidate    *string                   `json:"candidate"`
+	ParentRunID  *string                   `json:"parent_run_id"`
+	Winner       *string                   `json:"winner"`
+	Candidates   []timelineJSONCandidate   `json:"candidates"`
 }
 
 // timelineJSONInterruption reports a run that stopped without recording an
@@ -1396,6 +1425,7 @@ func timelineToJSON(tl Timeline) timelineJSONDoc {
 		Markers:      make([]timelineJSONMarker, 0, len(tl.Markers)),
 		Loops:        make([]timelineJSONLoop, 0, len(tl.Loops)),
 		ChangedFiles: append(make([]string, 0, len(tl.ChangedFiles)), tl.ChangedFiles...),
+		Candidates:   timelineCandidatesToJSON(tl.Candidates),
 		Totals: timelineJSONTotals{
 			Nodes:           tl.Totals.Nodes,
 			AgentDurationMS: tl.Totals.AgentDuration.Milliseconds(),
@@ -1417,6 +1447,21 @@ func timelineToJSON(tl Timeline) timelineJSONDoc {
 	if tl.Totals.BudgetLimitUSD > 0 {
 		limit := tl.Totals.BudgetLimitUSD
 		doc.Totals.BudgetLimitUSD = &limit
+	}
+	// The three candidate fields are null rather than "" for a run that has
+	// nothing to say about them, so that a consumer can tell "this is not a
+	// candidate timeline" from "this candidate has no id".
+	if tl.Run.Candidate != "" {
+		cand := timelineDropControl(tl.Run.Candidate)
+		doc.Candidate = &cand
+	}
+	if tl.Run.ParentRunID != "" {
+		parent := timelineDropControl(tl.Run.ParentRunID)
+		doc.ParentRunID = &parent
+	}
+	if tl.Winner != "" {
+		winner := timelineDropControl(tl.Winner)
+		doc.Winner = &winner
 	}
 	if tl.Interrupted {
 		doc.Interruption = &timelineJSONInterruption{
