@@ -2,6 +2,21 @@
 // concrete failure back to the coding agent, and the step that decides when
 // to stop trying.
 //
+// # A repair is verified like any other change
+//
+// Run routes back to the write node, which routes on to the tests. The
+// alternative -- straight to test, which is what belay did until the policy
+// gate -- took the agent's report of what it changed on trust: no path was
+// checked against the disk, so a symbolic link out of the workspace was
+// recorded as a change to a file inside it; no diff of the repair was
+// rendered, so a run's artifacts held the original change and nothing else;
+// and State.Code.LastDiff still pointed at the first diff however many
+// repairs had happened since. write is the one node that does all three, so a
+// repair goes through it.
+//
+// The cost is one more step per repair against graph.max_steps, which is 60
+// by default against a give_up of 3.
+//
 // # Two entry paths, one node
 //
 // The graph reaches fix from a failing test node and from a failed review
@@ -292,7 +307,13 @@ func (n *Node) Run(ctx context.Context, rc *graph.RunContext) (graph.Result, err
 		"usd", resp.Usage.USD)
 
 	return graph.Result{
-		Next:   graph.NodeTest,
+		// Back through write, never straight to test. write is the only node
+		// that proves a claimed path is a regular file inside the workspace,
+		// and the only one that renders a diff artifact and sets
+		// Code.LastDiff. A repair that skipped it would be a change belay
+		// recorded on the agent's word alone -- see the package
+		// documentation.
+		Next:   graph.NodeWrite,
 		Status: journal.StatusOK,
 		Patch: state.Patch{
 			Code: &changed,
