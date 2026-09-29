@@ -180,6 +180,8 @@ type State struct {
 	Review Review `json:"review"`
 	// Fix is the fix loop's own progress.
 	Fix Fix `json:"fix"`
+	// Policy is the most recent policy gate verdict.
+	Policy Policy `json:"policy"`
 	// Candidates lists every best-of-N fanout candidate's outcome, once
 	// fanout has run. Empty, never nil, for a run with no fanout.
 	Candidates []Candidate `json:"candidates"`
@@ -446,6 +448,9 @@ type Candidate struct {
 	// IssueCount is the candidate's review issue count, at or above
 	// whatever severity the run's selection strategy cares about.
 	IssueCount int `json:"issue_count"`
+	// PolicyViolations is how many policy violations this candidate's own
+	// run ended with.
+	PolicyViolations int `json:"policy_violations"`
 	// Ephemeral mirrors the belay.Workspace.Ephemeral of the workspace
 	// the isolator created for this candidate, so whatever cleans up
 	// afterwards knows which directories belay may destroy.

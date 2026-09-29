@@ -296,7 +296,7 @@ func TestTest_JSONKeySetMatchesSpec(t *testing.T) {
 func TestState_JSONKeySetMatchesSpec(t *testing.T) {
 	assertExactJSONKeys(t, NewState("goal"), []string{
 		"schema_version", "requires", "goal", "plan", "code", "test", "review",
-		"fix", "candidates", "winner", "promotion", "history",
+		"fix", "policy", "candidates", "winner", "promotion", "history",
 	})
 }
 
@@ -314,7 +314,7 @@ func TestFix_JSONKeySetMatchesSpec(t *testing.T) {
 
 func TestCandidate_JSONKeySetMatchesSpec(t *testing.T) {
 	assertExactJSONKeys(t, Candidate{}, []string{
-		"id", "dir", "test_passed", "issue_count", "ephemeral",
+		"id", "dir", "test_passed", "issue_count", "policy_violations", "ephemeral",
 		"outcome", "run_dir", "spent_usd", "estimated", "duration_ms", "note",
 	})
 }
@@ -405,9 +405,16 @@ func TestStateGolden(t *testing.T) {
 		Source: "golangci-lint", Gate: belay.GatePass, Issues: []belay.Issue{}, Summary: "clean",
 	}, "")
 	st.Fix = Fix{Attempts: 0, GiveUp: false}
+	// A gate that passed: the shape a guarded run records, with no
+	// violations, so the golden documents the fields rather than only the
+	// zero value a run without a policy leaves behind.
+	st.Policy = NewPolicy(belay.QualityReport{
+		Gate: belay.GatePass, Issues: []belay.Issue{}, Summary: "no policy violations",
+	}, "artifacts/policy-0004.json")
 	st.Candidates = []Candidate{
 		{
-			ID: "c1", Dir: "/work/candidates/c1", TestPassed: true, IssueCount: 0, Ephemeral: true,
+			ID: "c1", Dir: "/work/candidates/c1", TestPassed: true, IssueCount: 0,
+			PolicyViolations: 0, Ephemeral: true,
 			Outcome: "completed", RunDir: "candidate-runs/c1", SpentUSD: 0.21,
 			Estimated: false, DurationMS: 18000, Note: "",
 		},

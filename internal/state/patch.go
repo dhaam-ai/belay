@@ -37,6 +37,8 @@ type Patch struct {
 	// Fix replaces State.Fix wholesale — including Attempts, which a
 	// caller must therefore compute as the new total, never an increment.
 	Fix *Fix
+	// Policy replaces State.Policy wholesale.
+	Policy *Policy
 	// Candidates replaces State.Candidates wholesale.
 	Candidates *[]Candidate
 	// Winner replaces State.Winner.
@@ -84,6 +86,9 @@ func (p Patch) Apply(s *State) error {
 	}
 	if p.Fix != nil {
 		s.Fix = *p.Fix
+	}
+	if p.Policy != nil {
+		s.Policy = *p.Policy
 	}
 	if p.Candidates != nil {
 		// Copied rather than aliased, so a caller mutating its own slice

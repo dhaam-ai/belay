@@ -249,6 +249,10 @@ type Manifest struct {
 	// place in the parent run, its workspace and its spend envelope. Nil for
 	// every run a person started. Set it with SetCandidate.
 	Candidate *CandidateRun `json:"candidate,omitempty"`
+	// Policy is the guardrails this run's change must obey and the baseline
+	// they are measured against, pinned when the run was created, or nil for
+	// a run that declared none.
+	Policy *PolicyPin `json:"policy,omitempty"`
 }
 
 // ArchivedPlan is where a run files its approved plan once it completes
