@@ -10,6 +10,25 @@ that only `pkg/belay` carries a compatibility promise. Everything under
 
 ### Added
 
+- **`belay timeline` shows what a best-of-N run's candidates did.** A run
+  that fans out now gets a lane per candidate after its totals: how each one
+  ended, whether its tests passed, how many issues its quality gate found,
+  what it spent, how long it took, and which one won. Once the fanout
+  finishes the figures are the ones the run was billed for; while it is still
+  going they are each candidate's own running total, read from that
+  candidate's journal, and the timeline says so — and names the envelope each
+  candidate is capped by, because the run's own ceiling is not what bounds a
+  running candidate. `belay timeline <run-id> --candidate cand-02` opens one
+  candidate's run as a timeline in its own right, with its own steps, spend
+  and changed files, and a mistyped id is answered with the ids that do
+  exist. Every candidate file is read without being written to: a candidate's
+  journal belongs to the run that is writing it, and a reader that healed a
+  torn final line would corrupt the one failure belay can always recover
+  from. `--json` gains `candidates`, `winner`, `candidate` and
+  `parent_run_id`; nothing already in that document changed, so its schema
+  version is unchanged, and a run that does not fan out prints exactly what
+  it printed before.
+
 - **Each step can call a model of its own.** `agent.models` routes a node to
   a model, so the strong one writes the plan and repairs a failure while the
   cheap one does the mechanical middle, and the same `budget.max_usd` buys a
