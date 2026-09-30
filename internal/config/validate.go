@@ -239,6 +239,24 @@ func (c Config) fanoutErrors() []error {
 		errs = append(errs, intError("fanout.candidates", c.Fanout.Candidates,
 			"want at least 2, because fanout.enabled is true"))
 	}
+	// Checked whether or not fanout is enabled, unlike the candidate count.
+	// A count below two is a meaningful setting for a run that does not fan
+	// out -- it is simply unused -- but a concurrency below one describes no
+	// fanout at all, at any setting of fanout.enabled, so it is a typo
+	// wherever it appears and saying so early costs nothing.
+	if c.Fanout.Concurrency < 1 {
+		errs = append(errs, intError("fanout.concurrency", c.Fanout.Concurrency, "want at least 1"))
+	}
+	// A fanout divides the run's remaining dollar ceiling into one envelope
+	// per candidate, so a fanout with no ceiling has nothing to divide: every
+	// candidate would run unbounded, and N unbounded candidates is the one
+	// way belay can spend without limit. budget.max_usd: 0 stays a valid way
+	// to run belay without a ceiling (see budgetErrors) -- it just cannot be
+	// combined with this.
+	if c.Fanout.Enabled && c.Budget.MaxUSD <= 0 {
+		errs = append(errs, floatError("budget.max_usd", c.Budget.MaxUSD,
+			"want more than zero, because fanout.enabled is true and each candidate is given a share of it"))
+	}
 	return errs
 }
 

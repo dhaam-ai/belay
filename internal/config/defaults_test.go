@@ -68,6 +68,7 @@ func TestDefaultFields(t *testing.T) {
 		{"budget.on_exceed", c.Budget.OnExceed, OnExceedAbort},
 		{"fanout.enabled", c.Fanout.Enabled, false},
 		{"fanout.candidates", c.Fanout.Candidates, 3},
+		{"fanout.concurrency", c.Fanout.Concurrency, 3},
 		{"fanout.isolator", c.Fanout.Isolator, IsolatorAuto},
 		{"fanout.select", c.Fanout.Select, SelectFewestIssues},
 		{"output.mode", c.Output.Mode, OutputAuto},

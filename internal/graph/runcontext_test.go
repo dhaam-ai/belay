@@ -59,6 +59,10 @@ func TestRunContextGivesANodeTheConfigThisRunPinned(t *testing.T) {
 	live.Fanout.Enabled = false
 	live.Fanout.Candidates = 5
 	live.Fanout.Select = config.SelectFastest
+	// fanout.concurrency is not pinned, so a node sees whatever the file
+	// says now. A distinctive value proves it travels through the overlay
+	// rather than being reset with the shape around it.
+	live.Fanout.Concurrency = 7
 	live.Budget.MaxUSD = 9.99
 	live.Graph.MaxSteps = 42
 	live.Graph.NodeTimeout = config.NewDuration(7 * time.Minute)
@@ -80,7 +84,8 @@ func TestRunContextGivesANodeTheConfigThisRunPinned(t *testing.T) {
 			pin:  &pin,
 			want: config.Fanout{
 				Enabled: true, Candidates: 3,
-				Isolator: live.Fanout.Isolator, Select: config.SelectFewestIssues,
+				Concurrency: live.Fanout.Concurrency,
+				Isolator:    live.Fanout.Isolator, Select: config.SelectFewestIssues,
 			},
 		},
 	}

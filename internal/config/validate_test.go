@@ -443,8 +443,14 @@ func TestValidateReportsEveryProblemAtOnce(t *testing.T) {
 		"graph.max_steps: -4 is not valid",
 		`graph.node_timeout: "soon" is not valid`,
 		`test.custom_cmd: "" is not valid`,
-		"budget.max_usd: 0 is not valid",
+		`budget.max_usd: 0 is not valid (want more than zero, because budget.on_exceed is "explode")`,
 		"fanout.candidates: 1 is not valid",
+		// Slice 7 added a second rule about this one field, so this
+		// configuration now breaks two: a zero ceiling means nothing
+		// whatever on_exceed says, and it also means a fanout with no
+		// envelope to give a candidate. They are reported separately
+		// because the fixes differ -- one is on_exceed, one is the fanout.
+		"budget.max_usd: 0 is not valid (want more than zero, because fanout.enabled is true and each candidate is given a share of it)",
 	}
 	got := err.Error()
 	for _, line := range want {
@@ -494,5 +500,101 @@ func TestLoadValidatesTheMergedConfig(t *testing.T) {
 	}
 	if cfg.Review.Mode != "sonarqube" {
 		t.Errorf("Load must return what it read: review.mode = %q", cfg.Review.Mode)
+	}
+}
+
+// TestFanoutRequiresAUSDCeiling pins the rule slice 7 adds: a fanout divides
+// the run's remaining ceiling into one envelope per candidate, so a fanout
+// with no ceiling has nothing to divide.
+//
+// budget.max_usd: 0 together with budget.on_exceed: warn is a legitimate
+// configuration on its own -- it means "no dollar ceiling, tell me when you
+// pass it" -- and it stays legitimate for a run that does not fan out. What
+// it cannot do is bound N candidate runs, each of which would then inherit an
+// unbounded envelope, so the two settings together are refused and the
+// message names both keys.
+func TestFanoutRequiresAUSDCeiling(t *testing.T) {
+	tests := []struct {
+		name    string
+		mutate  func(*Config)
+		want    string
+		wantErr bool
+	}{
+		{
+			name: "fanout with no dollar ceiling",
+			mutate: func(c *Config) {
+				c.Fanout.Enabled = true
+				c.Budget.MaxUSD = 0
+				c.Budget.OnExceed = OnExceedWarn
+			},
+			want:    `budget.max_usd: 0 is not valid (want more than zero, because fanout.enabled is true and each candidate is given a share of it)`,
+			wantErr: true,
+		},
+		{
+			name: "no ceiling is still fine for a run that does not fan out",
+			mutate: func(c *Config) {
+				c.Fanout.Enabled = false
+				c.Budget.MaxUSD = 0
+				c.Budget.OnExceed = OnExceedWarn
+			},
+		},
+		{
+			name: "fanout with a ceiling",
+			mutate: func(c *Config) {
+				c.Fanout.Enabled = true
+				c.Budget.MaxUSD = 1.50
+			},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := Default()
+			tt.mutate(&cfg)
+			err := cfg.Validate()
+			switch {
+			case !tt.wantErr && err != nil:
+				t.Fatalf("want no error, got: %v", err)
+			case !tt.wantErr:
+				return
+			case err == nil:
+				t.Fatalf("want an error mentioning %q, got none", tt.want)
+			case !strings.Contains(err.Error(), tt.want):
+				t.Errorf("error = %v\nwant it to contain %q", err, tt.want)
+			}
+		})
+	}
+}
+
+// TestFanoutConcurrencyValidation pins fanout.concurrency as an int of at
+// least one. Zero is not "the default": it is a fanout that never starts a
+// candidate, and a person who typed it meant something belay cannot do.
+func TestFanoutConcurrencyValidation(t *testing.T) {
+	tests := []struct {
+		name    string
+		value   int
+		want    string
+		wantErr bool
+	}{
+		{name: "zero", value: 0, want: "fanout.concurrency: 0 is not valid (want at least 1)", wantErr: true},
+		{name: "negative", value: -2, want: "fanout.concurrency: -2 is not valid (want at least 1)", wantErr: true},
+		{name: "one is sequential", value: 1},
+		{name: "more than the candidate count is allowed", value: 99},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := Default()
+			cfg.Fanout.Concurrency = tt.value
+			err := cfg.Validate()
+			switch {
+			case !tt.wantErr && err != nil:
+				t.Fatalf("want no error, got: %v", err)
+			case !tt.wantErr:
+				return
+			case err == nil:
+				t.Fatalf("want an error mentioning %q, got none", tt.want)
+			case !strings.Contains(err.Error(), tt.want):
+				t.Errorf("error = %v\nwant it to contain %q", err, tt.want)
+			}
+		})
 	}
 }

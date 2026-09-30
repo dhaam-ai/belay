@@ -431,6 +431,18 @@ type Fanout struct {
 	Enabled bool `yaml:"enabled"`
 	// Candidates is how many candidates run in parallel.
 	Candidates int `yaml:"candidates"`
+	// Concurrency is how many candidates execute at the same time. One
+	// runs them one after another, which is what recording a cassette
+	// needs; a value above Candidates behaves as Candidates.
+	//
+	// It is deliberately NOT pinned in a run's manifest, unlike Enabled,
+	// Candidates and Select: lowering it on a resume is how a person backs
+	// off a rate limit or a machine that cannot take the load, and a pin
+	// would take that away. What that costs is that a duration measured
+	// under contention is a different number, so under Select "fastest" a
+	// resume at a different concurrency can pick a different winner. See
+	// state.FanoutPin for the three that are pinned, and why.
+	Concurrency int `yaml:"concurrency"`
 	// Isolator names how candidate workspaces are separated.
 	Isolator IsolatorName `yaml:"isolator"`
 	// Select names the strategy that picks the winning candidate.
@@ -1058,10 +1070,11 @@ func (p Policy) snapshot() Snapshot {
 // snapshot returns the fanout.* settings for [Config.Snapshot].
 func (f Fanout) snapshot() Snapshot {
 	return Snapshot{
-		"fanout.enabled":    strconv.FormatBool(f.Enabled),
-		"fanout.candidates": strconv.Itoa(f.Candidates),
-		"fanout.isolator":   string(f.Isolator),
-		"fanout.select":     string(f.Select),
+		"fanout.enabled":     strconv.FormatBool(f.Enabled),
+		"fanout.candidates":  strconv.Itoa(f.Candidates),
+		"fanout.concurrency": strconv.Itoa(f.Concurrency),
+		"fanout.isolator":    string(f.Isolator),
+		"fanout.select":      string(f.Select),
 	}
 }
 
