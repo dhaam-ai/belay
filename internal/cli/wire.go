@@ -109,6 +109,12 @@ type runPlan struct {
 	// the baseline it surveys, and bindPolicy replaces it on a resume with
 	// what the run's own manifest recorded.
 	policy *state.PolicyPin
+	// fanout is this run's fanout, or nil for a run that does not fan out.
+	// It is a pin, not a reading of the file, exactly as policy is:
+	// resolveFanout builds it for a new run from belay.yaml, createRun
+	// writes it into the manifest, and bindFanout replaces it on a resume
+	// with what the run's own manifest recorded.
+	fanout *state.FanoutPin
 	// goal is what the person asked for, which a pull request's title and
 	// body are written from. startRun sets it; a resume reads it from the
 	// run's manifest.
@@ -303,8 +309,10 @@ func resolve(req resolveRequest) (*runPlan, error) {
 	p.resolveOutput(req.ctx())
 	p.resolvePullRequest(req.ctx(), runFlags.pullRequest, lookGh)
 	// The policy comes before the registry, for the reason the output does:
-	// whether a run has a gate follows from it.
+	// whether a run has a gate follows from it. So does the fanout: whether
+	// the run's own walk holds the work or hands it to candidates.
 	p.resolvePolicy()
+	p.resolveFanout()
 	p.resolveRegistry()
 	p.resolveModels()
 	p.warnAboutFanout()
@@ -643,18 +651,39 @@ func (p *runPlan) resolvePolicy() {
 	p.policy = &state.PolicyPin{Policy: rules}
 }
 
+// resolveFanout settles whether a NEW run fans out, from belay.yaml as it
+// stands now, and with what shape: how many candidates, and which strategy
+// picks the winner. createRun pins exactly this in the manifest, and a
+// resume replaces it with that pin (bindFanout), so a run never changes
+// shape because the file did.
+//
+// fanout.concurrency is deliberately not part of it: it is read live on
+// every invocation, because lowering it on a resume is how a person backs off
+// a rate limit (see config.Fanout.Concurrency).
+func (p *runPlan) resolveFanout() {
+	if !p.config.Fanout.Enabled {
+		p.fanout = nil
+		return
+	}
+	p.fanout = &state.FanoutPin{
+		Candidates: p.config.Fanout.Candidates,
+		Select:     string(p.config.Fanout.Select),
+	}
+}
+
 // resolveRegistry builds the node graph the dispatcher walks, and the route
 // belay shows a person, together. Whatever options nodes.Default is given,
 // nodes.Route must be given too, or belay shows one graph and walks another.
 //
-// It reads p.output and p.policy, never p.config.Output or p.config.Policy,
-// and that is the whole rule internal/nodes states from the other side:
-// whether a run has the promote node or the policy gate is pinned in its
-// manifest when the run is created, and belay.yaml may have changed by the
-// time the run is resumed. resolveOutput and resolvePolicy set them for a new
-// run from belay.yaml; bindOutput and bindPolicy set them for a resume from
-// the chosen run's manifest, and call this again. It never refuses a run: a
-// pin this plan cannot honour is resumePreflight's to report.
+// It reads p.output, p.policy and p.fanout, never p.config.Output,
+// p.config.Policy or p.config.Fanout, and that is the whole rule
+// internal/nodes states from the other side: whether a run has the promote
+// node, the policy gate or a fanout is pinned in its manifest when the run is
+// created, and belay.yaml may have changed by the time the run is resumed.
+// resolveOutput, resolvePolicy and resolveFanout set them for a new run from
+// belay.yaml; bindOutput, bindPolicy and bindFanout set them for a resume
+// from the chosen run's manifest, and call this again. It never refuses a
+// run: a pin this plan cannot honour is resumePreflight's to report.
 //
 // The route is set even when the registry cannot be built, so that a dry run
 // refusing to start still shows the route it would have taken.
@@ -665,6 +694,9 @@ func (p *runPlan) resolveRegistry() {
 	}
 	if p.policy != nil {
 		opts = append(opts, nodes.WithPolicyGate())
+	}
+	if p.fanout != nil {
+		opts = append(opts, nodes.WithFanout())
 	}
 	p.route = nodes.Route(p.config, opts...)
 	registry, err := nodes.Default(p.config, opts...)

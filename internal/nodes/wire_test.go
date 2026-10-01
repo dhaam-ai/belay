@@ -50,8 +50,10 @@ func TestRouteMatchesRegistry(t *testing.T) {
 	}{
 		{name: "defaults", cfg: config.Default(), want: standard},
 		{
-			name: "fanout enabled", cfg: fanoutOn, want: standard,
-			offRoute: []string{graph.NodeFanout, graph.NodeJoin},
+			// The file alone registers nothing: whether a run fans out is
+			// its manifest's pin, which reaches Default as WithFanout.
+			// fanout_wire_test.go has the rows for a run that has the pin.
+			name: "fanout.enabled in the file alone", cfg: fanoutOn, want: standard,
 		},
 		{
 			name: "graph.approval false", cfg: approvalOff,
@@ -120,8 +122,10 @@ func TestBranchOutputWiresPromote(t *testing.T) {
 	}{
 		{name: "branch output", cfg: config.Default(), want: branch, wantLen: 8},
 		{
-			name: "branch output with fanout", cfg: fanoutOn, want: branch,
-			offRoute: []string{graph.NodeFanout, graph.NodeJoin}, wantLen: 10,
+			// fanout.enabled in the file adds nothing to a branch run
+			// either; a pinned fanout with branch output is in
+			// fanout_wire_test.go.
+			name: "branch output with fanout.enabled in the file", cfg: fanoutOn, want: branch, wantLen: 8,
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -158,8 +162,6 @@ func TestBranchOutputRoutesEveryEdgeIntoPromote(t *testing.T) {
 	t.Parallel()
 
 	cfg := config.Default()
-	cfg.Fanout.Enabled = true
-	cfg.Fanout.Candidates = 2
 	registry, err := nodes.Default(cfg, nodes.WithBranchOutput())
 	if err != nil {
 		t.Fatalf("Default: %v", err)
@@ -170,8 +172,14 @@ func TestBranchOutputRoutesEveryEdgeIntoPromote(t *testing.T) {
 	if reviewed.Next != graph.NodePromote {
 		t.Errorf("a passing gate routes to %q, want %q", reviewed.Next, graph.NodePromote)
 	}
-	// The winner's edge.
-	joined := runNode(t, registry, graph.NodeJoin, selectedWinner(t))
+
+	// The winner's edge, which only a run that fans out has. Its review is
+	// the candidates', not its own, so this is a second graph.
+	fanned, err := nodes.Default(cfg, nodes.WithBranchOutput(), nodes.WithFanout())
+	if err != nil {
+		t.Fatalf("Default with the fanout pinned: %v", err)
+	}
+	joined := runNode(t, fanned, graph.NodeJoin, selectedWinner(t))
 	if joined.Next != graph.NodePromote {
 		t.Errorf("a selected winner routes to %q, want %q", joined.Next, graph.NodePromote)
 	}
@@ -185,8 +193,6 @@ func TestInPlaceOutputIsUnchanged(t *testing.T) {
 	t.Parallel()
 
 	cfg := config.Default()
-	cfg.Fanout.Enabled = true
-	cfg.Fanout.Candidates = 2
 	registry, err := nodes.Default(cfg)
 	if err != nil {
 		t.Fatalf("Default: %v", err)
@@ -201,7 +207,16 @@ func TestInPlaceOutputIsUnchanged(t *testing.T) {
 	if got := runNode(t, registry, graph.NodeReview, passingGate(t)).Next; got != graph.End {
 		t.Errorf("a passing gate routes to %q, want %q", got, graph.End)
 	}
-	if got := runNode(t, registry, graph.NodeJoin, selectedWinner(t)).Next; got != graph.End {
+
+	// A fanout run in place: join is there, and its winner ends the run.
+	fanned, err := nodes.Default(cfg, nodes.WithFanout())
+	if err != nil {
+		t.Fatalf("Default with the fanout pinned: %v", err)
+	}
+	if _, err := fanned.Get(graph.NodePromote); err == nil {
+		t.Error("promote is registered in a fanout run that was not given WithBranchOutput")
+	}
+	if got := runNode(t, fanned, graph.NodeJoin, selectedWinner(t)).Next; got != graph.End {
 		t.Errorf("a selected winner routes to %q, want %q", got, graph.End)
 	}
 }
@@ -301,27 +316,25 @@ func TestEntryPointIsRegistered(t *testing.T) {
 	}
 }
 
-// With fanout enabled the graph must carry both halves of best-of-N.
-// Registering fanout without join would create N candidate workspaces, spend N
-// times the budget, and then die routing to a node nobody registered.
+// A run that fans out must carry both halves of best-of-N. Registering fanout
+// without join would create N candidate runs, spend N times the budget, and
+// then die routing to a node nobody registered. The pin decides it, not
+// fanout.enabled, and the run's own graph is the two halves and the plan in
+// front of them: the work is the candidates'.
 func TestFanoutRegistersBothHalves(t *testing.T) {
 	t.Parallel()
 
-	cfg := config.Default()
-	cfg.Fanout.Enabled = true
-	cfg.Fanout.Candidates = 3
-
-	r, err := nodes.Default(cfg)
+	r, err := nodes.Default(config.Default(), nodes.WithFanout())
 	if err != nil {
-		t.Fatalf("Default with fanout enabled: %v", err)
+		t.Fatalf("Default with the fanout pinned: %v", err)
 	}
 	for _, name := range []string{graph.NodeFanout, graph.NodeJoin} {
 		if _, err := r.Get(name); err != nil {
 			t.Errorf("Get(%q): %v", name, err)
 		}
 	}
-	if got, want := r.Len(), 9; got != want {
-		t.Errorf("Len() = %d, want %d: %v", got, want, r.Names())
+	if got, want := r.Len(), 4; got != want {
+		t.Errorf("Len() = %d, want %d (plan, approve, fanout, join): %v", got, want, r.Names())
 	}
 }
 
