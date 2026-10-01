@@ -3,11 +3,13 @@ package cli
 import (
 	"bytes"
 	"context"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"slices"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/dhaam-ai/belay/internal/agent/replay"
 	"github.com/dhaam-ai/belay/internal/graph"
@@ -668,5 +670,40 @@ func TestWinnerOfReadsTheBlackboardAfterTheDispatch(t *testing.T) {
 	}
 	if got := winnerOf(store, true); got.ID != "cand-09" || got.Dir != "" {
 		t.Errorf("winnerOf an unlisted winner = %+v, want cand-09 with no directory", got)
+	}
+}
+
+// TestNarratorPrefixesCandidateLines: with fanout.concurrency above 1,
+// several candidate runs narrate at once, and five "→ test step 3" lines from
+// five candidates are indistinguishable. A candidate's dispatcher logs with a
+// candidate attribute -- the runner attaches it to every candidate logger --
+// so the narrator puts the id in front of that candidate's lines, and the
+// parent's own lines stay exactly as they were.
+func TestNarratorPrefixesCandidateLines(t *testing.T) {
+	var out bytes.Buffer
+	u := &ui{out: &out, err: &out}
+	logger := slog.New(&narrator{ui: u})
+
+	parent := logger.With(slog.String("node", graph.NodeFanout), slog.Int("step", 3), slog.Int("attempt", 1))
+	parent.Info(msgNodeStarted)
+
+	cand := logger.With(slog.String("candidate", "cand-02")).
+		With(slog.String("node", graph.NodeTest), slog.Int("step", 3), slog.Int("attempt", 1))
+	cand.Info(msgNodeStarted)
+	cand.Info(msgNodeFinished,
+		slog.String("status", "ok"), slog.String("next", graph.NodeReview), slog.Duration("elapsed", time.Second))
+
+	got := out.String()
+	for _, want := range []string{
+		"  → fanout    step 3",
+		"  [cand-02] → test      step 3",
+		"    [cand-02] test      took 1s → review",
+	} {
+		if !strings.Contains(got, want) {
+			t.Errorf("narration never says %q; got:\n%s", want, got)
+		}
+	}
+	if strings.Contains(got, "[] ") || strings.Contains(got, "[cand-02] → fanout") {
+		t.Errorf("the parent's own lines carry a candidate prefix; got:\n%s", got)
 	}
 }

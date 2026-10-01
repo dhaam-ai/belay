@@ -1635,6 +1635,21 @@ type nodeEvent struct {
 	status  string
 	next    string
 	elapsed time.Duration
+	// candidate is the fanout candidate whose run this transition belongs
+	// to, or empty for the run's own. The candidate runner attaches it to
+	// every candidate dispatcher's logger.
+	candidate string
+}
+
+// who prefixes a candidate's lines with its id. Several candidates narrate at
+// once under fanout.concurrency, and five "→ test step 3" lines from five
+// candidates would otherwise be indistinguishable. The run's own lines get
+// nothing, so a run that does not fan out reads exactly as it always has.
+func (ev nodeEvent) who() string {
+	if ev.candidate == "" {
+		return ""
+	}
+	return "[" + ev.candidate + "] "
 }
 
 // fields collects the attributes the dispatcher attached, from the handler's
@@ -1655,6 +1670,8 @@ func (n *narrator) fields(rec slog.Record) nodeEvent {
 			ev.next = a.Value.String()
 		case "elapsed":
 			ev.elapsed = a.Value.Duration()
+		case "candidate":
+			ev.candidate = a.Value.String()
 		}
 	}
 	for _, a := range n.attrs {
@@ -1670,7 +1687,7 @@ func (n *narrator) fields(rec slog.Record) nodeEvent {
 // entered prints the line that answers "what is belay doing now". It is the
 // only line in a run that is emphasised, along with the closing cost.
 func (n *narrator) entered(ev nodeEvent) {
-	line := fmt.Sprintf("  → %s step %d", padNode(ev.node), ev.step)
+	line := fmt.Sprintf("  %s→ %s step %d", ev.who(), padNode(ev.node), ev.step)
 	if ev.attempt > 1 {
 		line += fmt.Sprintf(", attempt %d", ev.attempt)
 	}
@@ -1681,7 +1698,7 @@ func (n *narrator) entered(ev nodeEvent) {
 // out of a node is what lets somebody follow a loop — test back to fix, fix
 // back to test — instead of watching the same names scroll past.
 func (n *narrator) left(ev nodeEvent) {
-	n.ui.say("    %s %s", padNode(ev.node), nodeVerdict(ev))
+	n.ui.say("    %s%s %s", ev.who(), padNode(ev.node), nodeVerdict(ev))
 }
 
 // nodeVerdict renders how a node ended and where the run went next.
