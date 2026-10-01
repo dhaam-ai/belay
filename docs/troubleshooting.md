@@ -194,7 +194,7 @@ With `budget.on_exceed: abort` the run is paused, not ended. Raise the ceiling i
 
 **Symptom**: With `review.mode: lint`, every run fails the gate whatever it changed, and the fix node asks the agent to repair findings in files the run never edited.
 
-**Cause**: The gate is counting findings that were already in the repository. From 0.1.2, golangci-lint reports only findings on lines that differ from the last commit. That needs `git` on `PATH`, a commit that holds the workspace, and a workspace whose new files git doesn't ignore. belay checks all three first: from 0.1.3 the first two, and from 0.1.4 the third. If any is missing, every finding counts. belay then logs `cannot scope golangci-lint to the run's change; every finding counts` with the reason, and the gate's summary contains `not scoped to the run's change`.
+**Cause**: The gate is counting findings that were already in the repository. From 0.1.2, golangci-lint reports only findings on lines that differ from the last commit. After 0.1.4, belay scopes Ruff's findings to the same lines; Ruff has no option for it, so belay reads `git diff` itself and also counts every line of a file the run created. That needs `git` on `PATH`, a commit that holds the workspace, and a workspace whose new files git doesn't ignore. belay checks all three first: from 0.1.3 the first two, and from 0.1.4 the third. If any is missing, every finding counts. belay then logs `cannot scope golangci-lint to the run's change; every finding counts` (or `cannot scope ruff to the run's change`) with the reason, and the gate's summary contains `not scoped to the run's change`.
 
 This happens:
 - outside a repository;
@@ -202,7 +202,7 @@ This happens:
 - in a directory the repository ignores or hasn't committed yet;
 - in a workspace where git ignores new files at the top level, even if it tracks its subdirectories. An example is a `.gitignore` with `/*` and `!/internal/`. Every finding counts there, committed ones too.
 
-belay 0.1.1 and earlier always counted every finding, and ESLint and Ruff still do.
+belay 0.1.1 and earlier always counted every finding, belay 0.1.4 and earlier counted every Ruff finding, and ESLint still does.
 
 **Diagnosis**:
 1. Run `belay version`. On 0.1.1 or earlier, every existing finding counts.
@@ -212,7 +212,7 @@ belay 0.1.1 and earlier always counted every finding, and ESLint and Ruff still 
    git ls-tree --name-only HEAD                                     # must list files
    git check-ignore --no-index -q -- belay-scope-check.go; echo $?  # must print 1
    ```
-   If the first fails or prints nothing, or the second prints anything other than `1`, belay can't scope the findings. Don't use `-v` here: it also prints negation rules, such as `!*.go`, for files that aren't ignored.
+   If the first fails or prints nothing, or the second prints anything other than `1`, belay can't scope the findings. For Ruff, ask about `belay-scope-check.py` instead. Don't use `-v` here: it also prints negation rules, such as `!*.go`, for files that aren't ignored.
 4. Reproduce what the gate sees. When belay can scope the findings:
    ```bash
    golangci-lint run --new=false --new-from-rev=HEAD --new-from-merge-base= --new-from-patch= --whole-files=false ./...
@@ -221,13 +221,18 @@ belay 0.1.1 and earlier always counted every finding, and ESLint and Ruff still 
    ```bash
    golangci-lint run --new=false --new-from-rev= --new-from-merge-base= --new-from-patch= --whole-files=false ./...
    ```
+   For Ruff, the gate counts the findings `ruff check --output-format json .` reports on the lines this lists, and in the files the second command lists:
+   ```bash
+   git diff --no-renames --unified=0 --relative HEAD -- .
+   git ls-files --others --exclude-standard -- .
+   ```
 
 **Remedy**:
 - Upgrade to belay 0.1.3 or later. 0.1.2 scopes findings, but lets a repository's `.golangci.yml` `issues` settings change the scope
 - Run belay in a git repository with `git` on `PATH`, and commit the workspace first. If the workspace is in a directory the repository ignores, run belay from a repository that tracks it
 - Commit or stash unrelated edits before the run: uncommitted changes count as part of the run's change
 - If a finding comes from `typecheck`, fix the build first. A package that does not compile fails the gate whether or not the run changed it
-- For ESLint and Ruff, fix or exclude the existing findings in the tool's own configuration, or raise `review.fail_on`, for example to `critical`
+- For ESLint, fix or exclude the existing findings in the tool's own configuration, or raise `review.fail_on`, for example to `critical`
 
 ## Quality Gate Passes Although golangci-lint Reports Findings
 
@@ -239,6 +244,8 @@ belay 0.1.1 and earlier always counted every finding, and ESLint and Ruff still 
 - A change inside a nested repository or submodule whose files are part of the module's packages. The enclosing repository's git never lists those files
 - A change committed while the run was in progress
 - A finding golangci-lint's cache took from another checkout holding identical code. The cache stores the other checkout's paths, and the scoping drops them ([golangci/golangci-lint#3502](https://github.com/golangci/golangci-lint/issues/3502))
+
+Ruff's scope misses the first four too. It counts a syntax error, or a finding with no line, anywhere in a file the run touched, because a parser reports where it gave up rather than where the edit was; but not in a file the run left alone, because Python repositories commit files that do not parse on purpose. A renamed file counts in full.
 
 **Diagnosis**:
 1. Run both commands from step 4 in the section above, and compare their findings. A repository's own `.golangci.yml` can scope a plain `golangci-lint run ./...`, so use the second command, not that one

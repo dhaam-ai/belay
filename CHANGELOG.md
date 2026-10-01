@@ -226,6 +226,20 @@ that only `pkg/belay` carries a compatibility promise. Everything under
   exit code is unchanged: an invocation belay stopped this way still exits 3,
   so scripts can tell it from a run that paused for you to read the plan.
   `belay runs` lists such a run as waiting and `belay resume` accepts it.
+- **ruff judges only the lines a run changed, the way golangci-lint already
+  does.** The lint gate on a Python project counted every ruff finding in the
+  repository, so a repository with existing debt failed every run whatever
+  the run did, and the fix step was sent to repair code the run never
+  touched. belay now asks git which lines differ from HEAD, adds every line of
+  a file the run created, and counts only the findings on them. A syntax
+  error, or a finding with no line, counts anywhere in a file the run
+  touched, because a parser reports where it gave up rather than where the
+  edit was; one in a file the run left alone does not, because Python
+  repositories commit files that do not parse on purpose, as test data.
+  Where git cannot say what changed — no repository, no commit yet, an
+  ignored directory — every finding counts, belay logs why, and the review
+  summary says so. A renamed file counts in full. ESLint still counts every
+  finding.
 
 ### Fixed
 

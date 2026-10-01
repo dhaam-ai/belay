@@ -291,13 +291,16 @@ func TestRuffParseOptionalFields(t *testing.T) {
 func TestRuffLintFindingsAreNotAnError(t *testing.T) {
 	t.Parallel()
 
-	// ruff documents exit 1 as "violations were found".
-	linter := NewRuff(
-		WithRunner(findingsRunner(readFixture(t, "ruff-issues.json"), 1)),
-		WithLogger(quietLogger()),
-	)
+	// ruff documents exit 1 as "violations were found". Every file the
+	// fixture names is new to the repository, so every finding is on a
+	// line the run changed and counts toward the gate.
+	runner := findingsRunner(readFixture(t, "ruff-issues.json"), 1)
+	runner.git = map[string]scripted{"ls-files": {
+		stdout: untracked("app/broken.py", "app/service.py", "app/config.py", "tests/test_service.py"),
+	}}
+	linter := NewRuff(WithRunner(runner), WithLogger(quietLogger()))
 
-	got, err := linter.Lint(t.Context(), t.TempDir())
+	got, err := linter.Lint(t.Context(), "/repo")
 	if err != nil {
 		t.Fatalf("Lint returned an error for a run that found issues: %v", err)
 	}
@@ -401,7 +404,7 @@ func TestRuffLintGateThresholds(t *testing.T) {
 	t.Parallel()
 
 	// One S105 hardcoded-password finding, which the table places at
-	// critical.
+	// critical, in a file the run created, so it counts toward the gate.
 	stdout := `[{"code":"S105","filename":"/repo/app/config.py","location":{"row":21,"column":12},` +
 		`"message":"Possible hardcoded password assigned to: \"token\"","severity":"error"}]`
 
@@ -419,12 +422,10 @@ func TestRuffLintGateThresholds(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			linter := NewRuff(
-				WithRunner(findingsRunner(stdout, 1)),
-				WithLogger(quietLogger()),
-				WithFailOn(tc.failOn),
-			)
-			got, err := linter.Lint(t.Context(), t.TempDir())
+			runner := findingsRunner(stdout, 1)
+			runner.git = map[string]scripted{"ls-files": {stdout: untracked("app/config.py")}}
+			linter := NewRuff(WithRunner(runner), WithLogger(quietLogger()), WithFailOn(tc.failOn))
+			got, err := linter.Lint(t.Context(), "/repo")
 			if err != nil {
 				t.Fatalf("Lint: %v", err)
 			}
