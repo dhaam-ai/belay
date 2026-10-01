@@ -872,3 +872,39 @@ func TestABelayCopyIsNotTheCheckoutAroundIt(t *testing.T) {
 		t.Errorf("output.mode branch in a copy under .belay was not refused; blockers: %s", blockerText(plan))
 	}
 }
+
+// TestQueueCommandsSurviveAPathWithASpace: every command belay queue writes
+// out is meant to be pasted, and a workspace on macOS is as likely as not to
+// have a space in its path. A command that breaks on paste is worse than one
+// never written out.
+func TestQueueCommandsSurviveAPathWithASpace(t *testing.T) {
+	ws := filepath.Join(goWorkspace(t), "my project")
+	if err := os.MkdirAll(ws, 0o750); err != nil {
+		t.Fatalf("MkdirAll: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(ws, "go.mod"), []byte("module example.com/scratch\n\ngo 1.26.3\n"), 0o600); err != nil {
+		t.Fatalf("write go.mod: %v", err)
+	}
+	queueAdd(t, ws, "--no-approval", "add docs")
+	var reached []string
+	if _, err := startQueue(t.Context(), t, ws, fakeGoals(reaches{goals: &reached})); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	done := goal(t, ws, 1)
+	quoted := "'" + done.Dir + "'"
+
+	status, _, err := runCLI(t, "queue", "status", "--workspace", ws)
+	if err != nil {
+		t.Fatalf("belay queue status: %v", err)
+	}
+	if want := "belay --workspace " + quoted + " timeline " + done.RunID; !strings.Contains(status, want) {
+		t.Errorf("belay queue status never says %q:\n%s", want, status)
+	}
+	runs, _, err := runCLI(t, "runs", "--workspace", ws)
+	if err != nil {
+		t.Fatalf("belay runs: %v", err)
+	}
+	if want := "belay --workspace " + quoted + " runs"; !strings.Contains(runs, want) {
+		t.Errorf("belay runs never says %q:\n%s", want, runs)
+	}
+}

@@ -538,8 +538,8 @@ func sayQueueNextSteps(u *ui, q queue.Queue, active bool, pid int) {
 func queueNextSteps(q queue.Queue, active bool, pid int) []string {
 	var lines []string
 	for _, e := range q.Entries {
-		resume := "belay --workspace " + e.Dir + " resume " + e.RunID
-		timeline := "belay --workspace " + e.Dir + " timeline " + e.RunID
+		resume := "belay --workspace " + shellWord(e.Dir) + " resume " + e.RunID
+		timeline := "belay --workspace " + shellWord(e.Dir) + " timeline " + e.RunID
 		ended := e.State == queue.StateFinished || e.State == queue.StateFailed || e.State == queue.StateStopped
 		if ended && e.UpdatedAt.Before(q.Last.At) {
 			continue
@@ -1139,33 +1139,58 @@ func workQueue(ctx context.Context, u *ui, w *queue.Worker) error {
 	}
 }
 
-// queueRunsHint is what `belay runs` adds below its table for the runs the
-// queue's goals have, which live in the goals' copies rather than in this
-// workspace's .belay/runs, so that the listing above does not show them: the
-// command that lists each one.
+// sayQueueRuns is what `belay runs` says, after its table, about the runs
+// the queue's goals have. Each lives in its goal's copy of the workspace, not
+// in this workspace's .belay/runs, so the listing above does not show it, and
+// a person who queued goals and came back for them would otherwise find
+// nothing.
 //
-// It reads the queue and never writes it, and says nothing about a queue it
-// cannot read: `belay runs` reports the workspace's own runs either way.
-func queueRunsHint(workspace string) []string {
+// Each run gets one line: the command that lists it, and which goal it is and
+// where that goal stands. It reads the queue and never writes it, says
+// nothing about a queue it cannot read or one with no runs, and is not part
+// of --json, whose shape is documented and does not change for these runs.
+func sayQueueRuns(u *ui, workspace string) {
 	store, err := queue.Open(workspace)
 	if err != nil {
-		return nil
+		return
 	}
 	q, err := store.Read()
 	if err != nil {
-		return nil
+		return
 	}
 	var lines []string
 	for _, e := range q.Entries {
 		if _, ok := goalManifest(e); !ok {
 			continue
 		}
-		lines = append(lines, fmt.Sprintf("    belay --workspace %s runs    # goal %d, %s",
-			e.Dir, e.ID, queueStateWords[e.State.String()]))
+		lines = append(lines, fmt.Sprintf("  belay --workspace %s runs    goal %d, %s",
+			shellWord(e.Dir), e.ID, queueStateWords[e.State.String()]))
 	}
 	if len(lines) == 0 {
-		return nil
+		return
 	}
-	header := []string{"", "The queue's goals run in copies of this workspace, so their runs are not listed above. List them with:"}
-	return append(header, lines...)
+	u.say("")
+	if len(lines) == 1 {
+		u.say("A queued goal's run lives in a copy of this workspace. List it with:")
+	} else {
+		u.say("%d queued goals' runs live in copies of this workspace. List one with:", len(lines))
+	}
+	for _, line := range lines {
+		u.say("%s", line)
+	}
+}
+
+// shellWord returns s as a shell reads it back unchanged: as it is when it
+// holds nothing a shell would act on, and in single quotes otherwise. Every
+// command the queue writes out is meant to be pasted, and a workspace on
+// macOS is as likely as not to have a space in its path.
+//
+// It is slice 3c's shellQuote under another name. The two lanes were built
+// side by side, and one name in both would not compile once they meet; the
+// first change to touch both after the merge should keep one.
+func shellWord(s string) string {
+	if s != "" && strings.Trim(s, "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_./:@%+=,-") == "" {
+		return s
+	}
+	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
 }
