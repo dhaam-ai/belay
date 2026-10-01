@@ -144,6 +144,26 @@ func (s *Store) WorkerActive() (pid int, active bool, err error) {
 	}
 }
 
+// lockLog takes the log lock, waiting for it, and returns the function that
+// lets go of it. Every write to the log happens under it (see Store.append).
+//
+// It is a second flock, on .belay/queue/queue.lock, rather than the worker
+// lock, because the two are held by different processes for very different
+// lengths of time. A worker holds the queue for hours; `belay queue add` from
+// another terminal must still be able to add a goal in the meantime, and only
+// needs the log to itself for the few milliseconds one append takes.
+func (s *Store) lockLog() (func(), error) {
+	f, err := s.openLockFile(s.logLockPath())
+	if err != nil {
+		return nil, err
+	}
+	if err := flock(f, syscall.LOCK_EX); err != nil {
+		_ = f.Close()
+		return nil, fmt.Errorf("queue: lock %s: %w", s.logLockPath(), err)
+	}
+	return func() { _ = f.Close() }, nil
+}
+
 // openLockFile opens, creating it and the queue's directory if need be, a
 // file this package locks.
 func (s *Store) openLockFile(path string) (*os.File, error) {

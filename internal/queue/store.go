@@ -61,5 +61,8 @@ func (s *Store) LogPath() string { return filepath.Join(s.dir, "queue.ndjson") }
 // per claimed goal, named for its run.
 func (s *Store) WorkRoot() string { return filepath.Join(s.dir, "work") }
 
+// logLockPath is the file every writer of the log locks while it writes.
+func (s *Store) logLockPath() string { return filepath.Join(s.dir, "queue.lock") }
+
 // workerLockPath is the file a worker locks for as long as it works.
 func (s *Store) workerLockPath() string { return filepath.Join(s.dir, "worker.lock") }

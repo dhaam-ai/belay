@@ -188,9 +188,9 @@ func TestWorkerActiveOnlyLooks(t *testing.T) {
 }
 
 // mustOpen opens the queue of workspace ws.
-func mustOpen(t *testing.T, ws string) *Store {
+func mustOpen(t *testing.T, ws string, opts ...Option) *Store {
 	t.Helper()
-	s, err := Open(ws)
+	s, err := Open(ws, opts...)
 	if err != nil {
 		t.Fatalf("Open(%s): %v", ws, err)
 	}
