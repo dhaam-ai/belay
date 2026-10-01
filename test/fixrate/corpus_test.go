@@ -780,3 +780,138 @@ func TestRunCorpus_EvaluatesEachCellOnce(t *testing.T) {
 		t.Errorf("the cell was evaluated %d time(s), want 2: the failed attempt, then once", n)
 	}
 }
+
+// brokenRunner fails every Test the way a container that died does: not a
+// failing test run, but no test run at all.
+type brokenRunner struct{ belay.TestRunner }
+
+func (brokenRunner) Test(context.Context, string) (belay.TestReport, error) {
+	return belay.TestReport{}, errors.New("docker: Error response from daemon: container is not running")
+}
+
+// brokenProvisioner gives the belay arm a test runner that cannot run, until
+// it is mended.
+type brokenProvisioner struct {
+	*templateProvisioner
+	broken atomic.Bool
+}
+
+func (p *brokenProvisioner) Provision(ctx context.Context, cell Cell, dir string, fresh bool) (Workspace, error) {
+	ws, err := p.templateProvisioner.Provision(ctx, cell, dir, fresh)
+	if err == nil && p.broken.Load() {
+		ws.Runner = brokenRunner{ws.Runner}
+	}
+	return ws, err
+}
+
+// TestRunCorpus_AnInfrastructureFailureIsNotTheArmsOutcome: a test run that
+// could not happen -- the container died, the daemon went away -- is the
+// harness's failure, not belay's. Left to belay's own rules it would end the
+// run as failed, the corpus would record the cell as finished, and a finished
+// cell is never run again: a Docker hiccup would be scored as belay losing
+// the task. Instead the run pauses, the corpus stops and says why, nothing is
+// recorded for the cell, and once the infrastructure is mended a resume
+// continues the run from the step that could not run -- without planning or
+// coding again.
+func TestRunCorpus_AnInfrastructureFailureIsNotTheArmsOutcome(t *testing.T) {
+	t.Parallel()
+
+	tasks := widgetTasks(t, 1)
+	dir := t.TempDir()
+	prov := &brokenProvisioner{templateProvisioner: newTemplateProvisioner()}
+	prov.broken.Store(true)
+	opts := func(a *cellAgent) CorpusOptions {
+		o := corpusOptions(t, dir, tasks, map[string]*cellAgent{"example__widget-1/belay-r1": a}, &fakeEvaluator{}, prov)
+		o.Arms = []Arm{ArmBelay}
+		return o
+	}
+
+	first := &cellAgent{repairFrom: 1}
+	_, err := RunCorpus(t.Context(), opts(first))
+	if !errors.Is(err, ErrInfrastructure) {
+		t.Fatalf("RunCorpus() error = %v, want it to wrap ErrInfrastructure", err)
+	}
+	cell := filepath.Join(dir, "cells", "example__widget-1", "belay-r1")
+	if _, err := os.Stat(filepath.Join(cell, "result.json")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("a cell whose tests could not run was recorded as finished (stat: %v)", err)
+	}
+
+	prov.broken.Store(false)
+	again := &cellAgent{repairFrom: 1}
+	report, err := RunCorpus(t.Context(), opts(again))
+	if err != nil {
+		t.Fatalf("resumed RunCorpus() error = %v", err)
+	}
+	if n := again.calls.Load(); n != 0 {
+		t.Errorf("the resume made %d agent call(s); the plan and code steps had finished before the tests could not run", n)
+	}
+	if report.Belay.Resolved != 1 {
+		t.Errorf("Belay.Resolved = %d, want the resumed run's repair to count", report.Belay.Resolved)
+	}
+}
+
+// failingBackend fails every call before spending anything, the way a
+// backend with an expired key or no credit left does.
+func failingBackend() *belaytest.FakeAgent {
+	return &belaytest.FakeAgent{NameValue: "fixrate-no-credit", Func: func(context.Context, belay.AgentRequest) (belay.AgentResponse, error) {
+		return belay.AgentResponse{}, errors.New("claude failed with exit code 1: Credit balance is too low")
+	}}
+}
+
+// TestRunCorpus_AnArmThatSpentNothingDidNotAttemptTheTask: in a live corpus, a
+// call that fails before spending a cent never reached the task -- an expired
+// key, credit that ran out in the night. Recorded as the arm's outcome, it
+// would turn the rest of a thousand-cell run into a thousand recorded
+// failures in minutes, none of which could ever be run again. So the corpus
+// stops, says why, and records nothing, in either arm; mend the key and the
+// same command resumes.
+func TestRunCorpus_AnArmThatSpentNothingDidNotAttemptTheTask(t *testing.T) {
+	t.Parallel()
+
+	for _, arm := range []Arm{ArmBelay, ArmControl} {
+		t.Run(string(arm), func(t *testing.T) {
+			t.Parallel()
+			tasks := widgetTasks(t, 1)
+			dir := t.TempDir()
+			key := "example__widget-1/" + string(arm) + "-r1"
+			working := &cellAgent{repairFrom: 1, usd: 0.25}
+			var broken atomic.Bool
+			broken.Store(true)
+			opts := corpusOptions(t, dir, tasks, nil, &fakeEvaluator{}, newTemplateProvisioner())
+			opts.Mode, opts.Confirm, opts.MaxUSD = ModeLive, ConfirmLiveSpend, 100
+			opts.Arms = []Arm{arm}
+			opts.AgentFor = func(Cell) belay.AgentBackend {
+				if broken.Load() {
+					return failingBackend()
+				}
+				return working.backend()
+			}
+
+			if _, err := RunCorpus(t.Context(), opts); !errors.Is(err, ErrInfrastructure) {
+				t.Fatalf("RunCorpus() error = %v, want it to wrap ErrInfrastructure", err)
+			}
+			if _, err := os.Stat(filepath.Join(dir, "cells", "example__widget-1", string(arm)+"-r1", "result.json")); !errors.Is(err, os.ErrNotExist) {
+				t.Fatalf("%s: a cell whose backend spent nothing and failed was recorded (stat: %v)", key, err)
+			}
+
+			broken.Store(false)
+			report, err := RunCorpus(t.Context(), opts)
+			if err != nil {
+				t.Fatalf("resumed RunCorpus() error = %v", err)
+			}
+			if n := working.calls.Load(); n == 0 {
+				t.Errorf("%s: the resume made no call; the failed attempt had not reached the task", key)
+			}
+			summary := report.Belay
+			if arm == ArmControl {
+				summary = report.Control
+			}
+			if summary.Resolved != 1 {
+				t.Errorf("%s: Resolved = %d after the backend was mended, want 1", key, summary.Resolved)
+			}
+			if report.Spend.ChargedUSD != 0 {
+				t.Errorf("%s: Spend = %+v; an attempt the backend reported spending nothing on is not charged", key, report.Spend)
+			}
+		})
+	}
+}

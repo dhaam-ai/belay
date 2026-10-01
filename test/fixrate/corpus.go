@@ -120,6 +120,13 @@ var (
 	// errCorpusConfig reports options RunCorpus cannot run with. It is a
 	// wiring bug, never an outcome.
 	errCorpusConfig = errors.New("fixrate: unusable corpus configuration")
+	// ErrInfrastructure reports a cell that failed for want of what the
+	// harness provides -- a test runner or a lint gate that could not run,
+	// or, in a live corpus, a backend that failed without spending anything
+	// -- rather than for anything its arm did. Nothing is recorded for the
+	// cell, and it is resumable once the cause is mended. See cell.go,
+	// "When the harness fails, not the arm".
+	ErrInfrastructure = errors.New("fixrate: the harness's infrastructure failed")
 )
 
 // The statuses a CorpusReport can have.

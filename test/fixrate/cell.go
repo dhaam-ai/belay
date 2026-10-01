@@ -23,6 +23,35 @@ import (
 // from start to result, and the two arms' drive steps. corpus.go's header
 // comment says what each file means to a resumed run; this file keeps those
 // promises.
+//
+// # When the harness fails, not the arm
+//
+// A finished cell is never run again, so a cell must not be recorded as
+// finished when what failed was the harness rather than the arm. Two cases
+// are told apart, and each stops the corpus with ErrInfrastructure, records
+// nothing for the cell, and leaves it resumable:
+//
+//   - The belay arm's test runner or lint gate could not run at all -- a
+//     container that died, a daemon that went away, a linter that is not
+//     installed. Those adapters are the workspace's, supplied by the
+//     harness. belay's own rule is that a step that cannot reach a verdict
+//     ends the run as failed; for the benchmark that would score a Docker
+//     hiccup as belay losing the task. So the adapters are wrapped, and an
+//     error from either cancels the run's context: the dispatcher pauses the
+//     run, as it does for any cancellation, and a resume re-runs that one
+//     step without planning or coding again.
+//   - In a live corpus, an arm that failed having spent nothing never
+//     reached the task. An expired key, or credit that ran out in the night,
+//     fails every call before it costs anything; recorded as outcomes, the
+//     rest of a thousand-cell run would become a thousand failures in
+//     minutes, none of which could be run again. A belay run that failed
+//     that way is discarded when the cell is next attempted -- it did
+//     nothing and spent nothing -- and a control call that did is simply
+//     made again.
+//
+// A call that spent something and then failed -- hit its turn limit, ran out
+// of time, was refused mid-way -- did reach the task, and its failure is the
+// arm's outcome, in both arms alike.
 
 // CellResult is what one cell's work produced, written once, atomically, as
 // result.json. It is private to the corpus directory: it holds the patch,
@@ -153,6 +182,14 @@ func (r *corpusRun) generate(ctx context.Context, cell Cell) (CellResult, error)
 
 	start := r.now()
 	fresh := cell.Arm == ArmControl && !exists(responsePath(dir))
+	if cell.Arm == ArmBelay && r.discardable(dir) {
+		// A live belay run that failed having spent nothing reached
+		// nothing; see this file's header comment.
+		if err := os.RemoveAll(filepath.Join(dir, ".belay")); err != nil {
+			return CellResult{}, r.abandon(ctx, cell, dir, &att, start, fmt.Errorf("fixrate: discard %s's empty run: %w", cell.Key(), err))
+		}
+		fresh = true
+	}
 	ws, err := r.opts.Provisioner.Provision(ctx, cell, dir, fresh)
 	if err != nil {
 		return CellResult{}, r.abandon(ctx, cell, dir, &att, start, fmt.Errorf("fixrate: provisioning %s: %w", cell.Key(), err))
@@ -283,6 +320,10 @@ func (r *corpusRun) driveBelay(ctx context.Context, cell Cell, dir string, ws Wo
 	if err != nil {
 		return armRecord{}, fmt.Errorf("fixrate: wire the belay graph: %w", err)
 	}
+	// The run gets its own context so a harness adapter that cannot run
+	// can stop it, as a pause; see this file's header comment.
+	runCtx, stopRun := context.WithCancelCause(ctx)
+	defer stopRun(nil)
 	dispatcher, err := graph.NewDispatcher(graph.Options{
 		Store:         store,
 		Registry:      registry,
@@ -290,8 +331,8 @@ func (r *corpusRun) driveBelay(ctx context.Context, cell Cell, dir string, ws Wo
 		Logger:        r.logger,
 		Now:           r.now,
 		Agent:         r.opts.AgentFor(cell),
-		Runner:        ws.Runner,
-		Linter:        ws.Linter,
+		Runner:        guardedRunner{TestRunner: ws.Runner, stop: stopRun},
+		Linter:        guardedLinter{Linter: ws.Linter, stop: stopRun},
 		PauseOnCancel: true,
 	})
 	if err != nil {
@@ -301,7 +342,12 @@ func (r *corpusRun) driveBelay(ctx context.Context, cell Cell, dir string, ws Wo
 	if err := r.spending(dir, att, true); err != nil {
 		return armRecord{}, err
 	}
-	outcome, runErr := dispatcher.Resume(ctx)
+	outcome, runErr := dispatcher.Resume(runCtx)
+	if cause := context.Cause(runCtx); ctx.Err() == nil && errors.Is(cause, ErrInfrastructure) {
+		// The run paused at a step boundary with everything it spent in
+		// its journal: nothing is lost, so nothing is charged.
+		return armRecord{}, errors.Join(cause, r.spending(dir, att, false))
+	}
 	if errors.Is(runErr, graph.ErrInterrupted) || ctx.Err() != nil {
 		return armRecord{}, fmt.Errorf("%w: %w", errCellInterrupted, runErr)
 	}
@@ -319,6 +365,10 @@ func (r *corpusRun) driveBelay(ctx context.Context, cell Cell, dir string, ws Wo
 	note := outcome.Note
 	if note == "" && runErr != nil {
 		note = runErr.Error()
+	}
+	if r.opts.Mode == ModeLive && emptyFailure(man.Status) && zeroUsage(outcome.Usage) {
+		return armRecord{}, fmt.Errorf("%w: %s's belay run failed having spent nothing, so it never reached the task: %s",
+			ErrInfrastructure, cell.Key(), note)
 	}
 	return armRecord{
 		usage:       outcome.Usage,
@@ -351,6 +401,12 @@ func (r *corpusRun) driveControl(ctx context.Context, cell Cell, dir string, ws 
 	if res.RunErr != "" && ctx.Err() != nil {
 		return armRecord{}, fmt.Errorf("%w: %s", errCellInterrupted, res.RunErr)
 	}
+	if r.opts.Mode == ModeLive && res.RunErr != "" && zeroUsage(res.Usage) {
+		// The backend reported spending nothing, so nothing is lost and
+		// nothing is charged; see this file's header comment.
+		return armRecord{}, errors.Join(fmt.Errorf("%w: %s's control call failed having spent nothing, so it never reached the task: %s",
+			ErrInfrastructure, cell.Key(), res.RunErr), r.spending(dir, att, false))
+	}
 	// A conversion, not a copy field by field: a field runControl gains
 	// must be kept too, or a resumed cell would lose it, and the
 	// conversion stops compiling until it is.
@@ -362,6 +418,66 @@ func (r *corpusRun) driveControl(ctx context.Context, cell Cell, dir string, ws 
 		return armRecord{}, err
 	}
 	return controlRecord(resp), nil
+}
+
+// discardable reports whether the cell under dir holds a belay run a live
+// corpus should start again rather than resume: one that failed having spent
+// nothing. See this file's header comment.
+func (r *corpusRun) discardable(dir string) bool {
+	if r.opts.Mode != ModeLive {
+		return false
+	}
+	layout, err := state.NewLayout(dir, belayCellRunID)
+	if err != nil {
+		return false
+	}
+	man, err := state.LoadManifest(layout.ManifestPath())
+	if err != nil {
+		return false
+	}
+	return emptyFailure(man.Status) && man.Budget.SpentUSD == 0
+}
+
+// emptyFailure reports whether a run that ended with status could be one that
+// failed before doing anything: failed or aborted, rather than completed or
+// paused at one of belay's own limits.
+func emptyFailure(status state.RunStatus) bool {
+	return status == state.RunStatusFailed || status == state.RunStatusAborted
+}
+
+// zeroUsage reports whether u records no spend at all.
+func zeroUsage(u belay.Usage) bool { return u.USD == 0 && u.InputTokens == 0 && u.OutputTokens == 0 }
+
+// guardedRunner is the belay arm's test runner, wrapped so that a test run
+// that could not happen stops the run as a pause rather than ending it; see
+// this file's header comment.
+type guardedRunner struct {
+	belay.TestRunner
+	stop context.CancelCauseFunc
+}
+
+// Test implements belay.TestRunner.
+func (g guardedRunner) Test(ctx context.Context, dir string) (belay.TestReport, error) {
+	report, err := g.TestRunner.Test(ctx, dir)
+	if err != nil && ctx.Err() == nil {
+		g.stop(fmt.Errorf("%w: the belay arm's test runner %q could not run: %w", ErrInfrastructure, g.Name(), err))
+	}
+	return report, err
+}
+
+// guardedLinter is guardedRunner's counterpart for the lint gate.
+type guardedLinter struct {
+	belay.Linter
+	stop context.CancelCauseFunc
+}
+
+// Lint implements belay.Linter.
+func (g guardedLinter) Lint(ctx context.Context, dir string) (belay.QualityReport, error) {
+	report, err := g.Linter.Lint(ctx, dir)
+	if err != nil && ctx.Err() == nil {
+		g.stop(fmt.Errorf("%w: the belay arm's lint gate %q could not run: %w", ErrInfrastructure, g.Name(), err))
+	}
+	return report, err
 }
 
 // controlRecord turns a kept control response into an armRecord.
