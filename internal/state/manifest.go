@@ -253,6 +253,10 @@ type Manifest struct {
 	// they are measured against, pinned when the run was created, or nil for
 	// a run that declared none.
 	Policy *PolicyPin `json:"policy,omitempty"`
+	// Origin is where this run came from, when it is a fork: the run and the
+	// visit it re-runs, and what the history it inherited cost. Nil for every
+	// run a person started. It is a record, not a pin; see Origin.
+	Origin *Origin `json:"origin,omitempty"`
 }
 
 // ArchivedPlan is where a run files its approved plan once it completes

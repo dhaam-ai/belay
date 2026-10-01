@@ -10,6 +10,30 @@ that only `pkg/belay` carries a compatibility promise. Everything under
 
 ### Added
 
+- **`belay fork` re-runs one step of a run without paying again for the steps
+  before it.** `belay fork <run-id> fix` makes a new run, with an id of its
+  own, in a copy of your repository under `.belay/forks/`, from the state the
+  run was in just before that step: it inherits everything before it, runs
+  the one step, and pauses. Give a fix loop that gave up another round with a
+  stronger model (`--model opus`, for plan, code and fix), or re-run a review
+  after changing a setting, and pay for that step alone. `--visit 2` picks
+  the second time the step ran, numbered the way `belay timeline` numbers
+  them; without it belay takes the last. The original run is only ever read
+  — not a byte of its journal, state or files changes — so both outcomes are
+  there to compare. Carry the fork on with
+  `belay --workspace .belay/forks/<fork-id> resume <fork-id>`, which belay
+  writes out, and `belay runs` names every fork with the command that lists
+  it. Before it spends anything, belay checks what it cannot put back: if
+  your files have changed since the step ran it stops and says so, because
+  that would be a different experiment, and `--current-files` re-runs the
+  step on them as they are now; it names every setting that differs from
+  the original, with both values; and the agent's conversation never carries
+  over, since the original's went on past that step. The fork's spending
+  starts at zero, and what its inherited history cost is recorded beside it
+  rather than counted twice. `fanout`, `join` and `promote` cannot be forked,
+  nor can a run recorded by a belay that kept no snapshots. `--dry-run`
+  describes the fork exactly and creates nothing. ADR-0017 records the
+  decision.
 - **Guardrails a run's change must obey, whatever its tests say.** The new
   `policy` section in `belay.yaml` declares paths a change may not touch
   (`forbidden_paths`), ceilings on its size (`max_changed_files`,

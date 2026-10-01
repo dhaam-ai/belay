@@ -369,6 +369,31 @@ Nothing else in `.belay` is meant to be committed, and belay says so to git:
 the first run in a repository writes `.belay/.gitignore`. If you want to
 delete a run, `rm -rf .belay/runs/<run-id>` is safe.
 
+### 8. Try one step again, without paying for the rest
+
+A fix loop gave up, or a review did not go the way you wanted. Re-run that
+one step, from the state the run was in just before it, without paying for
+the plan and the code again:
+
+```bash
+# The last time fix ran, this time with a stronger model:
+belay fork <run-id> fix --model opus
+
+# The second time test ran, as `belay timeline` numbers it:
+belay fork <run-id> test --visit 2
+```
+
+belay makes a new run in a copy of your repository, under
+`.belay/forks/<fork-id>`, runs the one step and pauses; the run you forked is
+only ever read. If your files have changed since that step ran, belay stops
+and says so, and `--current-files` re-runs it on them as they are now. When
+it pauses it tells you how to see what the step did and how to carry the
+fork on, which is an ordinary resume pointed at the copy:
+
+```bash
+belay --workspace .belay/forks/<fork-id> resume <fork-id>
+```
+
 ## How It Works (in One Picture)
 
 ```

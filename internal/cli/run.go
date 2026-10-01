@@ -639,6 +639,17 @@ type outcomeView struct {
 	// The zero Output is an in-place run, and the report then says nothing
 	// about branches.
 	output state.Output
+	// workspace is the --workspace a later command must name to find this
+	// run, when it lives somewhere other than the workspace this command was
+	// pointed at: a fork, in its copy. Empty for every other run, whose
+	// commands need no flag.
+	workspace string
+	// pausedAsAsked reports that the run paused because this command asked
+	// the dispatcher to stop it after a number of nodes
+	// (graph.Options.PauseAfter), as `belay fork` does once its node has
+	// run: nothing is waiting for a person, and resuming carries on from the
+	// next node.
+	pausedAsAsked bool
 }
 
 // reportOutcome turns an Outcome into the last thing a person reads, and into the
@@ -758,9 +769,11 @@ func spendText(outcome graph.Outcome) string {
 // here, written out so nobody has to remember or reconstruct it.
 func nextSteps(view outcomeView) []string {
 	layout, outcome, runErr := view.layout, view.outcome, view.runErr
-	resume := "belay resume " + layout.RunID()
+	resume := runCommand(view, "resume")
 
 	switch {
+	case view.pausedAsAsked:
+		return pausedAsAskedSteps(view, resume)
 	case errors.Is(runErr, graph.ErrInterrupted):
 		// Paused, but by Ctrl-C and not by the graph: nothing is waiting
 		// for the person to read, and resume re-runs the interrupted step.
@@ -814,6 +827,9 @@ func nextSteps(view outcomeView) []string {
 	// it. Only a run that is paused or was interrupted is offered the
 	// command, so the report never names one that would refuse.
 	case outcome.Status == state.RunStatusCompleted:
+		if view.workspace != "" {
+			return completedInCopySteps(view)
+		}
 		// A branch run has already committed, on a branch the person's
 		// checkout is not on. "Review the change in your repository, then
 		// commit it" would name a change that is not there and a commit
@@ -824,11 +840,11 @@ func nextSteps(view outcomeView) []string {
 		return []string{"review the change in your repository, then commit it"}
 	case outcome.Status == state.RunStatusAborted:
 		return []string{
-			"this run has ended. see what happened with:", "", "    belay timeline " + layout.RunID(),
+			"this run has ended. see what happened with:", "", "    " + runCommand(view, "timeline"),
 		}
 	case outcome.Status == state.RunStatusFailed:
 		return []string{
-			"see what happened with:", "", "    belay timeline " + layout.RunID(),
+			"see what happened with:", "", "    " + runCommand(view, "timeline"),
 		}
 	default:
 		return []string{"continue with:", "", "    " + resume}
