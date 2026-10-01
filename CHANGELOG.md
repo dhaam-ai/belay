@@ -323,6 +323,12 @@ that only `pkg/belay` carries a compatibility promise. Everything under
   branch the person's own repository, and warned that `belay.yaml` now asked
   for a branch when nobody had changed it. A workspace under `.belay` now
   edits in place, says why, and refuses `output.mode: branch`.
+- **`belay fork` works when `belay.yaml` enables fanout.** A fork re-runs one
+  step of a single run, and is meant to turn fanout off as it turns branch
+  output off, but it kept `fanout.enabled`. Its graph was then the fanout
+  graph, which has no `code`, `test`, `fix` or `review`, so forking any of
+  them ended the new run as failed with `unknown node`. A fork is now always
+  a single run.
 - **A repair's file list is checked against the disk, not taken on trust.**
   The fix step routed straight back to the tests, so a repair was the one
   change in a run that nothing verified: no claimed path was proven to be a

@@ -134,17 +134,22 @@ func (r forkRequest) check() error {
 }
 
 // configure is the configuration a fork runs under: belay.yaml, except that a
-// fork always edits its copy in place and files no plan, and its node is sent
-// the model --model names.
+// fork always edits its copy in place, files no plan and never fans out, and
+// its node is sent the model --model names.
 //
-// Output and archival are set here, before resolve decides anything from
-// them, rather than patched onto the plan afterwards: resolveOutput would
+// Output, archival and fanout are set here, before resolve decides anything
+// from them, rather than patched onto the plan afterwards: resolveOutput would
 // otherwise choose a branch, or refuse for want of one, for a run that will
-// never have one. The manifest records them as they are, so what a fork was
-// started with says what it does.
+// never have one, and resolveFanout would build the fanout graph -- plan,
+// approve, fanout, join -- which has none of the nodes after approve that a
+// fork re-runs, so the fork would fail on an unknown node. A fork re-runs one
+// step of the single-run graph (internal/fork refuses fanout and join). The
+// manifest records them as they are, so what a fork was started with says
+// what it does.
 func (r forkRequest) configure(cfg *config.Config) {
 	cfg.Output.Mode = config.OutputInPlace
 	cfg.Plan.Archive = false
+	cfg.Fanout.Enabled = false
 	if r.model != "" {
 		models := maps.Clone(cfg.Agent.Models)
 		if models == nil {

@@ -10,6 +10,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -55,6 +56,39 @@ func TestResolveAppliesAnOverrideBeforeItResolvesAnything(t *testing.T) {
 	}})
 	if err == nil || !strings.Contains(err.Error(), "agent.models") {
 		t.Errorf("resolve with an override belay.yaml could not hold = %v, want the configuration refused", err)
+	}
+}
+
+// TestAForkIsASingleRunWhateverBelayYamlSaysAboutFanout: a fork re-runs one
+// node of the single-run graph, so it turns fanout off as it turns branch
+// output off. With fanout.enabled left on, the fork's graph was the fanout
+// graph -- plan, approve, fanout, join -- and forking test failed the new
+// run with "unknown node". The fork resolves no fanout pin, its registry
+// holds every node a fork can re-run and no fanout, and a review mode only a
+// fanout refuses is not refused.
+func TestAForkIsASingleRunWhateverBelayYamlSaysAboutFanout(t *testing.T) {
+	ws := goWorkspace(t)
+	writeConfig(t, ws, "version: 1\nfanout:\n  enabled: true\n  candidates: 3\n")
+	req := forkRequest{runID: "20260902T000000Z-f0f0f0f0f0f0", node: graph.NodeTest}
+
+	plan, err := resolve(resolveRequest{workspace: ws, logger: quietLogger(), override: req.configure})
+	if err != nil {
+		t.Fatalf("resolve: %v", err)
+	}
+	if plan.fanout != nil {
+		t.Errorf("the fork's plan fans out into %d candidates; a fork is a single run", plan.fanout.Candidates)
+	}
+	if plan.registry == nil {
+		t.Fatalf("no registry built; blockers: %s", blockerText(plan))
+	}
+	names := plan.registry.Names()
+	for _, node := range []string{graph.NodePlan, graph.NodeCode, graph.NodeWrite, graph.NodeTest, graph.NodeFix, graph.NodeReview} {
+		if !slices.Contains(names, node) {
+			t.Errorf("the fork's registry %v has no %s; forking it would fail the fork on an unknown node", names, node)
+		}
+	}
+	if slices.Contains(names, graph.NodeFanout) || slices.Contains(plan.route, graph.NodeFanout) {
+		t.Errorf("the fork's registry %v or route %v has the fanout", names, plan.route)
 	}
 }
 
