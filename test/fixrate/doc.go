@@ -69,6 +69,30 @@
 // file changing is reported as invalid_repair — a distinct outcome from
 // both repaired and not_repaired — and never counted toward the fix rate.
 //
+// # Two arms: the claim is a delta
+//
+// Run is the belay arm. RunControl is the control arm: the same backend,
+// invoked exactly once per task with no graph -- no plan, no fix loop, no
+// quality gate -- given the same goal, model and tools as belay's code node
+// and an allowance at least as large as belay's whole graph could have
+// used. Both go through one pipeline (runArm), so they are injected,
+// evaluated and cheat-checked by the same code, and both keep every
+// refusal described here. A fix rate measured against nothing cannot be a
+// claim about belay, because it does not separate belay's orchestration
+// from the agent underneath; the paired report (PairedResult) can, and it
+// leads with the cost of one resolved task, since spending more is always
+// a way to resolve more. See control.go and paired.go, and README.md's
+// "Two arms" for what a delta can and cannot claim.
+//
+// # SWE-bench, offline
+//
+// swebench.go turns SWE-bench records into Tasks and ports SWE-bench's own
+// grading rule. It runs nothing -- no container, no clone, no patch, no
+// network -- and every claim it makes about SWE-bench is cited to a primary
+// source or marked UNKNOWN. The dataset's licence is UNKNOWN, so no dataset
+// content is committed: every fixture under testdata/swebench is
+// synthetic, and a test refuses one that is not.
+//
 // # Build tag
 //
 // This package is gated behind the "fixrate" build tag. Its default mode
