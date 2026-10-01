@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"slices"
 	"sync"
 	"syscall"
 	"testing"
@@ -188,7 +189,7 @@ func TestAGateWhoseLockIsHeldStillRuns(t *testing.T) {
 	if report.Gate != belay.GateFail {
 		t.Errorf("Gate = %s, want %s (%s)", report.Gate, belay.GateFail, report.Summary)
 	}
-	if want := []string{"added.go:7 errcheck major"}; !equalStrings(findings(report.Issues), want) {
+	if want := []string{"added.go:7 errcheck major"}; !slices.Equal(findings(report.Issues), want) {
 		t.Errorf("findings = %v, want %v", findings(report.Issues), want)
 	}
 }
@@ -267,7 +268,7 @@ func TestConcurrentGolangCIGatesAllSucceed(t *testing.T) {
 			t.Errorf("gate %d of %d: Gate = %s, want %s (%s)",
 				i+1, len(dirs), got.report.Gate, belay.GateFail, got.report.Summary)
 		}
-		if want := []string{"added.go:7 errcheck major"}; !equalStrings(findings(got.report.Issues), want) {
+		if want := []string{"added.go:7 errcheck major"}; !slices.Equal(findings(got.report.Issues), want) {
 			t.Errorf("gate %d of %d: findings = %v, want %v",
 				i+1, len(dirs), findings(got.report.Issues), want)
 		}
@@ -285,17 +286,4 @@ func lintIn(t *testing.T, dir string) belay.QualityReport {
 		t.Fatalf("Lint(%s): %v\nlogs:\n%s", dir, err, logs.String())
 	}
 	return report
-}
-
-// equalStrings reports whether a and b hold the same strings in order.
-func equalStrings(a, b []string) bool {
-	if len(a) != len(b) {
-		return false
-	}
-	for i := range a {
-		if a[i] != b[i] {
-			return false
-		}
-	}
-	return true
 }

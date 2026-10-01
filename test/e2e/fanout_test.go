@@ -385,19 +385,20 @@ func fanoutLast(t *testing.T, path string) journal.Record {
 func fanoutDigest(t *testing.T, h *fanoutHarness, id string) string {
 	t.Helper()
 	cl := h.candidateLayout(id)
-	sum := sha256.New()
-	for _, path := range []string{
+	paths := []string{
 		cl.JournalPath(), cl.StatePath(), cl.ManifestPath(),
 		filepath.Join(h.layout.CandidatesDir(), id, "greeting.go"),
-	} {
+	}
+	parts := make([]string, 0, len(paths))
+	for _, path := range paths {
 		body, err := os.ReadFile(path) //nolint:gosec // paths this test's run made
 		if err != nil {
 			t.Fatalf("%s: read %s: %v", id, path, err)
 		}
-		fmt.Fprintf(sum, "%s %d\n", filepath.Base(path), len(body))
-		sum.Write(body)
+		sum := sha256.Sum256(body)
+		parts = append(parts, filepath.Base(path)+"="+hex.EncodeToString(sum[:]))
 	}
-	return hex.EncodeToString(sum.Sum(nil))
+	return strings.Join(parts, " ")
 }
 
 // fanoutWalk is the nodes a journal started, in order.
