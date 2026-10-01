@@ -20,6 +20,22 @@ import (
 // discipline belay's own journal and state files keep (ADR-0003). A reader
 // therefore sees the old file or the whole new one, never part of either.
 
+// writeFileAtomic writes data to path with perm, atomically; see this file's
+// header comment.
+func writeFileAtomic(path string, data []byte, perm os.FileMode) error {
+	tmp, err := createTemp(path)
+	if err != nil {
+		return err
+	}
+	if _, err := tmp.Write(data); err != nil {
+		return discardTemp(tmp, fmt.Errorf("fixrate: write %s: %w", path, err))
+	}
+	if err := tmp.Chmod(perm); err != nil {
+		return discardTemp(tmp, fmt.Errorf("fixrate: chmod %s: %w", path, err))
+	}
+	return commitTemp(tmp, path)
+}
+
 // createTemp creates the temporary file a write to path goes through, in
 // path's own directory so the final rename cannot cross a filesystem. Its
 // name starts with a dot, so nothing that lists the directory for results
