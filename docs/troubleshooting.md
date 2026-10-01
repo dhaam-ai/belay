@@ -447,6 +447,36 @@ A run stopped between finishing and moving its plan leaves it in the run directo
 
 <!-- slice:plan -->
 
+## belay fork Says Your Files Have Changed Since the Step Ran
+
+**Symptom**: `belay fork <run-id> <node>` refuses, saying the files in your workspace "have changed since <node> #N ran", that belay "recorded no fingerprint" of them, or that they "were fingerprinted by a different belay".
+
+**Cause**: A fork re-runs a step from the state the run was in just before it, and belay keeps that state, but not a copy of your files as they were then: only a fingerprint of them, taken before every step. If the files are not the ones the step saw, re-running it is a different experiment, so belay asks first. A run that edits your workspace in place changes it as it goes, so this is the usual answer for any step before the run's last change; so is a finished run's plan, filed into `docs/plans`. A run on a branch worked in its own worktree, which is removed once the run completes, and then only your checkout is left to copy.
+
+**Remedy**:
+- `belay fork <run-id> <node> --current-files` re-runs the step on the files as they are now, and records that it did
+- Or fork a later step: the last one, after the run's last change to the files, usually needs nothing
+
+## belay fork Says There Is No Snapshot of That Step
+
+**Symptom**: `belay fork` refuses, saying a run "kept no snapshot" of the step, or that a step "was not run by" the run you named.
+
+**Cause**: A fork starts from the copy of the run's state that belay saves before every step. A run recorded by a belay older than those snapshots has none, and state.json holds the state after the run, not before the step. A fork's own early steps were inherited, not run, and their snapshots are in the run it was forked from.
+
+**Remedy**:
+- For an inherited step, run the command the message gives, which forks the original run at the same step and number
+- For an old run, start a new one
+
+## belay resume Cannot Find a Fork
+
+**Symptom**: `belay resume <fork-id>` answers "belay has no run called <fork-id>".
+
+**Cause**: A fork's run lives inside its own copy of the repository, under `.belay/forks/<fork-id>`, not among the runs of the repository it was forked from.
+
+**Remedy**:
+- Point belay at the copy: `belay --workspace .belay/forks/<fork-id> resume <fork-id>`. `belay runs` in the original repository lists every fork with that command
+- `rm -rf .belay/forks/<fork-id>` deletes a fork you no longer want; the run it was forked from never refers to it
+
 <!-- slice:fork -->
 
 <!-- slice:queue -->
