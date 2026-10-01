@@ -172,6 +172,9 @@ type runSpec struct {
 	Goal string
 }
 
+// errRunExists is createRun's refusal to make a run that has already been made.
+var errRunExists = errors.New("a run with this id already exists")
+
 // createRun lays down the run directory, its initial state and its manifest,
 // in that order. It is the first thing in `belay run` that writes anything at
 // all; everything before it is resolution, which is what lets --dry-run stop
@@ -192,12 +195,26 @@ type runSpec struct {
 // already treat a directory without a manifest as not a run; deleting it on
 // the error path would add a way to remove files without sparing any reader
 // that work. Calling createRun again for the same run id converges instead:
-// it writes the state again, whole, then the manifest. It must not be called
-// for a run whose manifest exists, which it would start over.
+// it writes the state again, whole, then the manifest.
+//
+// A run whose manifest exists is refused with errRunExists, before anything
+// is written. Making it again would start it over: a fresh blackboard over
+// its history, its spend and its approval gone. `belay run` asks for a new id
+// every time and could never meet one, but a caller that records an id before
+// the run exists, as the queue does, so that it can find the run again after
+// a crash, can be wrong about whether the run behind it was made. Anything at
+// that path counts, a damaged manifest included: a run belay cannot read is
+// still a run, and still not this function's to replace.
 func createRun(ctx context.Context, plan *runPlan, spec runSpec) (*state.Store, error) {
 	layout, err := state.NewLayout(spec.Workspace, spec.RunID)
 	if err != nil {
 		return nil, err
+	}
+	switch _, err := os.Lstat(layout.ManifestPath()); {
+	case err == nil:
+		return nil, fmt.Errorf("%w: %s is already a run, so belay will not make it again", errRunExists, layout.RunDir())
+	case !errors.Is(err, fs.ErrNotExist):
+		return nil, fmt.Errorf("cannot tell whether %s is already a run: %w", layout.RunDir(), err)
 	}
 	// Creating artifacts/ creates the run directory above it in one call.
 	if err := os.MkdirAll(layout.ArtifactsDir(), 0o750); err != nil {
