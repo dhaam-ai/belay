@@ -493,6 +493,13 @@ that only `pkg/belay` carries a compatibility promise. Everything under
   start time first, so a process id that has since been given to something
   else is never signalled.
 
+- **A finding's path is relative to the workspace even when the workspace is
+  reached through a symbolic link.** ruff reports a file by its resolved path,
+  so in a workspace under macOS's `/var`, which is a link to `/private/var`,
+  every finding was shown with its whole absolute path, and the review step
+  could not tell the file was part of the workspace. The two paths are now
+  also compared resolved.
+
 ## v0.1.4 — 2026-09-17
 
 ### Fixed

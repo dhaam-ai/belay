@@ -462,6 +462,12 @@ func lastLine(s string) string {
 // against, but ESLint and ruff both report absolute paths. A path that is
 // already relative, or that points outside dir, is returned unchanged: a
 // wrong relative path is worse than an honest absolute one.
+//
+// A linter may also report the path with its symbolic links resolved -- ruff
+// does -- while dir was given through one, as macOS's own temporary directory
+// is: /var is a link to /private/var. So when p is not under dir as given,
+// both are compared again resolved. That matters beyond tidiness, because a
+// finding scoped to a run's change is matched to the change by this path.
 func relPath(dir, p string) string {
 	if p == "" || !filepath.IsAbs(p) {
 		return p
@@ -470,11 +476,26 @@ func relPath(dir, p string) string {
 	if err != nil {
 		return p
 	}
+	if rel, ok := under(base, p); ok {
+		return rel
+	}
+	realBase, baseErr := filepath.EvalSymlinks(base)
+	realPath, pathErr := filepath.EvalSymlinks(p)
+	if baseErr == nil && pathErr == nil {
+		if rel, ok := under(realBase, realPath); ok {
+			return rel
+		}
+	}
+	return p
+}
+
+// under returns p relative to base, and whether p is inside base at all.
+func under(base, p string) (string, bool) {
 	rel, err := filepath.Rel(base, p)
 	if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
-		return p
+		return "", false
 	}
-	return rel
+	return rel, true
 }
 
 // projects reports every project internal/detect finds under dir.
