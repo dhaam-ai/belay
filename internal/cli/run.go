@@ -499,7 +499,33 @@ func dispatchOnce(ctx context.Context, plan *runPlan, store *state.Store, resumi
 		dispatch = dispatcher.Resume
 	}
 	outcome, runErr := dispatch(ctx)
-	return outcomeView{layout: store.Layout(), outcome: outcome, runErr: runErr, output: plan.output}, nil
+	view := outcomeView{
+		layout: store.Layout(), outcome: outcome, runErr: runErr, output: plan.output,
+		fanout: plan.fanout != nil,
+	}
+	view.winner = winnerOf(store, view.fanout)
+	return view, nil
+}
+
+// winnerOf reads the candidate a fanout run's join selected from the run's
+// blackboard, after the dispatch has saved it. It is the zero Candidate for a
+// run that does not fan out, one with no winner yet, or a blackboard it
+// cannot read: what to do next is reported either way, and a report must not
+// fail over a read that only makes it more specific.
+func winnerOf(store *state.Store, fanned bool) state.Candidate {
+	if !fanned {
+		return state.Candidate{}
+	}
+	st, err := store.LoadState()
+	if err != nil || st.Winner == "" {
+		return state.Candidate{}
+	}
+	for _, c := range st.Candidates {
+		if c.ID == st.Winner {
+			return c
+		}
+	}
+	return state.Candidate{ID: st.Winner}
 }
 
 // pauseOnCancel is the change driveRun makes to the dispatcher's Options:
@@ -652,6 +678,12 @@ type outcomeView struct {
 	// The zero Output is an in-place run, and the report then says nothing
 	// about branches.
 	output state.Output
+	// fanout is whether the run fans out, as its manifest pinned it.
+	fanout bool
+	// winner is the candidate join selected, read from the blackboard once
+	// the dispatch returned. It is the zero Candidate for a run with no
+	// winner, or one that does not fan out.
+	winner state.Candidate
 }
 
 // reportOutcome turns an Outcome into the last thing a person reads, and into the
@@ -812,6 +844,12 @@ func nextSteps(view outcomeView) []string {
 		if outcome.Node == graph.NodePromote {
 			return promoteSteps(view, resume)
 		}
+		// Nor is a run paused at the fanout: some candidates could not be
+		// finished for a reason a resume can fix, and the fanout's own note,
+		// printed above, says which.
+		if outcome.Node == graph.NodeFanout {
+			return fanoutPausedSteps(view, resume)
+		}
 		lines := []string{"read the plan, edit it if you want to, then run:", "", "    " + resume}
 		if outcome.Node == graph.NodeApprove {
 			plan := filepath.Join(layout.ArtifactsDir(), "plan.md")
@@ -834,15 +872,28 @@ func nextSteps(view outcomeView) []string {
 		if view.output.Branched() {
 			return completedBranchSteps(view)
 		}
+		// An in-place run that fanned out changed nothing in the person's
+		// checkout either: its winner worked in a workspace of its own.
+		if view.fanout {
+			return completedFanoutSteps(view)
+		}
 		return []string{"review the change in your repository, then commit it"}
 	case outcome.Status == state.RunStatusAborted:
 		return []string{
 			"this run has ended. see what happened with:", "", "    belay timeline " + layout.RunID(),
 		}
 	case outcome.Status == state.RunStatusFailed:
-		return []string{
+		lines := []string{
 			"see what happened with:", "", "    belay timeline " + layout.RunID(),
 		}
+		// A fanout fails when no candidate could win, and the reasons are
+		// in the candidates' own runs.
+		if view.fanout {
+			lines = append(lines,
+				"", "and open any candidate's own run, such as the first, with:",
+				"", "    belay timeline "+layout.RunID()+" --candidate cand-01")
+		}
+		return lines
 	default:
 		return []string{"continue with:", "", "    " + resume}
 	}
@@ -865,6 +916,61 @@ func promoteSteps(view outcomeView, resume string) []string {
 		"    git status",
 		"    " + resume,
 	}
+}
+
+// fanoutPausedSteps is what to do about a run paused at its fanout: some
+// candidates have no durable end state because of something a resume can
+// fix -- a full disk, a git lock, a deadline -- and the fanout node's note,
+// which reportOutcome prints, names them and the reason. The finished
+// candidates are not run again: the runner adopts them from their own
+// journals, which is the property the whole candidate-run design rests on,
+// and a person deciding whether resuming will cost them twice is owed it.
+func fanoutPausedSteps(view outcomeView, resume string) []string {
+	return []string{
+		"some candidates could not be finished; the note above says which, and why.",
+		"fix that, then resume: the ones that finished are kept, and resuming runs only the others:",
+		"",
+		"    " + resume,
+		"",
+		"see every candidate so far with:",
+		"",
+		"    belay timeline " + view.layout.RunID(),
+	}
+}
+
+// completedFanoutSteps is what to do with a finished in-place run that fanned
+// out. Its winner's change is in the winner's own workspace, not in the
+// person's checkout: belay does not merge a run that edits in place, and
+// join's note says so. So this names the workspace, and the command that
+// shows what the winner did there.
+func completedFanoutSteps(view outcomeView) []string {
+	w := view.winner
+	if w.ID == "" {
+		// Completed with no recorded winner cannot come from join, which
+		// fails a run with none; the blackboard could not be read. Say
+		// where to look rather than guess.
+		return []string{"see which candidate won, and where its change is, with:", "",
+			"    belay timeline " + view.layout.RunID()}
+	}
+	return []string{
+		"the winner is " + w.ID + ". belay does not merge a run that edits in place, so its change is",
+		"in its own workspace, not in your checkout:",
+		"",
+		"    " + dirOrUnrecorded(w.Dir),
+		"",
+		"review it there and copy back what you want to keep. what it did is in:",
+		"",
+		"    belay timeline " + view.layout.RunID() + " --candidate " + w.ID,
+	}
+}
+
+// dirOrUnrecorded names a winner's workspace, or says the blackboard holds
+// none, so a person is never told to look in "".
+func dirOrUnrecorded(dir string) string {
+	if dir == "" {
+		return "(its workspace is not recorded; belay timeline shows the candidate's run)"
+	}
+	return dir
 }
 
 // completedBranchSteps is what to do with a finished branch run: read what

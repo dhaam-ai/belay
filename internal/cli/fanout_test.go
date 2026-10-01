@@ -548,3 +548,125 @@ func TestAFanoutRunAnnouncesItsCandidates(t *testing.T) {
 		}
 	}
 }
+
+// TestNextStepsAfterAFanout: what a person is told to do next has to match
+// where a fanout run's work actually is.
+//
+//   - Paused at the fanout, some candidates could not be finished -- a full
+//     disk, a git lock. Telling the person to read a plan nobody is waiting
+//     on sends them to the wrong file; what they need to know is that the
+//     finished candidates are kept and resuming retries only the others.
+//   - Completed in place, the winner's change is in its own workspace, not in
+//     the person's checkout: belay does not merge an in-place run, and join's
+//     own note says to copy the change back by hand. "Review the change in
+//     your repository" would point at a checkout that does not have it.
+//   - Failed with no winner, every candidate's own run is where the answer
+//     is, and the command that opens one is named.
+func TestNextStepsAfterAFanout(t *testing.T) {
+	const runID = "20260101T000000Z-c0ffee000000"
+	layout, err := state.NewLayout("/repos/app", runID)
+	if err != nil {
+		t.Fatalf("NewLayout: %v", err)
+	}
+	winnerDir := "/repos/app/.belay/runs/" + runID + "/candidates/cand-02"
+
+	for _, tc := range []struct {
+		name   string
+		view   outcomeView
+		want   []string
+		absent []string
+	}{
+		{
+			name: "paused inside the fanout",
+			view: outcomeView{layout: layout, fanout: true, outcome: graph.Outcome{
+				Status: state.RunStatusPaused, Node: graph.NodeFanout,
+				Note: "1 of 3 candidates could not be finished: cand-02: no space left on device",
+			}},
+			want: []string{
+				"some candidates could not be finished",
+				"the ones that finished are kept, and resuming runs only the others",
+				"belay resume " + runID,
+				"belay timeline " + runID,
+			},
+			absent: []string{"read the plan"},
+		},
+		{
+			name: "completed in place with a winner",
+			view: outcomeView{
+				layout: layout, fanout: true,
+				winner:  state.Candidate{ID: "cand-02", Dir: winnerDir},
+				outcome: graph.Outcome{Status: state.RunStatusCompleted, Node: graph.End},
+			},
+			want: []string{
+				"the winner is cand-02",
+				winnerDir,
+				"belay timeline " + runID + " --candidate cand-02",
+			},
+			absent: []string{"review the change in your repository"},
+		},
+		{
+			name: "failed with no winner",
+			view: outcomeView{layout: layout, fanout: true, outcome: graph.Outcome{
+				Status: state.RunStatusFailed, Node: graph.NodeJoin,
+				Note: "no winner: all 3 candidates failed their tests",
+			}},
+			want: []string{
+				"belay timeline " + runID,
+				"belay timeline " + runID + " --candidate cand-01",
+			},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			lines := strings.Join(nextSteps(tc.view), "\n")
+			for _, want := range tc.want {
+				if !strings.Contains(lines, want) {
+					t.Errorf("next steps do not mention %q:\n%s", want, lines)
+				}
+			}
+			for _, absent := range tc.absent {
+				if strings.Contains(lines, absent) {
+					t.Errorf("next steps say %q, and should not:\n%s", absent, lines)
+				}
+			}
+		})
+	}
+}
+
+// TestWinnerOfReadsTheBlackboardAfterTheDispatch: next steps name the
+// winner's workspace, which only the blackboard records, as join's Patch put
+// it there. A run that does not fan out, or has no winner, gets the zero
+// Candidate, and a winner the candidate list does not hold is still named.
+func TestWinnerOfReadsTheBlackboardAfterTheDispatch(t *testing.T) {
+	layout, err := state.NewLayout(t.TempDir(), "20260101T000000Z-c0ffee000000")
+	if err != nil {
+		t.Fatalf("NewLayout: %v", err)
+	}
+	if err := os.MkdirAll(layout.RunDir(), 0o750); err != nil {
+		t.Fatalf("MkdirAll: %v", err)
+	}
+	store := state.NewStore(layout)
+	st := state.NewState("add tests")
+	st.Candidates = []state.Candidate{
+		{ID: "cand-01", Dir: "/w/cand-01"},
+		{ID: "cand-02", Dir: "/w/cand-02", TestPassed: true},
+	}
+	st.Winner = "cand-02"
+	if err := store.SaveState(st); err != nil {
+		t.Fatalf("SaveState: %v", err)
+	}
+
+	if got := winnerOf(store, true); got.ID != "cand-02" || got.Dir != "/w/cand-02" {
+		t.Errorf("winnerOf = %+v, want cand-02 in /w/cand-02", got)
+	}
+	if got := winnerOf(store, false); got != (state.Candidate{}) {
+		t.Errorf("winnerOf a run that does not fan out = %+v, want the zero Candidate", got)
+	}
+
+	st.Winner = "cand-09"
+	if err := store.SaveState(st); err != nil {
+		t.Fatalf("SaveState: %v", err)
+	}
+	if got := winnerOf(store, true); got.ID != "cand-09" || got.Dir != "" {
+		t.Errorf("winnerOf an unlisted winner = %+v, want cand-09 with no directory", got)
+	}
+}
