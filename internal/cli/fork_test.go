@@ -5,12 +5,14 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"io/fs"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/google/go-cmp/cmp"
 
@@ -444,4 +446,50 @@ func treeSums(t *testing.T, dir string) map[string]string {
 		t.Fatalf("WalkDir: %v", err)
 	}
 	return sums
+}
+
+// TestRunsPointsAtTheForksOfItsRuns: a fork's run lives in its copy, so it is
+// not among this workspace's runs, and somebody who forked a run and came
+// back for it would find nothing. belay runs names each fork and the command
+// that lists it. The JSON listing is a documented shape, and does not change.
+func TestRunsPointsAtTheForksOfItsRuns(t *testing.T) {
+	ws, id := forkSource(t)
+	var made bytes.Buffer
+	u := &ui{out: &made, err: &made}
+	req := forkRequest{runID: id, node: graph.NodeTest}
+	plan, err := resolve(resolveRequest{workspace: ws, logger: newLogger(u), override: req.configure})
+	if err != nil {
+		t.Fatalf("resolve: %v", err)
+	}
+	plan.registry, _ = forkScript()
+	if err := makeFork(cmdWithContext(), u, plan, req); err != nil {
+		t.Fatalf("makeFork: %v\n%s", err, made.String())
+	}
+	forks := forksIn(t, ws)
+	if len(forks) != 1 {
+		t.Fatalf("forks = %v, want one", forks)
+	}
+	// Named where it is found, under this workspace, not where its manifest
+	// says it was made: the two differ once a repository is moved.
+	copyDir := filepath.Join(ws, ".belay", "forks", forks[0])
+
+	var out bytes.Buffer
+	if err := runRuns(&ui{out: &out, err: &out}, runsOptions{workspace: ws, limit: runsDefaultLimit, now: time.Now()}); err != nil {
+		t.Fatalf("runRuns: %v", err)
+	}
+	t.Logf("verbatim output:\n%s", out.String())
+	for _, phrase := range []string{"belay --workspace " + shellQuote(copyDir) + " runs", "test #1 of run " + id} {
+		if !strings.Contains(out.String(), phrase) {
+			t.Errorf("belay runs never says %q:\n%s", phrase, out.String())
+		}
+	}
+
+	out.Reset()
+	if err := runRuns(&ui{out: &out, err: &out}, runsOptions{workspace: ws, limit: runsDefaultLimit, asJSON: true, now: time.Now()}); err != nil {
+		t.Fatalf("runRuns --json: %v", err)
+	}
+	var listing RunsListing
+	if err := json.Unmarshal(out.Bytes(), &listing); err != nil {
+		t.Fatalf("belay runs --json is not one JSON document: %v\n%s", err, out.String())
+	}
 }

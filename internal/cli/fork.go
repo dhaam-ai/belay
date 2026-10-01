@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"maps"
+	"os"
 	"path/filepath"
 	"slices"
 	"strings"
@@ -537,6 +538,57 @@ func completedInCopySteps(view outcomeView) []string {
 		"    " + runCommand(view, "timeline"),
 		"",
 		"then take what you want from the copy into your own checkout by hand.",
+	}
+}
+
+// sayForks tells `belay runs` about the forks made from this workspace's
+// runs. Each lives in a copy of the workspace, with its run directory inside
+// the copy, so it is not among the runs listed here, and a person who forked
+// a run and came back for it would otherwise find nothing.
+//
+// Each fork gets one line: the command that lists it, and which step of which
+// run it re-ran, newest first. A copy whose fork cannot be read -- one
+// interrupted before its manifest was written -- is listed all the same,
+// saying so: a directory belay made is never silently missing from what belay
+// says it has. The path is the one found here, not the one the fork's
+// manifest recorded, so it is right even after the repository has moved.
+//
+// It says nothing when there are no forks, and it is not part of
+// --json, whose shape is documented and does not change for them.
+func sayForks(u *ui, workspace string) {
+	root, err := state.ForksDir(workspace)
+	if err != nil {
+		return
+	}
+	entries, err := os.ReadDir(root)
+	if err != nil {
+		return
+	}
+	var lines []string
+	for _, e := range slices.Backward(entries) {
+		if !e.IsDir() {
+			continue
+		}
+		dir := filepath.Join(root, e.Name())
+		what := "belay cannot read this fork"
+		if layout, err := state.NewLayout(dir, e.Name()); err == nil {
+			if man, err := state.LoadManifest(layout.ManifestPath()); err == nil && man.Origin != nil {
+				what = fmt.Sprintf("%s #%d of run %s", man.Origin.Node, man.Origin.Visit, man.Origin.RunID)
+			}
+		}
+		lines = append(lines, fmt.Sprintf("  belay --workspace %s runs    %s", shellQuote(dir), what))
+	}
+	if len(lines) == 0 {
+		return
+	}
+	u.say("")
+	if len(lines) == 1 {
+		u.say("A fork of a run here lives in a copy of this workspace. List it with:")
+	} else {
+		u.say("%d forks of runs here live in copies of this workspace. List one with:", len(lines))
+	}
+	for _, line := range lines {
+		u.say("%s", line)
 	}
 }
 

@@ -781,6 +781,7 @@ func runRuns(u *ui, opts runsOptions) error {
 	}
 
 	renderRunsTable(u, shown, len(all), opts.now)
+	sayForks(u, opts.workspace)
 	return nil
 }
 
