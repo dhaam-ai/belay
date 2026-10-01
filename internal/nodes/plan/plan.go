@@ -7,7 +7,9 @@
 // answer as the run's plan.md artifact, and returns a state.Patch carrying
 // that artifact's run-relative path and a content digest. It routes to the
 // approve node when config.Graph.Approval is set, or when it is answering
-// a request for a new plan, and straight to the code node otherwise.
+// a request for a new plan, and otherwise straight to where the run's work
+// begins: the code node, or the fanout node for a run that fans out (see
+// WithWorkEntry).
 // Approved always starts false: this node records that a plan exists,
 // never that anyone agreed with it.
 //
@@ -177,10 +179,53 @@ func readOnlyTools() []string { return []string{"Read", "Glob", "Grep"} }
 // It holds no state: everything an execution needs arrives on the
 // RunContext, which is what makes the node safe to register once and
 // re-run any number of times.
-type Node struct{}
+type Node struct {
+	// work is the node a run's work begins at once its plan is approved:
+	// graph.NodeCode, or graph.NodeFanout for a run that fans out.
+	work string
+}
 
-// New returns the plan node.
-func New() *Node { return &Node{} }
+// Option configures a plan Node.
+//
+// The value it carries is decided once, when the run is created, and pinned
+// in the run's manifest; internal/nodes explains why an edge may not be read
+// from live configuration.
+type Option func(*Node)
+
+// WithWorkEntry sends a run that has no approval gate on its walk to next
+// instead of graph.NodeCode, once its plan is written.
+//
+// A run that fans out does not code in its own workspace: it hands the plan
+// to N candidate runs, each of which codes in its own, so its work begins at
+// graph.NodeFanout. That is the only edge this changes. Whether the run stops
+// at the approve gate first is still graph.approval's decision, and a revised
+// plan still goes back to the gate it was asked for from (see Run) -- neither
+// is about where the work begins, only about whether a person sees the plan
+// before it does.
+func WithWorkEntry(next string) Option {
+	return func(n *Node) { n.work = next }
+}
+
+// New returns the plan node. Without options a run's work begins at
+// graph.NodeCode.
+func New(opts ...Option) *Node {
+	n := &Node{work: graph.NodeCode}
+	for _, opt := range opts {
+		opt(n)
+	}
+	return n
+}
+
+// workEntry is where the run's work begins. An unset entry -- a Node built
+// without New -- is graph.NodeCode, the edge every plan had before a run
+// could fan out, rather than an empty successor the dispatcher would end
+// the run on.
+func (n *Node) workEntry() string {
+	if n.work == "" {
+		return graph.NodeCode
+	}
+	return n.work
+}
 
 // Name returns graph.NodePlan.
 func (*Node) Name() string { return graph.NodePlan }
@@ -190,7 +235,8 @@ func (*Node) Name() string { return graph.NodePlan }
 // state.Patch setting state.Plan.
 //
 // Routing is the only branch: graph.NodeApprove when
-// rc.Config.Graph.Approval is true, graph.NodeCode when it is false.
+// rc.Config.Graph.Approval is true, and otherwise the node the run's work
+// begins at -- graph.NodeCode, or whatever WithWorkEntry named.
 // Result.Usage carries the backend's own belay.Usage so the dispatcher's
 // budget ledger sees what this node cost — a node that drops it is a node
 // the budget guard cannot see.
@@ -199,7 +245,7 @@ func (*Node) Name() string { return graph.NodePlan }
 // a truncating write, so a second execution replaces the first execution's
 // document rather than appending to it or creating a second one, and
 // returns the same path.
-func (*Node) Run(ctx context.Context, rc *graph.RunContext) (graph.Result, error) {
+func (n *Node) Run(ctx context.Context, rc *graph.RunContext) (graph.Result, error) {
 	if err := ctx.Err(); err != nil {
 		return graph.Result{}, fmt.Errorf("plan: %w", err)
 	}
@@ -271,7 +317,7 @@ func (*Node) Run(ctx context.Context, rc *graph.RunContext) (graph.Result, error
 	// they have never seen. graph.approval is read from belay.yaml on every
 	// invocation, so "now" and "when the run started" are not the same
 	// question.
-	next := graph.NodeCode
+	next := n.workEntry()
 	if rc.Config.Graph.Approval || request.Request > 0 {
 		next = graph.NodeApprove
 	}

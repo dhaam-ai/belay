@@ -19,15 +19,17 @@
 //
 // # What it decides
 //
-// The gate is a pure function of State.Plan and Config.Graph.Approval:
+// The gate is a pure function of State.Plan and Config.Graph.Approval, and
+// of the one edge it is built with -- where the run's work begins, which is
+// graph.NodeCode unless WithWorkEntry named graph.NodeFanout:
 //
 //   - A request for a new plan is outstanding (State.Plan.Regenerate):
 //     route to graph.NodePlan. See "Asking for a new plan" below.
 //   - The plan is there but cannot be approved as it stands — empty, or
 //     not UTF-8 (see CheckPlan): pause, saying what is wrong with the file.
-//   - Plan.Approved is true: route to graph.NodeCode.
-//   - Approval is disabled but the gate ran anyway: route to graph.NodeCode
-//     with a warning. See Node.Run for why this does not pause.
+//   - Plan.Approved is true: route to where the work begins.
+//   - Approval is disabled but the gate ran anyway: route to where the work
+//     begins, with a warning. See Node.Run for why this does not pause.
 //   - Otherwise: pause.
 //
 // A plan that cannot be approved is checked first, and before Approved,
@@ -129,10 +131,52 @@ func Digest(plan []byte) string {
 
 // Node is the approve gate. It holds no state and is safe to reuse across
 // runs and goroutines; the zero Node is ready to use.
-type Node struct{}
+type Node struct {
+	// work is where an approved plan goes: graph.NodeCode, or
+	// graph.NodeFanout for a run that fans out.
+	work string
+}
 
-// New returns the approve gate.
-func New() *Node { return &Node{} }
+// Option configures the approve gate.
+//
+// The value it carries is decided once, when the run is created, and pinned
+// in the run's manifest; internal/nodes explains why an edge may not be read
+// from live configuration.
+type Option func(*Node)
+
+// WithWorkEntry opens the gate onto next instead of graph.NodeCode: an
+// approved plan, and a gate reached with approval off, both go there.
+//
+// A run that fans out hands its approved plan to N candidate runs, so its
+// gate has to open onto graph.NodeFanout -- a code node the run's own route
+// does not walk would code once, in the run's own workspace, and fan out
+// nothing. The gate's other edges are its own and do not move: a request for
+// a new plan still goes back to the plan node, and a plan nobody has
+// approved still pauses.
+func WithWorkEntry(next string) Option {
+	return func(n *Node) { n.work = next }
+}
+
+// New returns the approve gate. Without options an approved plan goes to
+// graph.NodeCode.
+func New(opts ...Option) *Node {
+	n := &Node{work: graph.NodeCode}
+	for _, opt := range opts {
+		opt(n)
+	}
+	return n
+}
+
+// next is where an approved plan goes. The zero Node is documented as ready
+// to use, so an unset work entry is graph.NodeCode, the edge every gate had
+// before a run could fan out, rather than an empty successor the dispatcher
+// would end the run on.
+func (n *Node) next() string {
+	if n.work == "" {
+		return graph.NodeCode
+	}
+	return n.work
+}
 
 var _ graph.Node = (*Node)(nil)
 
@@ -204,14 +248,20 @@ func regenerateNote(request int) string {
 	return fmt.Sprintf("A new plan was asked for (request %d); returning to the plan node.", request)
 }
 
-// noteApproved is the note for the ordinary approved pass.
-const noteApproved = "Plan approved; proceeding to code."
+// noteApproved is the note for the ordinary approved pass, which goes to
+// work, the node the run's work begins at.
+func noteApproved(work string) string {
+	return "Plan approved; proceeding to " + work + "."
+}
 
 // noteApprovalDisabled is the note for a gate that ran despite
 // graph.approval being off. See Node.Run for why this routes rather than
 // pauses.
-const noteApprovalDisabled = "Approval is disabled (graph.approval=false) but the approve gate ran anyway; " +
-	"routing to code without pausing. This is a wiring bug: the plan node should route straight to code."
+func noteApprovalDisabled(work string) string {
+	return "Approval is disabled (graph.approval=false) but the approve gate ran anyway; " +
+		"routing to " + work + " without pausing. This is a wiring bug: the plan node should route straight to " +
+		work + "."
+}
 
 // shortDigest abbreviates a "sha256:<64 hex>" fingerprint for prose. The
 // full digest still goes to State via the Patch; this is only for reading.
@@ -319,35 +369,36 @@ func (n *Node) Run(ctx context.Context, rc *graph.RunContext) (graph.Result, err
 	}
 
 	if rc.State.Plan.Approved {
-		logger.Info("plan approved; proceeding to code",
+		logger.Info("plan approved; proceeding to the run's work",
 			slog.String("plan", planPath),
+			slog.String("next", n.next()),
 			slog.Bool("edited", edited),
 			slog.String("digest", digest))
 		return graph.Result{
-			Next:   graph.NodeCode,
+			Next:   n.next(),
 			Status: journal.StatusOK,
 			Patch:  patch,
-			Note:   withEdit(noteApproved, edited, digest),
+			Note:   withEdit(noteApproved(n.next()), edited, digest),
 		}, nil
 	}
 
 	// A run with graph.approval off should never reach this node at all —
-	// the plan node routes straight to code. If it does, the wiring is
-	// wrong, and there are two ways to be wrong about it. Pausing would
-	// strand a run the user explicitly asked to be unattended, in a state
-	// only a human at a terminal can clear, which is the exact failure the
-	// approval flag exists to avoid; routing on merely does what the
+	// the plan node routes straight to the run's work. If it does, the
+	// wiring is wrong, and there are two ways to be wrong about it. Pausing
+	// would strand a run the user explicitly asked to be unattended, in a
+	// state only a human at a terminal can clear, which is the exact failure
+	// the approval flag exists to avoid; routing on merely does what the
 	// configuration asked for, loudly. So: proceed, warn in the log, and
 	// say so in the note, where the journal preserves the evidence.
 	if !rc.Config.Graph.Approval {
-		logger.Warn("approve gate reached with approval disabled; routing to code without pausing",
+		logger.Warn("approve gate reached with approval disabled; routing on without pausing",
 			slog.String("plan", planPath),
-			slog.String("next", graph.NodeCode))
+			slog.String("next", n.next()))
 		return graph.Result{
-			Next:   graph.NodeCode,
+			Next:   n.next(),
 			Status: journal.StatusOK,
 			Patch:  patch,
-			Note:   withEdit(noteApprovalDisabled, edited, digest),
+			Note:   withEdit(noteApprovalDisabled(n.next()), edited, digest),
 		}, nil
 	}
 
