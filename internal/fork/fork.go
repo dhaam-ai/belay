@@ -207,8 +207,8 @@ type Request struct {
 	// Config is the configuration the fork runs under.
 	Config config.Config
 	// Survey fingerprints a tree, as graph.Options.Fingerprint does for the
-	// source's snapshots. It must be the same function, or no tree would ever
-	// match.
+	// source's snapshots. It is required, and it must be the same function,
+	// or no tree would ever match.
 	Survey func(ctx context.Context, dir string) (string, error)
 	// Plan reads the plan the source run worked from, wherever it is now: in
 	// the run's artifacts, or moved into the repository once the run
