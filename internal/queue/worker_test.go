@@ -541,3 +541,50 @@ func TestWorkerWillNotShareTheQueue(t *testing.T) {
 		t.Errorf("a refused worker wrote to the log:\n%s", got)
 	}
 }
+
+// appearingRun is a driver whose goal's run is not there when the worker
+// decides what to do, and is there a moment later.
+type appearingRun struct {
+	*fakeDriver
+	looks int
+}
+
+func (d *appearingRun) Observe(Entry) (RunView, error) {
+	d.looks++
+	if d.looks == 1 {
+		return RunView{}, nil
+	}
+	return RunView{Exists: true, Status: state.RunStatusRunning}, nil
+}
+
+// TestWorkerNeverClearsACopyWhoseRunExists: making a goal's copy starts by
+// clearing whatever a crash left at its path, which deletes a directory. That
+// is only ever right when no run exists there, so the worker looks again
+// itself, right before it clears anything, rather than trusting what it saw
+// when it decided. A run that is there by then is never deleted.
+func TestWorkerNeverClearsACopyWhoseRunExists(t *testing.T) {
+	h := newHarness(t)
+	h.add("add tests")
+	if _, err := h.store.claim(1, runIDFor(1), filepath.Join(h.store.WorkRoot(), runIDFor(1))); err != nil {
+		t.Fatalf("claim: %v", err)
+	}
+	precious := filepath.Join(h.store.WorkRoot(), runIDFor(1), "work-in-progress.go")
+	if err := os.MkdirAll(filepath.Dir(precious), 0o750); err != nil {
+		t.Fatalf("MkdirAll: %v", err)
+	}
+	if err := os.WriteFile(precious, []byte("package x\n"), 0o600); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+	w := h.worker()
+	w.Driver = &appearingRun{fakeDriver: h.driver}
+
+	if _, err := w.Work(context.Background()); err == nil {
+		t.Error("Work went on with a copy it could neither clear nor make")
+	}
+	if _, err := os.Stat(precious); err != nil {
+		t.Errorf("the copy of a run that exists was cleared away: %v", err)
+	}
+	if len(h.copier.reclaimed) != 0 {
+		t.Errorf("reclaimed %v; nothing may be cleared once its run exists", h.copier.reclaimed)
+	}
+}

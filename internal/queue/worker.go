@@ -228,7 +228,18 @@ func (w *Worker) claim(e Entry) error {
 // copy, whatever is there: so whatever a crash left there, a copy cut short
 // or a whole copy whose run was never finished being made, is cleared away,
 // and both are made afresh, from the workspace as it stands now.
+//
+// Clearing deletes a directory, so create looks at the run again itself
+// first, rather than trusting what was seen when the step was decided, and
+// refuses if the run is there by now. Under the worker lock nothing else
+// makes one in between; the second look is what keeps that an assumption
+// this function does not have to be right about.
 func (w *Worker) create(ctx context.Context, e Entry) error {
+	if view, err := w.Driver.Observe(e); err != nil {
+		return fmt.Errorf("goal %d: cannot read its run %s: %w", e.ID, e.RunID, err)
+	} else if view.Exists {
+		return fmt.Errorf("goal %d: its run %s exists, so belay will not clear %s to make it again", e.ID, e.RunID, e.Dir)
+	}
 	if err := w.Copier.Reclaim(ctx, e.RunID); err != nil {
 		return fmt.Errorf("goal %d: cannot clear what was left at %s: %w", e.ID, e.Dir, err)
 	}
