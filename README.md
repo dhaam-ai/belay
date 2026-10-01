@@ -394,6 +394,37 @@ fork on, which is an ordinary resume pointed at the copy:
 belay --workspace .belay/forks/<fork-id> resume <fork-id>
 ```
 
+## Line Up Goals and Walk Away
+
+`belay queue` works through several goals one at a time while you are away,
+and tells you in the morning what became of each:
+
+```bash
+belay queue add "add table-driven tests for the config parser"
+belay queue add "make the CLI accept a --json flag"
+belay queue add --no-approval "fix the typos in README.md"
+belay queue start    # says the most it can spend, then works until nothing is left it can run
+belay queue          # what happened, what it cost, and what to do next
+```
+
+Each goal gets a run of its own, in a copy of your workspace made when belay
+reaches the goal, under `.belay/queue/work/`. Your checkout is never edited:
+a finished goal's change is in its copy, and you take what you want from it by
+hand.
+
+A goal's plan still stops for you to read it, as every run's does. The queue
+parks that goal and moves on to the next, and `belay queue approve <goal>`
+releases it for the next `belay queue start`. Only a goal you add with
+`--no-approval` goes from its plan to its code without you; belay never makes
+that choice for you.
+
+Every goal is held to `budget.max_usd` on its own, and `belay queue start`
+says how many goals it will run and the most they can spend together before it
+spends anything. Press Ctrl-C and the goal in progress pauses where it stands.
+If the machine reboots or belay is killed, nothing is lost and nothing runs
+twice: `belay queue start` again carries on with the goal it had in hand, in
+the same run, and then the rest.
+
 ## How It Works (in One Picture)
 
 ```

@@ -189,6 +189,26 @@ With `false`, planning routes straight to coding. That is the right setting for
 an unattended or CI run, and the wrong one for the first time you point belay
 at a repository you care about.
 
+In a queue, `graph.approval` means the same thing. When a goal's plan is
+written, `belay queue start` parks the goal for you to read the plan and moves
+on to the next goal; `belay queue approve <goal>` releases it, and the next
+start carries it on. The only way one queued goal skips the gate is `belay
+queue add --no-approval`, which you type when you add it; belay never turns
+the gate off by itself.
+
+A few settings work differently for queued goals, and these are all of them:
+
+- Each goal runs in its own copy of the workspace, and reads the `belay.yaml`
+  in that copy, as the file stood when belay reached the goal.
+- Every goal is held to `budget.max_usd` and `budget.max_tokens` on its own.
+  `belay queue start` says the most the whole queue can spend before it spends
+  anything, and refuses to start when `budget.on_exceed` is `"warn"`, because
+  nobody is watching a queue to stop an overrun.
+- A queued goal always edits its copy in place, whatever `output.mode` says,
+  and never files its plan into the repository, whatever `plan.archive` says:
+  the copy is not the repository, and a plan filed into it would be lost with
+  it.
+
 <!-- slice:queue -->
 
 ## `test`

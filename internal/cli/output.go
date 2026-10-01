@@ -123,6 +123,13 @@ func (p *runPlan) openRepo(ctx context.Context) (*git.Repo, string) {
 		// tree would be missing whatever they hold, and its tests would
 		// fail for a reason that has nothing to do with the change.
 		return nil, fmt.Sprintf("%s has submodules, and a new worktree would not have their contents", repo.Top())
+	case insideBelay(repo.Prefix()):
+		// A copy belay made, such as a queued goal's, lives under the
+		// repository's own .belay, and git finds the person's repository
+		// around it. That repository is not this workspace's to branch:
+		// the copy is belay's scratch, and work in it happens in place.
+		return nil, fmt.Sprintf("%s is a copy belay made inside %s's .belay directory, not a checkout of it",
+			p.workspace, repo.Top())
 	}
 	if _, err := repo.Head(ctx); errors.Is(err, git.ErrNoCommits) {
 		// Deliberately phrased as something to do, not as "never": one
@@ -130,6 +137,16 @@ func (p *runPlan) openRepo(ctx context.Context) (*git.Repo, string) {
 		return nil, fmt.Sprintf("%s has no commits yet, so there is nothing to branch from; make one first", repo.Top())
 	}
 	return repo, ""
+}
+
+// insideBelay reports whether prefix, a workspace's path within its
+// repository as git reports it, is under the repository's .belay directory.
+// The first segment is compared without regard to case, as config's check
+// on plan.archive_dir compares it: on the file systems macOS uses by
+// default, .Belay is the same directory.
+func insideBelay(prefix string) bool {
+	first, _, _ := strings.Cut(prefix, "/")
+	return strings.EqualFold(first, ".belay")
 }
 
 // fallBackOrBlock records why a branch run is impossible: as a blocker when

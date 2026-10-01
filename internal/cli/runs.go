@@ -777,11 +777,13 @@ func runRuns(u *ui, opts runsOptions) error {
 		// sentence rather than a blank table: the reader needs to know
 		// belay looked and found nothing, not wonder whether it looked.
 		u.say("No runs yet in %s. Start one with belay run.", opts.workspace)
+		sayQueueRuns(u, opts.workspace)
 		return nil
 	}
 
 	renderRunsTable(u, shown, len(all), opts.now)
 	sayForks(u, opts.workspace)
+	sayQueueRuns(u, opts.workspace)
 	return nil
 }
 

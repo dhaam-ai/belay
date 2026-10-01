@@ -34,6 +34,28 @@ that only `pkg/belay` carries a compatibility promise. Everything under
   nor can a run recorded by a belay that kept no snapshots. `--dry-run`
   describes the fork exactly and creates nothing. ADR-0017 records the
   decision.
+
+- **Line up goals and let belay work through them while you are away.**
+  `belay queue add "<goal>"` adds a goal, and `belay queue start` works
+  through the queue one goal at a time, each in a copy of the workspace made
+  when belay reaches it, under `.belay/queue/work/`, so your checkout is never
+  edited. Before it spends anything, a start says how many goals it will run,
+  the most each can spend (`budget.max_usd`) and the product; it refuses
+  `budget.on_exceed: warn`, since nobody is watching a queue to stop an
+  overrun. A goal whose plan stops for review is parked, and the queue moves
+  on to the next: `belay queue approve <goal>` releases it, and the next start
+  carries it on. Only a goal you add with `--no-approval` skips the gate;
+  belay never turns it off by itself. Ctrl-C pauses the goal in progress, and
+  a crash, a kill or a reboot loses nothing: `belay queue start` again picks
+  up the goal it had in hand, in the same run, and then the rest. The queue
+  records each goal's claim before it makes anything for it, so no crash can
+  run a goal twice. `belay queue` on its own is the morning report: what the
+  last start did, what it spent, and the exact command for each goal that
+  needs you; `belay queue list --json` is the documented shape for scripts,
+  and `belay queue rm` takes back a goal nothing has started. Taking a
+  finished goal's change from its copy is up to you. `belay runs` still
+  prints the JSON it always did, and under its table names the runs that
+  live in the queue's copies. ADR-0017 records the decision.
 - **Guardrails a run's change must obey, whatever its tests say.** The new
   `policy` section in `belay.yaml` declares paths a change may not touch
   (`forbidden_paths`), ceilings on its size (`max_changed_files`,
@@ -253,6 +275,13 @@ that only `pkg/belay` carries a compatibility promise. Everything under
 
 ### Fixed
 
+- **belay no longer takes a copy it made for the repository around it.** A
+  queued goal's copy lives under the repository's `.belay`, and git finds the
+  repository a few directories up, so `belay --workspace <copy> resume` —
+  the command `belay queue` prints for a goal stopped at a limit — decided to
+  branch the person's own repository, and warned that `belay.yaml` now asked
+  for a branch when nobody had changed it. A workspace under `.belay` now
+  edits in place, says why, and refuses `output.mode: branch`.
 - **A repair's file list is checked against the disk, not taken on trust.**
   The fix step routed straight back to the tests, so a repair was the one
   change in a run that nothing verified: no claimed path was proven to be a

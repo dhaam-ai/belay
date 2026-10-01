@@ -479,6 +479,78 @@ A run stopped between finishing and moving its plan leaves it in the run directo
 
 <!-- slice:fork -->
 
+## Another `belay queue start` Is Already Working Through This Queue
+
+**Symptom**: `belay queue start` refuses with "another belay queue start is already working through this queue", naming a process id.
+
+**Cause**: One start works through a queue at a time, across every terminal on the machine, so two never run two goals at once. The lock is held by the process for as long as it runs, and the operating system lets go of it the moment that process ends, however it ends.
+
+**Remedy**:
+- `belay queue status` says whether a start is working now, and on which goal
+- Let it finish, or press Ctrl-C once in its terminal: the goal it is on pauses where it stands, and the next start carries it on
+- A process id that no longer exists cannot hold the lock. If the refusal persists after that process is gone, the workspace may be on a network filesystem, where the lock is not reliable and the queue is not supported
+
+## A Queued Goal Is Waiting for Plan Approval
+
+**Symptom**: `belay queue` lists a goal as "waiting for plan approval", and `belay queue start` passes over it.
+
+**Cause**: The goal's plan was written, and it stopped for you to read it, as every run does with `graph.approval` on. The queue parked it and moved on rather than wait for you.
+
+**Remedy**:
+- `belay queue` prints where the plan is. Read it, and edit it if you want to: belay reads the file again when it carries the goal on
+- `belay queue approve <goal>`, then `belay queue start`. Approved goals run before the goals still waiting their turn
+- To let a goal skip review, add it with `belay queue add --no-approval`. A goal already added keeps the choice made when it was added
+
+## A Queued Goal Stopped at a Limit
+
+**Symptom**: `belay queue` lists a goal as "paused at a limit", naming `budget.max_usd`, `graph.max_steps` or `graph.node_timeout`.
+
+**Cause**: The goal's run met one of belay's own limits and paused. The queue never retries such a goal by itself: whether the limit was wrong is for you to decide.
+
+**Remedy**:
+- The goal's run reads the `belay.yaml` in its copy. Raise the limit there (`belay queue` prints the path), or pass the new value with `--config`
+- Carry the goal on yourself with the command `belay queue` prints: `belay --workspace <copy> resume <run-id>`. Its run keeps everything it has already spent
+
+## Where Is a Finished Goal's Change?
+
+**Symptom**: `belay queue` says a goal finished, and your checkout has not changed.
+
+**Cause**: That is by design. Each queued goal runs in its own copy of the workspace, under `.belay/queue/work/<run-id>`, and belay never edits your checkout from the queue.
+
+**Remedy**:
+- `belay --workspace <copy> timeline <run-id>` shows what the run did and which files it changed
+- Take what you want from the copy by hand, for example with `diff -ru <file> <copy>/<file>` for each changed file. The copy has no `.git`, so it is compared, not merged
+- Delete the copy once you have what you need: `rm -rf .belay/queue/work/<run-id>`. Nothing removes copies for you
+
+## A Queued Goal's Tests Fail on Something Missing
+
+**Symptom**: A goal fails at its tests with an error about a missing dependency, while the same tests pass in your checkout.
+
+**Cause**: A goal's copy is made like a fanout candidate's, without `.git`, `node_modules`, `vendor`, `.venv`, `__pycache__`, `dist`, `build`, `target` and `.belay`. Anything your tests need from those is not in the copy.
+
+**Remedy**:
+- Make the test command rebuild what it needs, for example with `test.runner: custom` and a script that installs dependencies first
+- Commit what the tests need, if it belongs in the repository
+
+## The Last Start Was Cut Off
+
+**Symptom**: `belay queue status` says the last start "was cut off before it could record stopping".
+
+**Cause**: The process ended without the chance to say so: the machine rebooted or lost power, or the process was killed. Nothing is lost. The queue records each goal's claim before it makes anything for it, so it knows exactly what the start had in hand.
+
+**Remedy**:
+- `belay queue start`. It carries on with the goal that was in hand, in the run it was already in, re-running only the step that was cut short, and then the rest
+
+## belay Refuses to Read the Queue
+
+**Symptom**: Every `belay queue` command fails with "queue: corrupt", naming a seq or a line.
+
+**Cause**: `.belay/queue/queue.ndjson` holds a history no belay writes: a line damaged in the middle of the file, or a record out of order. belay refuses rather than guess, because a wrong guess about whether a goal was already claimed is how a goal would run twice. A damaged last line alone is not this: belay discards it as an interrupted write.
+
+**Remedy**:
+- Move the file aside (`mv .belay/queue/queue.ndjson .belay/queue/queue.ndjson.broken`) and add the goals you still want again. The runs the old queue made are untouched, in `.belay/queue/work/`
+- Look at the line the error names first: it says which goal and which change
+
 <!-- slice:queue -->
 
 ## A Run Stopped on a Policy Rule
