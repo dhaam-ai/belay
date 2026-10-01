@@ -76,6 +76,13 @@ type ruffRule struct {
 var ruffSeverities = []ruffRule{
 	// Blocker: the file was never analysed.
 	{"E9", belay.SeverityBlocker, "a syntax or I/O error (E902, E999): ruff could not parse the file, so nothing in it was checked"},
+	// ruff 0.8 removed E999 (changelogs/0.8.x.md, "Removed Rules"). Its json
+	// renderer now prints secondary_code_or_id(), and a parse failure has no
+	// rule code, only the diagnostic id "invalid-syntax"
+	// (crates/ruff_db/src/diagnostic/mod.rs, DiagnosticId::InvalidSyntax).
+	// Without this row that id matched nothing and took the Minor default,
+	// so a change that left a file unparsable passed the gate.
+	{"INVALID-SYNTAX", belay.SeverityBlocker, "a syntax error as ruff 0.8 and later report it: ruff could not parse the file, so nothing in it was checked"},
 
 	// Critical: near-certain runtime failure, or an opted-into security
 	// rule set.

@@ -514,6 +514,12 @@ that only `pkg/belay` carries a compatibility promise. Everything under
   could not tell the file was part of the workspace. The two paths are now
   also compared resolved.
 
+- **A Python change that leaves a file unparsable fails the lint gate.**
+  ruff 0.8 stopped reporting a syntax error as `E999` and reports it as
+  `invalid-syntax`, which belay's severity table did not know, so it took the
+  default, minor, and passed the gate at `review.fail_on: major`. It is a
+  blocker now, as `E999` always was.
+
 ## v0.1.4 — 2026-09-17
 
 ### Fixed

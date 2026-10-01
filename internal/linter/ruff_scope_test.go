@@ -149,6 +149,15 @@ func TestRuffScopesToChangedLines(t *testing.T) {
 			wantGate: belay.GateFail,
 		},
 		{
+			// What ruff 0.8 and later print: the code is the diagnostic's
+			// id, and the message does not say SyntaxError.
+			name:     "ruff's own invalid-syntax in a touched file counts",
+			diags:    []diag{{Code: "invalid-syntax", File: "app/broken.py", Row: 3, Message: "Expected `)`, found newline"}},
+			diff:     serviceDiff,
+			want:     []string{"app/broken.py:3 invalid-syntax"},
+			wantGate: belay.GateFail,
+		},
+		{
 			// A diagnostic with neither a code nor a name, whose message
 			// says it is a SyntaxError.
 			name:     "a code-less syntax error in a touched file counts",

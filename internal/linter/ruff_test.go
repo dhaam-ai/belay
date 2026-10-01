@@ -22,7 +22,8 @@ func TestRuffSeverityTable(t *testing.T) {
 
 	want := map[string]belay.Severity{
 		// Blocker: the file was never analysed.
-		"E9": belay.SeverityBlocker,
+		"E9":             belay.SeverityBlocker,
+		"INVALID-SYNTAX": belay.SeverityBlocker,
 
 		// Critical: near-certain runtime failure, or opted-into security.
 		"F82": belay.SeverityCritical,
@@ -99,6 +100,9 @@ func TestRuffCodeMatching(t *testing.T) {
 	}{
 		// Longest prefix wins over the shorter family row.
 		{name: "E999 is a syntax error, not a style nit", code: "E999", want: belay.SeverityBlocker},
+		// ruff 0.8 removed E999; a syntax error now arrives under the
+		// diagnostic's own id, which is not a rule code at all.
+		{name: "invalid-syntax is ruff's syntax error since 0.8", code: "invalid-syntax", want: belay.SeverityBlocker},
 		{name: "E902 is an I/O error", code: "E902", want: belay.SeverityBlocker},
 		{name: "E501 is line length", code: "E501", want: belay.SeverityMinor},
 		{name: "E731 is a style rule", code: "E731", want: belay.SeverityMinor},

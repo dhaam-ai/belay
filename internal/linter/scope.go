@@ -215,11 +215,14 @@ func (c changeSet) counts(issue belay.Issue) bool {
 
 // unparsable reports whether issue says the tool could not read or parse the
 // whole file, rather than finding something on one line of it: ruff's E9
-// family (E902 for a file it cannot read, E999 for one it cannot parse), or a
-// diagnostic whose message is a SyntaxError.
+// family (E902 for a file it cannot read, E999 for one it cannot parse, until
+// ruff 0.8 removed E999), "invalid-syntax" (how ruff 0.8 and later report a
+// parse failure; see ruffSeverities), or a diagnostic whose message is a
+// SyntaxError.
 func unparsable(issue belay.Issue) bool {
 	letters, digits := splitRuffCode(strings.ToUpper(strings.TrimSpace(issue.RuleID)))
-	return (letters == "E" && strings.HasPrefix(digits, "9")) || strings.HasPrefix(issue.Message, "SyntaxError")
+	return (letters == "E" && strings.HasPrefix(digits, "9")) || letters == "INVALID-SYNTAX" ||
+		strings.HasPrefix(issue.Message, "SyntaxError")
 }
 
 // scoped wraps parse so that only the issues set counts reach the report.

@@ -39,6 +39,11 @@ const (
 	// pyBroken is committed code that does not parse, the way a
 	// repository's test data sometimes deliberately does.
 	pyBroken = "def broken(:\n    pass\n"
+
+	// pyCall is a call whose closing bracket pyCallUnclosed deletes. ruff
+	// reports the result on line 2, a line the change did not touch.
+	pyCall         = "print(\n    1,\n)\n\n\ndef ok():\n    return 2\n"
+	pyCallUnclosed = "print(\n    1,\n\n\ndef ok():\n    return 2\n"
 )
 
 // The expected findings for the run most tests make: pyEdit appended to a
@@ -83,6 +88,13 @@ func TestRuffScopesToChangedLines(t *testing.T) {
 			change:    map[string]string{"clean.py": pyClean},
 			wantGate:  belay.GatePass,
 			want:      []string{},
+		},
+		{
+			name:      "a change that breaks a file's syntax fails the gate",
+			committed: map[string]string{"call.py": pyCall},
+			change:    map[string]string{"call.py": pyCallUnclosed},
+			wantGate:  belay.GateFail,
+			want:      []string{"call.py:2 invalid-syntax blocker"},
 		},
 		{
 			name:      "committed code that does not parse does not fail a change elsewhere",
