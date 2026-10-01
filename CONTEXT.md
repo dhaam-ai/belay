@@ -133,6 +133,17 @@ workspace.
 _Avoid_: attempt (an attempt is one execution of a node), variant, branch (a
 candidate may have a branch; it is not one)
 
+**Candidate run**:
+The run one candidate executes — its own journal, blackboard, manifest and
+budget envelope — nested under its parent run in `candidate-runs/<id>/`, and
+resumed only through it.
+_Avoid_: child run (in code), subrun
+
+**Envelope**:
+The share of the parent run's remaining budget one candidate run may spend,
+fixed when the candidate is claimed and never lowered.
+_Avoid_: allowance, sub-budget, quota
+
 **Winner**:
 The candidate join selects; there is no winner when every candidate's tests failed.
 _Avoid_: best candidate, result

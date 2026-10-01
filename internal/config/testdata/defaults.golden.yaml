@@ -32,6 +32,7 @@ budget:
 fanout:
     enabled: false
     candidates: 3
+    concurrency: 3
     isolator: auto
     select: fewest_issues
 output:

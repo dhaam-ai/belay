@@ -81,7 +81,16 @@ func (r resolveRequest) ctx() context.Context {
 type blocker struct {
 	problem string
 	fix     string
+	// key names a blocker that is re-derived rather than accumulated: one
+	// that depends on a pin, which a resume settles from the run's manifest
+	// after resolve has already judged belay.yaml. Re-deriving one first
+	// removes every blocker with its key. Empty for every other blocker.
+	key string
 }
+
+// fanoutReviewKey is the key of the blocker refusing a fanout over a review
+// mode its candidates cannot share; see checkFanoutReview.
+const fanoutReviewKey = "fanout-review"
 
 // runPlan is one resolved run: every decision belay made and every adapter it
 // would use, assembled without creating a file or spending a cent.
@@ -114,6 +123,12 @@ type runPlan struct {
 	// the baseline it surveys, and bindPolicy replaces it on a resume with
 	// what the run's own manifest recorded.
 	policy *state.PolicyPin
+	// fanout is this run's fanout, or nil for a run that does not fan out.
+	// It is a pin, not a reading of the file, exactly as policy is:
+	// resolveFanout builds it for a new run from belay.yaml, createRun
+	// writes it into the manifest, and bindFanout replaces it on a resume
+	// with what the run's own manifest recorded.
+	fanout *state.FanoutPin
 	// goal is what the person asked for, which a pull request's title and
 	// body are written from. startRun sets it; a resume reads it from the
 	// run's manifest.
@@ -132,8 +147,13 @@ type runPlan struct {
 	registry *graph.Registry
 	// route is the order registry is walked in, for showing a person; see
 	// resolveRegistry.
-	route  []string
-	redact func(string) string
+	route []string
+	// candidates is the graph each candidate of a fanout run is driven
+	// over, and candidateRoute the order it walks it in. Both are nil for a
+	// run that does not fan out; resolveRegistry sets them with the rest.
+	candidates     *graph.Registry
+	candidateRoute []string
+	redact         func(string) string
 
 	// recorder is the record-mode wrapper whose cassette must be saved when
 	// the run ends. It is nil in every other mode.
@@ -177,7 +197,45 @@ func (p *runPlan) options(store *state.Store) graph.Options {
 		// a fingerprint of the workspace beside it, so a fork of the run can
 		// tell whether the files have changed since the visit it re-runs.
 		Fingerprint: surveyWorkspace,
+		// These three are what make a fanout run's candidates run at all.
+		// Without a candidate registry the dispatcher builds no candidate
+		// runner, RunContext.CandidateRuns is nil, and the fanout node
+		// refuses with graph.ErrNoCandidateRunner. A run that does not fan
+		// out passes nil and gets none.
+		CandidateRegistry: p.candidates,
+		CandidateAgent:    p.candidateAgent(),
+		// Read from belay.yaml as it is now, on every invocation, and never
+		// from the run's pin: lowering it and resuming is how a person backs
+		// off a rate limit or a machine that cannot take the load.
+		Concurrency: p.config.Fanout.Concurrency,
 	}
+}
+
+// candidateAgent is the backend each candidate of a fanout run is given, by
+// candidate id, or nil for a run that does not fan out.
+//
+// Every backend belay builds is a replay.Backend -- in live mode a
+// pass-through, in record and replay mode the cassette -- and each candidate
+// gets Scoped(id) of it. That matters only for a cassette, and there it is
+// the whole difference: N candidates given one goal ask the same question, a
+// fingerprint deliberately leaves the workspace out, and an unscoped cassette
+// would hand whichever candidate asked first whichever answer was recorded
+// first. Scoped by the candidate's id, each records and replays its own
+// conversation in whatever order the candidates run. A live pass-through
+// ignores the scope.
+//
+// A backend that is not a replay.Backend is shared as it is, which
+// pkg/belay's contract already makes safe: Invoke must be safe for
+// concurrent use.
+func (p *runPlan) candidateAgent() func(id string) belay.AgentBackend {
+	if p.candidates == nil {
+		return nil
+	}
+	cassette, ok := p.agent.(*replay.Backend)
+	if !ok {
+		return nil
+	}
+	return func(id string) belay.AgentBackend { return cassette.Scoped(id) }
 }
 
 // vcs is the repository the promote node commits to, and nil for an in-place
@@ -199,10 +257,13 @@ func (p *runPlan) vcs() vcs.Repository {
 //
 // It is built per store, because both isolators are rooted at one run's
 // candidates directory. A store it cannot be built for — no run yet, or a
-// root it cannot create — is not an error here: fanout is on no route belay
-// walks today, and refusing to start a run over an isolator nothing reaches
-// would stop runs that are fine. The failure is logged and the run proceeds
-// without one, which fanout itself refuses.
+// root it cannot create — is not an error here, because most runs never fan
+// out and refusing to start one over an isolator it will not use would stop
+// runs that are fine. The failure is logged and the run proceeds without
+// one. A run that does fan out then cannot make any candidate's workspace:
+// every candidate reports that it has no isolator, and the fanout pauses
+// with that reason rather than settling, so `belay resume` tries again once
+// the cause is fixed.
 func (p *runPlan) isolator(store *state.Store) belay.Isolator {
 	if store == nil {
 		return nil
@@ -317,30 +378,14 @@ func resolve(req resolveRequest) (*runPlan, error) {
 	p.resolveOutput(req.ctx())
 	p.resolvePullRequest(req.ctx(), runFlags.pullRequest, lookGh)
 	// The policy comes before the registry, for the reason the output does:
-	// whether a run has a gate follows from it.
+	// whether a run has a gate follows from it. So does the fanout: whether
+	// the run's own walk holds the work or hands it to candidates.
 	p.resolvePolicy()
+	p.resolveFanout()
 	p.resolveRegistry()
 	p.resolveModels()
-	p.warnAboutFanout()
 
 	return p, nil
-}
-
-// warnAboutFanout says that fanout.enabled changes nothing yet.
-//
-// It is a warning rather than a blocker: the setting is valid, the loader
-// checks it, and a run with it on is exactly the run it would be with it off.
-// That is the problem. Somebody who turned it on is expecting N attempts at
-// their goal and watching what N attempts would cost, and belay would take
-// one attempt and say nothing about it. Silence is only safe for a setting
-// that does what it says.
-func (p *runPlan) warnAboutFanout() {
-	if !p.config.Fanout.Enabled {
-		return
-	}
-	p.warn("fanout.enabled is true, but nothing runs the candidates yet: no step of the graph leads to "+
-		"the fanout node, so this run takes the ordinary route once and fanout.candidates (%d) changes "+
-		"nothing it does or spends. ADR-0019 is reserved for the decision.", p.config.Fanout.Candidates)
 }
 
 // resolveWorkspace turns the --workspace flag into the absolute path the rest
@@ -657,18 +702,39 @@ func (p *runPlan) resolvePolicy() {
 	p.policy = &state.PolicyPin{Policy: rules}
 }
 
+// resolveFanout settles whether a NEW run fans out, from belay.yaml as it
+// stands now, and with what shape: how many candidates, and which strategy
+// picks the winner. createRun pins exactly this in the manifest, and a
+// resume replaces it with that pin (bindFanout), so a run never changes
+// shape because the file did.
+//
+// fanout.concurrency is deliberately not part of it: it is read live on
+// every invocation, because lowering it on a resume is how a person backs off
+// a rate limit (see config.Fanout.Concurrency).
+func (p *runPlan) resolveFanout() {
+	if !p.config.Fanout.Enabled {
+		p.fanout = nil
+		return
+	}
+	p.fanout = &state.FanoutPin{
+		Candidates: p.config.Fanout.Candidates,
+		Select:     string(p.config.Fanout.Select),
+	}
+}
+
 // resolveRegistry builds the node graph the dispatcher walks, and the route
 // belay shows a person, together. Whatever options nodes.Default is given,
 // nodes.Route must be given too, or belay shows one graph and walks another.
 //
-// It reads p.output and p.policy, never p.config.Output or p.config.Policy,
-// and that is the whole rule internal/nodes states from the other side:
-// whether a run has the promote node or the policy gate is pinned in its
-// manifest when the run is created, and belay.yaml may have changed by the
-// time the run is resumed. resolveOutput and resolvePolicy set them for a new
-// run from belay.yaml; bindOutput and bindPolicy set them for a resume from
-// the chosen run's manifest, and call this again. It never refuses a run: a
-// pin this plan cannot honour is resumePreflight's to report.
+// It reads p.output, p.policy and p.fanout, never p.config.Output,
+// p.config.Policy or p.config.Fanout, and that is the whole rule
+// internal/nodes states from the other side: whether a run has the promote
+// node, the policy gate or a fanout is pinned in its manifest when the run is
+// created, and belay.yaml may have changed by the time the run is resumed.
+// resolveOutput, resolvePolicy and resolveFanout set them for a new run from
+// belay.yaml; bindOutput, bindPolicy and bindFanout set them for a resume
+// from the chosen run's manifest, and call this again. It never refuses a
+// run: a pin this plan cannot honour is resumePreflight's to report.
 //
 // The route is set even when the registry cannot be built, so that a dry run
 // refusing to start still shows the route it would have taken.
@@ -680,6 +746,9 @@ func (p *runPlan) resolveRegistry() {
 	if p.policy != nil {
 		opts = append(opts, nodes.WithPolicyGate())
 	}
+	if p.fanout != nil {
+		opts = append(opts, nodes.WithFanout())
+	}
 	p.route = nodes.Route(p.config, opts...)
 	registry, err := nodes.Default(p.config, opts...)
 	if err != nil {
@@ -690,6 +759,77 @@ func (p *runPlan) resolveRegistry() {
 		return
 	}
 	p.registry = registry
+	p.resolveCandidates()
+	p.checkFanoutReview()
+}
+
+// checkFanoutReview refuses a run that fans out into a quality gate its
+// candidates cannot each run: SonarQube, or the AI review that asks
+// SonarQube for its verdict.
+//
+// Both name the SonarQube project after the directory they review, and a
+// candidate's workspace is called cand-01, cand-02 and so on -- in every run,
+// in every repository. So every candidate would analyse into projects shared
+// with every other run's candidates, and each quality gate would read results
+// another candidate or another run wrote; the project's history, which is
+// what SonarQube judges new code against, would be a jumble of unrelated
+// changes. That is not a verdict about this candidate's code at all. Lint
+// review runs in the candidate's own directory and reports on it alone, so
+// it is unaffected -- and since golangci-lint is now told to wait for its
+// machine-wide lock, several of them can run at once.
+//
+// It judges the fanout this run walks -- the pin, on a resume -- against the
+// review mode belay.yaml gives now, which is read live. resolveRegistry calls
+// it on every rebuild, so it first removes what an earlier call found: a
+// resume settles the fanout from the manifest after resolve has judged the
+// file's, and a run started without a fanout must not be refused for one it
+// does not have.
+func (p *runPlan) checkFanoutReview() {
+	p.blockers = slices.DeleteFunc(p.blockers, func(b blocker) bool { return b.key == fanoutReviewKey })
+	if p.fanout == nil {
+		return
+	}
+	mode := p.config.Review.Mode
+	if mode != config.ReviewModeSonar && mode != config.ReviewModeAI {
+		return
+	}
+	p.blockers = append(p.blockers, blocker{
+		problem: fmt.Sprintf("this run fans out, and review.mode is %q: belay names the SonarQube project after "+
+			"the directory it reviews, so every candidate would share projects called cand-01, cand-02 and so on "+
+			"with every other run's candidates, and its quality gate would read results it did not produce.", mode),
+		fix: "set review.mode to lint for a run that fans out; SonarQube project keys are not yet scoped per " +
+			"candidate. A run not yet started can instead set fanout.enabled to false.",
+		key: fanoutReviewKey,
+	})
+}
+
+// resolveCandidates builds the graph a fanout run's candidates are driven
+// over, from the same pins as the run's own: the policy gate is in it when
+// the run has a policy, because a fanout run's change is made by its
+// candidates and has to be judged there. Branch output is not: a candidate's
+// passing gate ends the candidate, and promoting the winner is the parent's.
+//
+// It clears both fields for a run that does not fan out, so a resume that
+// rebinds a pin never leaves the previous plan's candidates behind.
+func (p *runPlan) resolveCandidates() {
+	p.candidates, p.candidateRoute = nil, nil
+	if p.fanout == nil {
+		return
+	}
+	var opts []nodes.Option
+	if p.policy != nil {
+		opts = append(opts, nodes.WithPolicyGate())
+	}
+	p.candidateRoute = nodes.CandidateRoute(opts...)
+	candidates, err := nodes.Candidate(opts...)
+	if err != nil {
+		p.block(
+			fmt.Sprintf("belay cannot assemble the graph its candidates run: %v", err),
+			"this is a bug in belay; please report it",
+		)
+		return
+	}
+	p.candidates = candidates
 }
 
 // nodeModel is one node of the route, the model it would be sent, and what
@@ -730,7 +870,13 @@ func (p *runPlan) resolveModels() {
 	routable := config.RoutableNodes()
 	blocked := map[string]bool{}
 
-	for _, node := range p.route {
+	// A fanout run's own walk calls one model, the plan's; its candidates
+	// call the rest, once each. Walking only the run's route would wave a
+	// bad agent.models.code through here and fail it inside every
+	// candidate instead, so the candidates' walk is checked too. The
+	// combined walk reaches each routable node once, in the order a run
+	// reaches it, whether or not the run fans out.
+	for _, node := range slices.Concat(p.route, p.candidateRoute) {
 		if !slices.Contains(routable, node) {
 			continue
 		}

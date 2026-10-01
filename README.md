@@ -473,8 +473,10 @@ Every step's result is saved, and its finish journaled, *before* the next step s
 ### 2. Approval Gates
 The `approve` step pauses the run after the agent writes a plan. You can read it, edit it, and decide whether to proceed. This stops a runaway agent before it writes code. It is the only step that pauses a run for you. A failing quality gate does not pause: it sends the change to `fix`, like a failing test, and a run that `graph.give_up` repairs have not brought to passing tests and a passing gate ends as failed.
 
-### 3. Best-of-N Candidates (Fanout) — not working yet
-The aim is to give one goal N independent candidates, each in its own workspace, and keep the best, so that the variance between agent runs works for you. Two pieces of that exist: a `fanout` node that prepares one workspace per candidate, and a `join` node that picks a winner among the candidates whose tests passed. No run reaches either one, and nothing runs the candidates. See *Maturity & Limitations* below.
+### 3. Best-of-N Candidates (Fanout)
+Give one goal N independent candidates and keep the best, so that the variance between agent runs works for you. With `fanout.enabled: true` a run goes plan → approve → fanout → join: once you approve the plan, each candidate codes, tests, repairs and is reviewed in a workspace of its own — a git worktree on its own branch, or a directory copy — `fanout.concurrency` at a time, and `join` keeps the one `fanout.select` prefers among those whose tests passed. A branch run then merges the winner onto its branch; an in-place run leaves it in its workspace for you to copy back.
+
+Each candidate is a run of its own, with its own journal, so a crash or a Ctrl-C mid-fanout resumes like any run: finished candidates are kept, and only the interrupted ones run again. The budget is divided between the candidates before any of them starts, and `--dry-run` shows each one's share. See ADR-0019, and *Maturity & Limitations* below for what fanout costs.
 
 ### 4. CLI-Agnostic Orchestration
 The graph definition and all orchestration logic are independent of which agent backend you use. The `belay.AgentBackend` interface is public: you can implement Claude, Codex, Gemini, or your own LLM. The same belay workflow runs against any backend without code changes.
@@ -487,7 +489,7 @@ Every belay run reads `belay.yaml` from your project root. Your user config is r
 - **test**: auto-detect or custom test command
 - **review**: the quality gate: local linters (`lint`), SonarQube (`sonar`), or the AI reviewer (`ai`), which `belay run` does not use yet
 - **budget**: spend ceiling in USD and tokens
-- **fanout**: best-of-N candidates, which no run uses yet (see *Maturity & Limitations*)
+- **fanout**: best-of-N candidates: whether a run fans out, how many candidates, how many run at a time, and how the winner is chosen
 
 See `docs/config.md` for the complete reference, including examples.
 
@@ -520,7 +522,7 @@ belay is **early but real**. Use it for:
 
 3. **Unix only**: belay's process runner, linter launcher, and workspace isolation use unix-specific system calls. Windows and macOS 11 (Monterey) are not supported. (Contributions welcome.)
 
-4. **Fanout does not work yet**: The `fanout` and `join` nodes exist and are unit-tested, but no run reaches them. No step in belay's graph leads to `fanout`, so setting `fanout.enabled: true` changes nothing a run does. `belay run` builds the isolator `fanout` would use — a git worktree per candidate for a branch run, a directory copy otherwise — but nothing reaches it. The `fanout` node only prepares candidates: it creates one workspace per candidate and runs none of them, so no candidate ever has test results. `join` picks a winner among the candidates whose tests passed and routes it to `promote`, which merges that candidate's branch into the run's own (ADR-0012); with `fanout.isolator: dircopy`, or an in-place run, there is no branch to merge and promoting the winner is still manual (ADR-0004). Running candidates is planned, and ADR-0019 is reserved for it.
+4. **Fanout multiplies cost, disk and contention**: A fanout of N pays for N attempts at your goal inside one `budget.max_usd`, which is divided between them, so each gets a fraction of what a single run would. It can end a little over that ceiling: each candidate is checked before a step, not during one, so the overrun is bounded by one step per candidate (two, if every candidate is killed mid-step and resumed). It leaves N workspaces and N candidate-run directories behind, and belay has no `belay cleanup` command yet to remove them (ADR-0004's follow-up, still owed). An in-place run does not merge its winner: the change stays in the winner's workspace, which the run names, for you to copy back; only a branch run merges it (ADR-0012). `review.mode: sonar` and `ai` are refused with fanout, because their SonarQube project keys are not yet separate per candidate. Candidates running at once compete for CPU and for your agent's rate limit; lower `fanout.concurrency` and resume to back off. See ADR-0019.
 
 5. **No published fix rate**: belay has a test harness (`test/fixrate`) that measures "what percentage of runs result in code that passes tests and linting?" but no published number yet. We are working on benchmarks. Do not rely on any claimed success rate.
 
@@ -552,7 +554,8 @@ See `docs/adr/0009-record-replay-cassettes.md` for the cassette format.
 
 ### Roadmap
 
-- [ ] Run fanout candidates (ADR-0019); `join` already selects one and `promote` already merges it
+- [x] Run fanout candidates, as candidate runs of their own (ADR-0019)
+- [ ] `belay cleanup`, to remove the workspaces and candidate runs a finished run leaves behind
 - [ ] Windows and macOS 11 support (process isolation)
 - [ ] Codex and Gemini backends (implement `AgentBackend` for each)
 - [ ] Published fix-rate benchmarks

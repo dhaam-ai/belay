@@ -195,6 +195,42 @@ var (
 	golangciUnscoped = []string{"--new=false", "--new-from-rev=", "--new-from-merge-base=", "--new-from-patch=", "--whole-files=false"}
 )
 
+// golangciSerial lets this gate wait for golangci-lint's lock instead of
+// failing on it.
+//
+// golangci-lint takes one file lock per machine, at
+// $TMPDIR/golangci-lint.lock, and with neither of its two flags it waits
+// about five seconds for it and then exits 3 with "parallel golangci-lint is
+// running" (measured on the pinned v2.12.2: a lock held 2s let the run
+// through after 2.6s; held 5s, 10s and 20s it failed after ~5.2s every time).
+// Five seconds is enough for two gates and not for five, so the default is
+// not safely concurrent and not reliably broken either -- it depends on how
+// long a lint takes against how many are queued.
+//
+// belay needs more than that. A run with fanout.concurrency above 1 -- the
+// default is 3 -- has several candidates reaching the review node at once,
+// and a gate that cannot start is an error here, not a failed gate, so the
+// candidate's review node fails for a reason that has nothing to do with its
+// code and join reports that every attempt at the goal failed.
+//
+// --allow-serial-runners is the narrow fix: the instances still take the lock
+// one at a time, and a loser waits for it rather than giving up. The cost is
+// wall-clock time inside one candidate's own budget envelope.
+//
+// --allow-parallel-runners is the wrong fix. It drops the lock altogether and
+// lets the instances share a cache that golangci-lint keys by file content
+// while storing absolute paths (golangci/golangci-lint#3502), so one
+// candidate can be handed a sibling's findings, with paths into a directory
+// it never touched -- see Lint's "What scoping by line does not see", which
+// records that contamination as a limit already. Inviting it deliberately, in
+// the gate that decides whether a change is acceptable, to save a few seconds
+// is a bad trade.
+//
+// It is passed for every run, not only under fanout: this adapter does not
+// know whether it is one of N, and a lock the only gate on the machine waits
+// zero time for costs that run nothing.
+const golangciSerial = "--allow-serial-runners"
+
 // Bounds for the git commands committed runs. Each is quick, and the longest
 // output is one directory level of names; the cap only has to leave that
 // output non-empty.
@@ -267,7 +303,7 @@ func (g *GolangCI) Lint(ctx context.Context, dir string) (belay.QualityReport, e
 	if scoped {
 		scope = golangciScoped
 	}
-	args := append([]string{"run", "--output.json.path=stdout"}, scope...)
+	args := append([]string{"run", "--output.json.path=stdout", golangciSerial}, scope...)
 	cmd := exec.Command{
 		Path: golangciName,
 		// --output.json.path=stdout replaces the default text format.

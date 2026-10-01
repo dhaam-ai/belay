@@ -18,9 +18,11 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"github.com/dhaam-ai/belay/internal/budget"
 	"github.com/dhaam-ai/belay/internal/config"
 	"github.com/dhaam-ai/belay/internal/detect"
 	"github.com/dhaam-ai/belay/internal/graph"
+	"github.com/dhaam-ai/belay/internal/nodes/fanout"
 	"github.com/dhaam-ai/belay/internal/planarchive"
 	"github.com/dhaam-ai/belay/internal/policy"
 	"github.com/dhaam-ai/belay/internal/state"
@@ -241,6 +243,14 @@ func createRun(ctx context.Context, plan *runPlan, spec runSpec) (*state.Store, 
 	if err := plan.pinPolicy(ctx, layout, &manifest); err != nil {
 		plan.unwindWorkspace(ctx, manifest.Output)
 		return nil, err
+	}
+	// The fanout's shape lands in the manifest's one write too, through
+	// SetFanout, so the field and the capability an older belay would have
+	// to refuse are one decision (ADR-0011): a belay that dropped the pin
+	// would resume this run as a single attempt and spend the ceiling again.
+	// From here on the pin, not belay.yaml, decides how this run is walked.
+	if plan.fanout != nil {
+		manifest.SetFanout(*plan.fanout)
 	}
 	if err := state.SaveManifest(layout.ManifestPath(), manifest); err != nil {
 		plan.unwindWorkspace(ctx, manifest.Output)
@@ -506,7 +516,33 @@ func dispatchOnce(ctx context.Context, plan *runPlan, store *state.Store, resumi
 		dispatch = dispatcher.Resume
 	}
 	outcome, runErr := dispatch(ctx)
-	return outcomeView{layout: store.Layout(), outcome: outcome, runErr: runErr, output: plan.output}, nil
+	view := outcomeView{
+		layout: store.Layout(), outcome: outcome, runErr: runErr, output: plan.output,
+		fanout: plan.fanout != nil,
+	}
+	view.winner = winnerOf(store, view.fanout)
+	return view, nil
+}
+
+// winnerOf reads the candidate a fanout run's join selected from the run's
+// blackboard, after the dispatch has saved it. It is the zero Candidate for a
+// run that does not fan out, one with no winner yet, or a blackboard it
+// cannot read: what to do next is reported either way, and a report must not
+// fail over a read that only makes it more specific.
+func winnerOf(store *state.Store, fanned bool) state.Candidate {
+	if !fanned {
+		return state.Candidate{}
+	}
+	st, err := store.LoadState()
+	if err != nil || st.Winner == "" {
+		return state.Candidate{}
+	}
+	for _, c := range st.Candidates {
+		if c.ID == st.Winner {
+			return c
+		}
+	}
+	return state.Candidate{ID: st.Winner}
 }
 
 // pauseOnCancel is the change driveRun makes to the dispatcher's Options:
@@ -613,6 +649,9 @@ func announceStart(u *ui, plan *runPlan, layout state.Layout, want string) {
 	u.say("  where it goes:       %s", plan.outputReason)
 	u.say("  most it can spend:   %s", u.emph(budgetCeiling(plan.config.Budget)))
 	u.say("  when it gets there:  %s", budgetOnExceed(plan.config.Budget))
+	if plan.fanout != nil {
+		u.say("  candidates:          %d, %s", plan.fanout.Candidates, candidateShare(plan))
+	}
 	u.say("  to stop it:          press Ctrl-C once; belay saves its state and exits")
 	u.say("")
 	u.say("run %s", layout.RunID())
@@ -667,6 +706,12 @@ type outcomeView struct {
 	// run: nothing is waiting for a person, and resuming carries on from the
 	// next node.
 	pausedAsAsked bool
+	// fanout is whether the run fans out, as its manifest pinned it.
+	fanout bool
+	// winner is the candidate join selected, read from the blackboard once
+	// the dispatch returned. It is the zero Candidate for a run with no
+	// winner, or one that does not fan out.
+	winner state.Candidate
 }
 
 // reportOutcome turns an Outcome into the last thing a person reads, and into the
@@ -829,6 +874,12 @@ func nextSteps(view outcomeView) []string {
 		if outcome.Node == graph.NodePromote {
 			return promoteSteps(view, resume)
 		}
+		// Nor is a run paused at the fanout: some candidates could not be
+		// finished for a reason a resume can fix, and the fanout's own note,
+		// printed above, says which.
+		if outcome.Node == graph.NodeFanout {
+			return fanoutPausedSteps(view, resume)
+		}
 		lines := []string{"read the plan, edit it if you want to, then run:", "", "    " + resume}
 		if outcome.Node == graph.NodeApprove {
 			plan := filepath.Join(layout.ArtifactsDir(), "plan.md")
@@ -854,15 +905,28 @@ func nextSteps(view outcomeView) []string {
 		if view.output.Branched() {
 			return completedBranchSteps(view)
 		}
+		// An in-place run that fanned out changed nothing in the person's
+		// checkout either: its winner worked in a workspace of its own.
+		if view.fanout {
+			return completedFanoutSteps(view)
+		}
 		return []string{"review the change in your repository, then commit it"}
 	case outcome.Status == state.RunStatusAborted:
 		return []string{
 			"this run has ended. see what happened with:", "", "    " + runCommand(view, "timeline"),
 		}
 	case outcome.Status == state.RunStatusFailed:
-		return []string{
+		lines := []string{
 			"see what happened with:", "", "    " + runCommand(view, "timeline"),
 		}
+		// A fanout fails when no candidate could win, and the reasons are
+		// in the candidates' own runs.
+		if view.fanout {
+			lines = append(lines,
+				"", "and open any candidate's own run, such as the first, with:",
+				"", "    "+runCommand(view, "timeline")+" --candidate cand-01")
+		}
+		return lines
 	default:
 		return []string{"continue with:", "", "    " + resume}
 	}
@@ -885,6 +949,61 @@ func promoteSteps(view outcomeView, resume string) []string {
 		"    git status",
 		"    " + resume,
 	}
+}
+
+// fanoutPausedSteps is what to do about a run paused at its fanout: some
+// candidates have no durable end state because of something a resume can
+// fix -- a full disk, a git lock, a deadline -- and the fanout node's note,
+// which reportOutcome prints, names them and the reason. The finished
+// candidates are not run again: the runner adopts them from their own
+// journals, which is the property the whole candidate-run design rests on,
+// and a person deciding whether resuming will cost them twice is owed it.
+func fanoutPausedSteps(view outcomeView, resume string) []string {
+	return []string{
+		"some candidates could not be finished; the note above says which, and why.",
+		"fix that, then resume: the ones that finished are kept, and resuming runs only the others:",
+		"",
+		"    " + resume,
+		"",
+		"see every candidate so far with:",
+		"",
+		"    belay timeline " + view.layout.RunID(),
+	}
+}
+
+// completedFanoutSteps is what to do with a finished in-place run that fanned
+// out. Its winner's change is in the winner's own workspace, not in the
+// person's checkout: belay does not merge a run that edits in place, and
+// join's note says so. So this names the workspace, and the command that
+// shows what the winner did there.
+func completedFanoutSteps(view outcomeView) []string {
+	w := view.winner
+	if w.ID == "" {
+		// Completed with no recorded winner cannot come from join, which
+		// fails a run with none; the blackboard could not be read. Say
+		// where to look rather than guess.
+		return []string{"see which candidate won, and where its change is, with:", "",
+			"    belay timeline " + view.layout.RunID()}
+	}
+	return []string{
+		"the winner is " + w.ID + ". belay does not merge a run that edits in place, so its change is",
+		"in its own workspace, not in your checkout:",
+		"",
+		"    " + dirOrUnrecorded(w.Dir),
+		"",
+		"review it there and copy back what you want to keep. what it did is in:",
+		"",
+		"    belay timeline " + view.layout.RunID() + " --candidate " + w.ID,
+	}
+}
+
+// dirOrUnrecorded names a winner's workspace, or says the blackboard holds
+// none, so a person is never told to look in "".
+func dirOrUnrecorded(dir string) string {
+	if dir == "" {
+		return "(its workspace is not recorded; belay timeline shows the candidate's run)"
+	}
+	return dir
 }
 
 // completedBranchSteps is what to do with a finished branch run: read what
@@ -1013,6 +1132,11 @@ func dryRunSections(u *ui, plan *runPlan, want, resuming string) []dryRunSection
 		dryRunOutput(plan),
 		dryRunSpend(u, plan),
 	)
+	// A run that does not fan out gets no section: one attempt is what every
+	// other section already describes.
+	if candidates := dryRunFanout(plan, resuming != ""); len(candidates.lines) > 0 {
+		sections = append(sections, candidates)
+	}
 	// A run whose graph could not be assembled has no nodes to price, and an
 	// empty section is a heading over nothing.
 	if models := dryRunModels(plan); len(models.lines) > 0 {
@@ -1061,6 +1185,85 @@ func dryRunSpend(u *ui, plan *runPlan) dryRunSection {
 		u.emph(budgetCeiling(plan.config.Budget)),
 		budgetOnExceed(plan.config.Budget),
 	}}
+}
+
+// dryRunFanout is how a fanout run divides its work and its money, and it
+// is empty for a run that does not fan out.
+//
+// It follows the discipline dryRunModels states: a share and never a total.
+// belay knows what each candidate may spend, because the fanout divides the
+// ceiling once, evenly, before any candidate runs; it does not know what
+// each will spend, so it says nothing about that. It also says the one thing
+// a person reading budget.max_usd as a hard cap would get wrong -- that a
+// candidate is checked before a step and not during one -- so the run's
+// final bill can pass the ceiling by a bounded amount, and the bound is
+// named.
+func dryRunFanout(plan *runPlan, resuming bool) dryRunSection {
+	if plan.fanout == nil {
+		return dryRunSection{}
+	}
+	n := plan.fanout.Candidates
+	share := fmt.Sprintf("%d candidates, %s", n, candidateShare(plan))
+	if resuming {
+		share += "; a candidate already claimed keeps the share it was given, or more if budget.max_usd " +
+			"has been raised since"
+	}
+	return dryRunSection{title: "its candidates", lines: []string{
+		share,
+		"budget.max_usd, less what the plan has cost, is divided evenly between them once, before any of them runs",
+		"each walks " + routeLine(plan.candidateRoute) + ", in a workspace of its own",
+		winnerLine(plan.fanout.Select),
+		"a candidate is checked before each step and not during one, so the run can end up to one step " +
+			"per candidate over budget.max_usd (two, if every candidate is stopped part-way through a step " +
+			"and resumed)",
+	}}
+}
+
+// candidateShare is how many of a fanout run's candidates run at a time, and
+// the most each may spend: "3 at a time, up to $1.00 and 666,666 tokens
+// each".
+//
+// The share is the one the fanout node computes, from the same function,
+// with nothing spent yet. The real fanout runs after the plan has been paid
+// for, so each real share is a little smaller, which is why this says "up
+// to". How many run at a time is fanout.concurrency, never more than there
+// are candidates, read from belay.yaml as it is now.
+func candidateShare(plan *runPlan) string {
+	n := plan.fanout.Candidates
+	together := min(max(plan.config.Fanout.Concurrency, 1), max(n, 1))
+	atATime := fmt.Sprintf("%d at a time", together)
+	if together == 1 {
+		atATime = "one at a time"
+	}
+	env, err := fanout.Envelopes(budget.Snapshot{}, plan.config.Budget, n)
+	if err != nil {
+		return atATime + ", and belay cannot divide budget.max_usd between them: " + err.Error()
+	}
+	each := "up to " + dollars(env.LimitUSD)
+	if env.LimitTokens > 0 {
+		each += " and " + thousands(env.LimitTokens) + " tokens"
+	}
+	return atATime + ", " + each + " each"
+}
+
+// winnerLine says how join will choose, in the words of the strategy the run
+// is pinned to. A strategy this belay does not know is named as it is
+// written: join refuses it, in one place, and this only describes.
+func winnerLine(strategy string) string {
+	const among = ", among those that passed their tests"
+	switch config.SelectStrategy(strategy) {
+	case config.SelectFewestIssues:
+		return "the winner is the candidate with the fewest review issues" + among
+	case config.SelectFirstPass:
+		return "the winner is the first candidate, in order, that passed its tests"
+	case config.SelectFastest:
+		// The time its own steps took, as join compares it, and not when it
+		// finished: under contention, finishing first is partly a fact
+		// about how the pool scheduled the candidates.
+		return "the winner is the candidate whose own steps took the least time" + among
+	default:
+		return fmt.Sprintf("the winner is chosen by %q", strategy)
+	}
 }
 
 // dryRunModels is what each step that calls a model would be sent, and what
@@ -1190,11 +1393,20 @@ func dryRunSettings(plan *runPlan) dryRunSection {
 
 // dryRunRoute is the walk through the graph, and what bounds it.
 func dryRunRoute(plan *runPlan) dryRunSection {
+	work := graph.NodeCode
+	limits := fmt.Sprintf("it gives up after %d rounds of the test-and-fix loop, or %d steps in all",
+		plan.config.Graph.GiveUp, plan.config.Graph.MaxSteps)
+	// A fanout run has no test-and-fix loop of its own: each candidate has
+	// one, and each candidate run is held to these limits separately.
+	if plan.fanout != nil {
+		work = graph.NodeFanout
+		limits = fmt.Sprintf("each candidate gives up after %d rounds of its test-and-fix loop, or %d steps of its own",
+			plan.config.Graph.GiveUp, plan.config.Graph.MaxSteps)
+	}
 	return dryRunSection{title: "the route it would take", lines: []string{
 		routeLine(plan.route),
-		approvalLine(plan.config.Graph),
-		fmt.Sprintf("it gives up after %d rounds of the test-and-fix loop, or %d steps in all",
-			plan.config.Graph.GiveUp, plan.config.Graph.MaxSteps),
+		approvalLine(plan.config.Graph, work),
+		limits,
 	}}
 }
 
@@ -1260,12 +1472,13 @@ func routeLine(route []string) string {
 	return strings.Join(append(slices.Clone(route), "done"), " → ")
 }
 
-// approvalLine explains the one step that stops for a human.
-func approvalLine(g config.Graph) string {
+// approvalLine explains the one step that stops for a human. work is where
+// the run goes once the plan is accepted: code, or the fanout.
+func approvalLine(g config.Graph, work string) string {
 	if g.Approval {
 		return "approve stops the run so you can read the plan before any code is written"
 	}
-	return "graph.approval is false, so belay will not stop for you: it goes from plan straight to code"
+	return "graph.approval is false, so belay will not stop for you: it goes from plan straight to " + work
 }
 
 // projectLine names what belay recognised in the workspace.
@@ -1458,6 +1671,21 @@ type nodeEvent struct {
 	status  string
 	next    string
 	elapsed time.Duration
+	// candidate is the fanout candidate whose run this transition belongs
+	// to, or empty for the run's own. The candidate runner attaches it to
+	// every candidate dispatcher's logger.
+	candidate string
+}
+
+// who prefixes a candidate's lines with its id. Several candidates narrate at
+// once under fanout.concurrency, and five "→ test step 3" lines from five
+// candidates would otherwise be indistinguishable. The run's own lines get
+// nothing, so a run that does not fan out reads exactly as it always has.
+func (ev nodeEvent) who() string {
+	if ev.candidate == "" {
+		return ""
+	}
+	return "[" + ev.candidate + "] "
 }
 
 // fields collects the attributes the dispatcher attached, from the handler's
@@ -1478,6 +1706,8 @@ func (n *narrator) fields(rec slog.Record) nodeEvent {
 			ev.next = a.Value.String()
 		case "elapsed":
 			ev.elapsed = a.Value.Duration()
+		case "candidate":
+			ev.candidate = a.Value.String()
 		}
 	}
 	for _, a := range n.attrs {
@@ -1493,7 +1723,7 @@ func (n *narrator) fields(rec slog.Record) nodeEvent {
 // entered prints the line that answers "what is belay doing now". It is the
 // only line in a run that is emphasised, along with the closing cost.
 func (n *narrator) entered(ev nodeEvent) {
-	line := fmt.Sprintf("  → %s step %d", padNode(ev.node), ev.step)
+	line := fmt.Sprintf("  %s→ %s step %d", ev.who(), padNode(ev.node), ev.step)
 	if ev.attempt > 1 {
 		line += fmt.Sprintf(", attempt %d", ev.attempt)
 	}
@@ -1504,7 +1734,7 @@ func (n *narrator) entered(ev nodeEvent) {
 // out of a node is what lets somebody follow a loop — test back to fix, fix
 // back to test — instead of watching the same names scroll past.
 func (n *narrator) left(ev nodeEvent) {
-	n.ui.say("    %s %s", padNode(ev.node), nodeVerdict(ev))
+	n.ui.say("    %s%s %s", ev.who(), padNode(ev.node), nodeVerdict(ev))
 }
 
 // nodeVerdict renders how a node ended and where the run went next.

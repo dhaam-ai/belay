@@ -142,15 +142,44 @@ With `budget.on_exceed: abort` the run is paused, not ended. Raise the ceiling i
 
 **Note**: A step cut off part-way may already have spent money that the agent had not yet reported. The run's recorded cost leaves it out, as it does for a crash.
 
-## Fanout Does Nothing
+## Fanout Does Not Follow belay.yaml on Resume
 
-**Symptom**: belay.yaml sets `fanout.enabled: true`, but the run never creates candidates: `belay timeline` shows no fanout or join step.
+**Symptom**: You changed `fanout.enabled`, `fanout.candidates` or `fanout.select` and resumed a run, and the run kept doing what it did before. belay printed a warning that the run's fanout has changed in belay.yaml since it started.
 
-**Cause**: No run reaches fanout in this version. No step in belay's graph leads to the fanout node, whatever `fanout.enabled` says, and `belay run` sets up no isolator, which fanout needs. Even the fanout node only prepares candidate workspaces; nothing runs a candidate. This is a known limitation, not a configuration mistake.
+**Cause**: Whether a run fans out, with how many candidates and how its winner is chosen, is recorded in the run's `manifest.json` when the run starts, and a resume walks the run the way it started. Changing the count mid-run would rename the candidates already claimed and re-divide money already promised to them; changing the strategy could crown a different winner than the one the interrupted attempt was choosing. A run started before your belay could run candidates has no such record, so it stays a single attempt.
 
 **Remedy**:
-- None yet. Running candidates is planned, and ADR-0019 is reserved for it
-- Leave `fanout.enabled` false. Setting it true changes nothing a run does; it only makes belay.yaml require `fanout.candidates` of at least 2
+- Start a new run for the new settings
+- `fanout.concurrency` is the exception: it is read on every resume, so lowering it and resuming backs off a rate limit or a busy machine
+
+## A Fanout Run Paused at fanout
+
+**Symptom**: The run stops with `belay paused` at `fanout`, and its note says some candidates could not be finished, naming each and why (for example `no space left on device`, or a git lock).
+
+**Cause**: Something a resume could fix stopped those candidates before they reached an end state. belay does not record a verdict about a candidate that never got the chance to run, so the fanout pauses rather than settling with fewer candidates than you asked for.
+
+**Remedy**:
+- Fix what the note names (free disk space, remove a stale `index.lock`), then `belay resume <run-id>`
+- Resuming does not repeat finished work: the candidates that finished are kept as they are, and only the unfinished ones run. `belay timeline <run-id>` shows every candidate, and `belay timeline <run-id> --candidate <id>` opens one candidate's own run
+
+## A Fanout Run Finished but My Files Did Not Change
+
+**Symptom**: An in-place run with `fanout.enabled: true` completed and named a winner, but your checkout does not contain the change.
+
+**Cause**: An in-place fanout does not merge. Each candidate worked in a directory copy of its own, under `.belay/runs/<run-id>/candidates/<candidate-id>/`, and belay has no branch to merge the winner from. Only a run that delivers on a branch (`output.mode: branch`) merges its winner.
+
+**Remedy**:
+- The run's next steps name the winner's workspace: review the change there and copy back what you want to keep
+- Use `output.mode: branch` in a git repository, and belay merges the winner onto the run's branch for you
+
+## A Fanout Run Is Refused Over review.mode
+
+**Symptom**: `belay run` refuses to start, saying the run fans out and `review.mode` is `"sonar"` or `"ai"`.
+
+**Cause**: Both name the SonarQube project after the directory they review, and every candidate's directory is called `cand-01`, `cand-02` and so on, in every run and every repository. Candidates would share SonarQube projects with every other run's candidates, and each quality gate would read results it did not produce.
+
+**Remedy**:
+- Use `review.mode: lint` for a run that fans out, or turn `fanout.enabled` off to review a run with SonarQube
 
 ## SonarQube Connection Failed
 

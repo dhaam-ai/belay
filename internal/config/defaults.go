@@ -20,6 +20,7 @@ const (
 	defaultMaxUSD             = 5.00
 	defaultMaxTokens          = 2_000_000
 	defaultCandidates         = 3
+	defaultConcurrency        = 3
 	defaultIsolator           = IsolatorAuto
 	defaultOutputMode         = OutputAuto
 	defaultArchive            = true
@@ -72,10 +73,11 @@ func Default() Config {
 			OnExceed:  OnExceedAbort,
 		},
 		Fanout: Fanout{
-			Enabled:    false,
-			Candidates: defaultCandidates,
-			Isolator:   defaultIsolator,
-			Select:     SelectFewestIssues,
+			Enabled:     false,
+			Candidates:  defaultCandidates,
+			Concurrency: defaultConcurrency,
+			Isolator:    defaultIsolator,
+			Select:      SelectFewestIssues,
 		},
 		Output: Output{
 			Mode: defaultOutputMode,

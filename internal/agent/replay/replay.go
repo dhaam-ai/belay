@@ -76,6 +76,8 @@
 // in any order. The scope is an id rather than a path precisely so the
 // property this package exists for survives: a scoped cassette recorded
 // on a contributor's laptop still replays on a stranger's CI runner.
+// internal/cli hands every fanout candidate Scoped(its id), and the run's
+// own nodes the unscoped Backend.
 //
 // A Backend nobody scoped fingerprints exactly as it did before scopes
 // existed — the empty scope is left out of the hashed encoding entirely —

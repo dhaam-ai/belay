@@ -37,9 +37,10 @@ import (
 // shape.
 //
 // The Dispatcher builds one when it is given Options.CandidateRegistry, and
-// leaves RunContext.CandidateRuns nil otherwise, which is every run belay
-// performs until a caller wires that registry: a node handed a nil one
-// refuses with ErrNoCandidateRunner. The interface stays the seam the node
+// leaves RunContext.CandidateRuns nil otherwise. internal/cli gives a run
+// that fans out the candidates' graph, and every other run none, so a node
+// handed a nil runner refuses with ErrNoCandidateRunner rather than running
+// candidates for a run that never asked for them. The interface stays the seam the node
 // is table-tested against, so the decisions can be tested with no
 // filesystem and the pool with no node.
 
@@ -879,6 +880,25 @@ func (r *candidateRunner) claimFresh(
 	man.SetCandidate(state.CandidateRun{
 		ParentRunID: parent.RunID, ID: spec.ID, Index: spec.Index, Envelope: spec.Envelope,
 	})
+	// A candidate is held to the guardrails its parent was started under.
+	// Its nodes read the policy from RunContext.Policy, which runContext
+	// fills from the manifest of the run being driven -- this one, not the
+	// parent's -- so a pin left behind here is a candidate whose policy gate
+	// finds no baseline and passes every change it makes, and a join that
+	// never has a violation to refuse. Through SetPolicy, so the capability
+	// travels with it: a belay that cannot hold a candidate to a policy must
+	// refuse to resume one rather than walk its gate unguarded.
+	//
+	// The parent's baseline is the right one. A fanout run's own nodes never
+	// change its workspace -- its work is the candidates' -- so each
+	// candidate is made from the tree the baseline surveyed. The exception
+	// is a person editing their own checkout while an in-place run waits at
+	// the approve gate, which a directory copy then carries into every
+	// candidate; that is the copy's known limit, not this pin's, and a
+	// branch run is immune because its candidates start from a commit.
+	if parent.Policy != nil {
+		man.SetPolicy(*parent.Policy)
+	}
 	if err := state.SaveManifest(layout.ManifestPath(), man); err != nil {
 		return nil, fmt.Errorf("graph: write the manifest of candidate %q: %w", spec.ID, err)
 	}

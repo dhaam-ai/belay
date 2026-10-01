@@ -28,7 +28,7 @@ graph: {give_up: 3, max_steps: 60, node_timeout: 15m, approval: true}
 test: {runner: auto, custom_cmd: ""}
 review: {mode: lint, fail_on: major}
 budget: {max_usd: 5.00, max_tokens: 2000000, on_exceed: abort}
-fanout: {enabled: false, candidates: 3, isolator: auto, select: fewest_issues}
+fanout: {enabled: false, candidates: 3, concurrency: 3, isolator: auto, select: fewest_issues}
 output: {mode: auto}
 plan: {archive: true, archive_dir: docs/plans}
 ```
@@ -365,14 +365,18 @@ What to do when budget is exceeded:
 
 Best-of-N: giving one goal several independent candidates at once, so the best can be kept.
 
-No run uses these settings yet. No step in belay's graph leads to the fanout node, so a run never reaches it, and nothing runs a candidate: the fanout node only prepares a workspace for each. Running candidates is planned, and ADR-0019 is reserved for it.
+A run with `fanout.enabled: true` takes a different route: plan → approve → fanout → join, and then promote when the run delivers its result on a branch. Each candidate is a **candidate run** with its own journal, blackboard, manifest and budget envelope, under `.belay/runs/<run-id>/candidate-runs/<candidate-id>/`, and its workspace beside it under `candidates/<candidate-id>/`. `belay timeline` shows one lane per candidate, and `belay timeline --candidate <id>` opens one candidate's own run. See [ADR-0019](adr/0019-executing-fanout-candidates-as-candidate-runs.md).
 
 ### `fanout.enabled`
 
 **Type**: Boolean  
 **Default**: `false`
 
-Registers the fanout and join nodes. No node routes to them, so this changes nothing a run does; `true` only makes the loader require a `fanout.candidates` of at least 2.
+Routes the run through the fanout and join nodes, so one goal gets `fanout.candidates` independent attempts and the best one is kept. It is decided once, when the run starts, and recorded in the run's `manifest.json`: `belay resume` finishes a run the way it started, whatever `belay.yaml` says by then, and warns when the two disagree.
+
+It requires `budget.max_usd` above zero, because the fanout divides the run's remaining ceiling into one envelope per candidate and has nothing to divide otherwise. It is also refused with `review.mode: sonar` or `review.mode: ai`: both name the SonarQube project after the directory they review, and every run's candidates are called `cand-01`, `cand-02` and so on, so their quality gates would read one another's results.
+
+A fanout can spend more than `budget.max_usd`: each candidate is capped at its own envelope, and a candidate is checked before a step rather than during one, so the overrun is bounded by one step per candidate. `--dry-run` prints the envelope and that bound.
 
 ### `fanout.candidates`
 
@@ -380,7 +384,19 @@ Registers the fanout and join nodes. No node routes to them, so this changes not
 **Default**: `3`  
 **Minimum**: `2`
 
-Number of candidates the fanout node prepares, each in its own workspace. Nothing runs them yet; once something does, cost multiplies by about this factor.
+How many candidates the run fans out to, each in its own workspace and its own candidate run. Cost multiplies by about this factor, and so does disk: N workspaces plus N candidate-run directories. Like `fanout.enabled`, it is recorded in the run's manifest when the run starts, because it decides the candidate IDs and how the budget is divided; changing it mid-run would abandon candidates already claimed and paid for.
+
+### `fanout.concurrency`
+
+**Type**: Integer  
+**Default**: `3`  
+**Minimum**: `1`
+
+How many candidates execute at the same time. `1` runs them one after another, which is what recording a cassette needs (`agent.mode: record`): concurrent candidates record in whatever order they finish. A value above `fanout.candidates` behaves as `fanout.candidates`.
+
+Unlike the three settings above, this one is **not** recorded in the run's manifest: lowering it and resuming is how you back off a rate limit or a machine that cannot take the load. The cost of that is one thing — a duration measured while three candidates share a machine is not the duration of the same candidate running alone, so under `fanout.select: "fastest"` a resume at a different concurrency can pick a different winner. `"fewest_issues"` and `"first_pass"` are unaffected.
+
+Above 1, several candidates can reach the review node at once. belay's `golangci-lint` gate passes `--allow-serial-runners` for exactly that reason: the tool takes a global file lock and, by default, exits with an error rather than waiting for it.
 
 ### `fanout.isolator`
 
@@ -401,10 +417,12 @@ Isolation strategy for candidates:
 **Default**: `"fewest_issues"`  
 **Valid values**: `"fewest_issues"`, `"first_pass"`, `"fastest"`
 
-How the join node chooses the winning candidate. Only a candidate whose tests passed can win:
+How the join node chooses the winning candidate. Only a candidate whose tests passed, whose own run completed, and that broke none of the guardrails set under `policy` can win:
 - `"fewest_issues"`: The candidate with the fewest review issues. A tie goes to the lowest candidate ID.
 - `"first_pass"`: The first candidate whose tests passed, in the order fanout recorded the candidates.
-- `"fastest"`: Meant to be the candidate that finished soonest, but no candidate's duration is recorded, so join picks the first candidate whose tests passed in recorded order, as `"first_pass"` does, and logs a warning that the choice is approximate.
+- `"fastest"`: The candidate whose own run spent the least time in its steps, which is not the same as the one that finished first: candidates running at once share the machine. A tie goes to the lowest candidate ID. Lowering `fanout.concurrency` and resuming can change which candidate this picks.
+
+Like `fanout.enabled` and `fanout.candidates`, it is recorded in the run's manifest when the run starts, so a resumed run picks its winner the way it was going to.
 
 ## `output`
 
@@ -660,6 +678,7 @@ budget:
 fanout:
   enabled: false
   candidates: 3
+  concurrency: 3
   isolator: "auto"
   select: "fewest_issues"
 

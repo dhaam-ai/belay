@@ -352,23 +352,29 @@ func TestDryRunWithApprovalOffShowsTheRouteWithoutTheGate(t *testing.T) {
 	}
 }
 
-// TestDryRunSaysFanoutDoesNothingYet: fanout.enabled is a setting belay
-// accepts and acts on in no way at all — no step of the graph leads to the
-// fanout node, so a run never reaches it. Someone who turned it on is
-// expecting N attempts and paying attention to the cost; a dry run that says
-// nothing lets them believe they are getting them.
-func TestDryRunSaysFanoutDoesNothingYet(t *testing.T) {
+// TestDryRunShowsTheFanoutRoute: a dry run is where a person checks that a
+// run is about to do what they meant, and for fanout it used to have to warn
+// them it would not -- no step of the graph led to the fanout node, so a run
+// with fanout.enabled took one attempt. Since slice 7g it does lead there, so
+// the dry run shows the route that hands the work to candidates, and the old
+// warning that nothing runs them must be gone rather than left behind to
+// contradict it.
+func TestDryRunShowsTheFanoutRoute(t *testing.T) {
 	tests := []struct {
-		name    string
-		config  string
-		wantSay bool
+		name      string
+		config    string
+		wantRoute string
 	}{
 		{
-			name:    "fanout enabled",
-			config:  "version: 1\nfanout:\n  enabled: true\n  candidates: 3\n",
-			wantSay: true,
+			name:      "fanout enabled",
+			config:    "version: 1\noutput:\n  mode: in_place\nfanout:\n  enabled: true\n  candidates: 3\n",
+			wantRoute: "plan → approve → fanout → join → done",
 		},
-		{name: "fanout left alone", config: "version: 1\n"},
+		{
+			name:      "fanout left alone",
+			config:    "version: 1\noutput:\n  mode: in_place\n",
+			wantRoute: "plan → approve → code → write → test → fix → review → done",
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -379,17 +385,11 @@ func TestDryRunSaysFanoutDoesNothingYet(t *testing.T) {
 			if err != nil {
 				t.Fatalf("belay --dry-run run: %v\n%s", err, out)
 			}
-			const phrase = "fanout.enabled is true"
-			if said := strings.Contains(out, phrase); said != tt.wantSay {
-				t.Errorf("the dry run says %q: %v, want %v; got:\n%s", phrase, said, tt.wantSay, out)
+			if !strings.Contains(out, tt.wantRoute) {
+				t.Errorf("the dry run never shows the route %q; got:\n%s", tt.wantRoute, out)
 			}
-			if !tt.wantSay {
-				return
-			}
-			for _, want := range []string{"worth knowing", "nothing runs the candidates", "ADR-0019"} {
-				if !strings.Contains(out, want) {
-					t.Errorf("the warning never says %q; got:\n%s", want, out)
-				}
+			if strings.Contains(out, "nothing runs the candidates") {
+				t.Errorf("the dry run still claims nothing runs the candidates; got:\n%s", out)
 			}
 		})
 	}

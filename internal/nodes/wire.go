@@ -50,9 +50,25 @@
 //     dropped it would resume the run as a different graph. ADR-0011 says
 //     how such a field names a capability in the manifest's requires list.
 //
-// Fanout predates the rule. Default registers fanout and join from the live
-// fanout.enabled, which is harmless only because no node routes into fanout
-// yet. Whatever first does must turn that choice into a pinned Option too.
+// # Fanout follows the rule now, too
+//
+// Fanout predated the rule. Default used to register fanout and join from the
+// live fanout.enabled, which was harmless only because no node routed into
+// fanout, and this paragraph said that whatever first did would have to turn
+// the choice into a pinned Option. WithFanout is that Option. A run fans out
+// because its manifest says so (state.Manifest.Fanout, set at creation), and
+// fanout.enabled in belay.yaml routes nothing on its own: a run created
+// without the pin is walked as it always was, whatever the file says when it
+// is resumed.
+//
+// A fanout run is two graphs. Its own walk is plan, approve, fanout and join,
+// then promote for a run that delivers on a branch; Default and Route build
+// that one. Each candidate is a run of its own, walked over the work -- code,
+// write, the policy gate, test, fix and review -- and Candidate and
+// CandidateRoute build that one. The work is deliberately not registered in
+// the parent: a parent that held a code node could be routed into it by a
+// wiring bug and take one silent attempt in the person's own workspace,
+// where a registry without one stops the run on an unknown node.
 package nodes
 
 import (
@@ -80,11 +96,23 @@ type wiring struct {
 	// route is the walk a run takes, in order, from the entry point. Every
 	// node on it is registered, by construction.
 	route []graph.Node
-	// offRoute are registered but on no route this run walks: fanout and
-	// join, which no node routes into yet, and the approve gate of a run
-	// with graph.approval off. A run cannot reach any of them, and every one
-	// of them must still be resolvable by name (see Default).
+	// offRoute are registered but on no route this run walks: the approve
+	// gate of a run with graph.approval off. A run cannot reach it, and it
+	// must still be resolvable by name (see Default).
 	offRoute []graph.Node
+
+	// fanout and branch are what WithFanout and WithBranchOutput decided,
+	// recorded for fanOut, which acts on them once every option has run.
+	// See fanOut for why it waits.
+	fanout bool
+	branch bool
+}
+
+// workNodes are the nodes that do a run's work, in the order a run walks
+// them: the nodes a fanout run hands to its candidates, and the only nodes a
+// candidate's own graph may hold.
+var workNodes = []string{
+	graph.NodeCode, graph.NodeWrite, graph.NodePolicy, graph.NodeTest, graph.NodeFix, graph.NodeReview,
 }
 
 // replace swaps the registered node of the same name for n, wherever it sits.
@@ -93,7 +121,7 @@ type wiring struct {
 // an edge and the node it leads to one decision (see Option).
 //
 // A node that is not there is not an error. The graph a run gets depends on
-// its configuration -- join is absent unless fanout is enabled -- and an
+// its pins -- the policy gate is absent from an unguarded run -- and an
 // Option describes the edges of whatever nodes the run has.
 func (w *wiring) replace(n graph.Node) {
 	for _, list := range [][]graph.Node{w.route, w.offRoute} {
@@ -127,7 +155,9 @@ type Option func(*wiring)
 // WithBranchOutput builds the graph of a run that delivers its result on a
 // git branch: the promote node is registered and put on the route after the
 // quality gate, and the two nodes that would otherwise end the run are wired
-// into it — a passing gate, and a selected fanout winner.
+// into it — a passing gate, and a selected fanout winner. The second edge is
+// recorded rather than wired here, because join exists only in a run that
+// fans out, and fanOut builds it once it knows both pins.
 //
 // It is opt-in, and it is the whole difference between the two output modes
 // as far as the graph is concerned. A run without it is exactly the run
@@ -140,8 +170,8 @@ type Option func(*wiring)
 // why an edge may not be read from configuration that can change mid-run.
 func WithBranchOutput() Option {
 	return func(w *wiring) {
+		w.branch = true
 		w.replace(review.New(review.WithOnPass(graph.NodePromote)))
-		w.replace(join.New(join.WithOnSelected(graph.NodePromote)))
 		w.after(graph.NodeReview, promote.New())
 	}
 }
@@ -176,8 +206,137 @@ func WithPolicyGate() Option {
 	}
 }
 
+// WithFanout builds the graph of a run that fans out: its walk is plan,
+// approve, fanout and join -- then promote, for a run that delivers on a
+// branch -- and the plan and the gate open onto the fanout rather than onto
+// code.
+//
+// The work itself leaves the run's own graph altogether. Each candidate is a
+// run of its own, driven over the graph Candidate builds, and the parent
+// never codes, so none of code, write, the policy gate, test, fix or review
+// is registered here. That is a choice, argued in this package's
+// documentation: a registry without them stops a run routed there by a bug,
+// where one holding them would quietly code once in the person's workspace.
+//
+// It takes no argument. What it decides is only that the run fans out; how
+// many candidates and which strategy picks the winner reach the fanout and
+// join nodes through rc.Config, which state.Manifest.PinnedConfig has
+// already overlaid with the run's pin, so the two cannot disagree.
+//
+// Whether a run gets it is decided once, when the run is created, and pinned
+// in the manifest as state.Manifest.Fanout; every later call for that run, a
+// resume included, is given the same option, and fanout.enabled in the file
+// changes nothing about a run already started.
+func WithFanout() Option {
+	return func(w *wiring) { w.fanout = true }
+}
+
+// fanOut turns a run's graph into a fanout run's: the work leaves it, fanout
+// and join join it after the gate, and the plan and the gate open onto the
+// fanout. wire calls it once every option has run.
+//
+// It waits for the other options because two of them were written before a
+// run could fan out, and both anchor on nodes this removes. WithPolicyGate
+// puts its gate after write, and WithBranchOutput puts promote after review
+// and wants join to promote the winner. Acting on WithFanout where it fell in
+// the list would make a run's graph depend on which pin was read first: a
+// policy gate added after the work had gone would land at the end of the
+// parent's walk, and a join made before the branch pin was seen would end
+// the run instead of promoting its winner. Waiting makes the order of the
+// options irrelevant, which is what the rest of this package assumes of
+// them.
+func (w *wiring) fanOut() {
+	selected := join.New()
+	if w.branch {
+		selected = join.New(join.WithOnSelected(graph.NodePromote))
+	}
+	isWork := func(n graph.Node) bool { return slices.Contains(workNodes, n.Name()) }
+	w.route = slices.DeleteFunc(w.route, isWork)
+	w.offRoute = slices.DeleteFunc(w.offRoute, isWork)
+
+	// After the gate when the run stops at it, and straight after the plan
+	// when graph.approval has taken the gate off the walk.
+	opening := graph.NodePlan
+	if slices.ContainsFunc(w.route, func(n graph.Node) bool { return n.Name() == graph.NodeApprove }) {
+		opening = graph.NodeApprove
+	}
+	w.after(opening, fanout.New())
+	w.after(graph.NodeFanout, selected)
+	w.replace(plan.New(plan.WithWorkEntry(graph.NodeFanout)))
+	w.replace(approve.New(approve.WithWorkEntry(graph.NodeFanout)))
+}
+
+// Candidate returns the registry one fanout candidate's own run is driven
+// over: code, write, test, fix and review, with the policy gate between
+// write and test when it is given WithPolicyGate.
+//
+// It is the parent's work, and nothing else a run has. No plan and no gate:
+// the parent's plan was approved before any candidate existed, and a
+// candidate starts at code (graph.Options.Entry). No fanout of its own. No
+// promote: a candidate's passing gate ends the candidate's run, and promoting
+// the winner is the parent's, after join has chosen one.
+//
+// An option that would add any of those is refused with an error rather than
+// wired, because the failure it would cause is expensive and late. A
+// candidate whose review routed to a promote node it does not have would end
+// on an unknown node after paying for all of its work, N times over.
+// WithPolicyGate is the one option a candidate takes, and it must take it
+// whenever the run it belongs to has a policy: the candidates are where a
+// fanout run's change is made, so they are where it must be judged.
+func Candidate(opts ...Option) (*graph.Registry, error) {
+	w, err := candidate(opts)
+	if err != nil {
+		return nil, err
+	}
+	r := graph.NewRegistry()
+	for _, n := range w.route {
+		if err := r.Register(n); err != nil {
+			return nil, fmt.Errorf("nodes: wire the candidate graph: %w", err)
+		}
+	}
+	return r, nil
+}
+
+// CandidateRoute returns the names of the nodes one candidate's run walks, in
+// order, from code -- the candidate's half of what a dry run shows a person,
+// as Route is the parent's half. It is nil for options Candidate refuses,
+// since there is no graph to show.
+//
+// Give it the options Candidate was given.
+func CandidateRoute(opts ...Option) []string {
+	w, err := candidate(opts)
+	if err != nil {
+		return nil
+	}
+	names := make([]string, len(w.route))
+	for i, n := range w.route {
+		names[i] = n.Name()
+	}
+	return names
+}
+
+// candidate builds the graph Candidate and CandidateRoute both read, and
+// refuses any option that leaves something in it a candidate cannot run.
+func candidate(opts []Option) (*wiring, error) {
+	w := &wiring{route: []graph.Node{code.New(), write.New(), test.New(), fix.New(), review.New()}}
+	for _, opt := range opts {
+		opt(w)
+	}
+	if w.fanout {
+		return nil, fmt.Errorf("nodes: a candidate run cannot fan out: candidates are the fanout")
+	}
+	for _, n := range slices.Concat(w.route, w.offRoute) {
+		if !slices.Contains(workNodes, n.Name()) {
+			return nil, fmt.Errorf("nodes: a candidate run cannot hold the %s node: "+
+				"it does the run's work, and %s belongs to the run that fanned out", n.Name(), n.Name())
+		}
+	}
+	return w, nil
+}
+
 // wire builds the graph for cfg, then applies opts in the order given, each
-// to the graph the ones before it built.
+// to the graph the ones before it built, and then -- for a run given
+// WithFanout -- turns it into a fanout run's graph (see fanOut).
 //
 // The write node is deliberately NOT pinned to a workspace here.
 // write.WithWorkspaceRoot takes precedence over RunContext.Workspace, so a
@@ -196,7 +355,7 @@ func wire(cfg config.Config, opts []Option) *wiring {
 		fix.New(),
 		review.New(),
 	}}
-	// graph.approval false means the plan node routes straight to code, so
+	// graph.approval false means the plan node routes straight to the work, so
 	// the gate is on no walk this run takes. It is still registered, and must
 	// be: a run started with the gate can be resumed by a process that reads
 	// a belay.yaml where the flag has since been turned off, and it re-runs
@@ -210,11 +369,14 @@ func wire(cfg config.Config, opts []Option) *wiring {
 		})
 		w.offRoute = append(w.offRoute, approve.New())
 	}
-	if cfg.Fanout.Enabled {
-		w.offRoute = append(w.offRoute, fanout.New(), join.New())
-	}
+	// fanout.enabled is deliberately not read here, although it used to be.
+	// Whether a run fans out is its manifest's pin, which reaches this as
+	// WithFanout; see the package documentation.
 	for _, opt := range opts {
 		opt(w)
+	}
+	if w.fanout {
+		w.fanOut()
 	}
 	return w
 }
@@ -228,10 +390,13 @@ func wire(cfg config.Config, opts []Option) *wiring {
 // repair's paths are verified like any other change. WithBranchOutput adds
 // promote after review, for a run that commits its change to a branch;
 // WithPolicyGate adds the policy gate between write and test, for a run whose
-// change is held to guardrails. When fanout is enabled the registry also carries
-// fanout and join, off the route: no node routes into fanout yet, so no run
-// reaches either, and nothing runs a candidate (ADR-0019 is reserved for
-// that). Each Option adds to or changes that graph.
+// change is held to guardrails. WithFanout makes it a fanout run's graph,
+//
+//	plan → approve → fanout → join → END
+//
+// with the work handed to candidate runs (see Candidate, and ADR-0019), and
+// promote after join for a run that also delivers on a branch. Each Option
+// adds to or changes that graph.
 //
 // The approve gate is registered whatever graph.approval says, although a run
 // with it off never reaches the gate (see Route). The flag is read from
@@ -257,9 +422,10 @@ func Default(cfg config.Config, opts ...Option) (*graph.Registry, error) {
 // It is the order a person reads, not a trace. The graph has two cycles,
 // test → fix → test and review → fix → test, and Route repeats neither: it
 // lists fix once, after test, and a run whose tests and quality gate pass
-// never runs it. Nodes registered but not reachable are not on it: fanout and
-// join, which nothing routes into yet, and the approve gate when
-// graph.approval is false, since the plan node then routes straight to code.
+// never runs it. A node registered but not reachable is not on it: the
+// approve gate when graph.approval is false, since the plan node then routes
+// straight to where the work begins. Nor is a candidate's work, for a run
+// that fans out: that is CandidateRoute's, because the parent never walks it.
 // A dry run prints this, so it has to be the walk the run really takes rather
 // than the walk the graph could take.
 //
