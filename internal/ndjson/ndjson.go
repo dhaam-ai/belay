@@ -1,7 +1,8 @@
 // Package ndjson holds the byte-level discipline behind belay's append-only
 // newline-delimited JSON files: write one line, fsync, never rewrite; read
 // back tolerating exactly the one damaged shape an interrupted append can
-// produce, and heal it before appending again.
+// produce, and heal it before appending again; and create a file whole or
+// not at all, never over one that is already there (CreateNew).
 //
 // # Why it is its own package
 //
@@ -23,7 +24,8 @@
 //   - It does not arbitrate between processes. There is no flock and no
 //     lease: a caller whose file is shared by two processes brings its own.
 //     internal/journal assumes one dispatcher owns a run; internal/queue
-//     locks.
+//     locks. CreateNew's one promise across processes, that at most one of
+//     them creates a given path, comes from link(2) and not from a lock.
 //   - It does not know any record type, assign any sequence number, or parse
 //     anything. Scan hands out raw lines and reports where a caller's own
 //     decoder said no.
