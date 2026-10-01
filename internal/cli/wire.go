@@ -53,15 +53,15 @@ type resolveRequest struct {
 	configPath string
 	cassette   string
 	logger     *slog.Logger
-	// override, when set, changes the configuration after it is loaded and
-	// before anything is resolved from it, and the result is validated
-	// again. It is for a caller that decides something about a run that no
-	// file says, as the queue decides that its goals run in place.
-	override func(*config.Config)
 	// ctx bounds the commands resolving runs, which is git and nothing
 	// else. It is optional so that a caller with no context of its own —
 	// every test that only wants a plan — still gets one.
 	context context.Context
+	// override changes the loaded configuration before anything is resolved
+	// from it, for a command whose runs differ from belay.yaml in ways it
+	// decides itself: `belay fork` always edits its copy in place, and sends
+	// its node the model --model names. Nil changes nothing.
+	override func(*config.Config)
 }
 
 // ctx returns the request's context, or a background one.
@@ -278,6 +278,9 @@ func resolve(req resolveRequest) (*runPlan, error) {
 	if err != nil {
 		return nil, fmt.Errorf("that configuration cannot be used:\n  %w", err)
 	}
+	// Before anything is resolved from it, and held to belay.yaml's own
+	// rules: a model routed to a node that asks for none is refused here
+	// exactly as it would be in the file.
 	if req.override != nil {
 		req.override(&cfg)
 		if err := cfg.Validate(); err != nil {
