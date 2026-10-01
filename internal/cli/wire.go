@@ -148,7 +148,7 @@ type runPlan struct {
 	// run that does not fan out; resolveRegistry sets them with the rest.
 	candidates     *graph.Registry
 	candidateRoute []string
-	redact func(string) string
+	redact         func(string) string
 
 	// recorder is the record-mode wrapper whose cassette must be saved when
 	// the run ends. It is nil in every other mode.

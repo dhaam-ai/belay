@@ -363,7 +363,7 @@ func planContext(t *testing.T, cfg config.Config) *graph.RunContext {
 		Workspace: layout.WorkspaceDir(), RunID: layout.RunID(),
 		NodeName: graph.NodePlan, Step: 1, Attempt: 1,
 		Logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
-		Agent: &belaytest.FakeAgent{Responses: []belay.AgentResponse{{Text: "# Plan\n\nDo it.\n"}}},
+		Agent:  &belaytest.FakeAgent{Responses: []belay.AgentResponse{{Text: "# Plan\n\nDo it.\n"}}},
 	}
 }
 
