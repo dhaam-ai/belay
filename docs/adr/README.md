@@ -24,7 +24,7 @@ This directory contains architecture decisions for belay, recorded to capture th
 | [0016](0016-archiving-the-approved-plan-into-the-repository.md) | A finished run moves its plan into the repository | Accepted | A completed run's plan moves from `.belay/runs/<id>/artifacts/` to `docs/plans/<run-id>-<slug>.md`: into the commit for a branch run (written by `promote` before it commits), into the workspace for a run in place. Place, record, then remove, so a crash anywhere converges and never loses the plan. Cost: belay writes a file into the repository nobody named, and two settings change every config digest. |
 | 0017 | Forking a run to re-run one node, and the goal queue | Reserved (slice 3) | |
 | 0018 | SWE-bench corpus and the bare-agent control arm | Reserved (slice 6) | |
-| 0019 | Executing fanout candidates | Reserved (slice 7) | |
+| [0019](0019-executing-fanout-candidates-as-candidate-runs.md) | Fanout candidates execute as concurrent candidate runs | Accepted | Each candidate is a run of its own under `candidate-runs/<id>`, with its own journal, blackboard, manifest and budget envelope, driven by a bounded pool the dispatcher builds; the fanout node only decides. Whether a run fans out is pinned at creation. The budget is divided once, before any candidate runs. golangci-lint is told to wait for its machine-wide lock; SonarQube and AI review are refused with fanout. Cost: overshoot of up to one step per candidate, N workspaces and N run directories with `belay cleanup` still owed, and an in-place winner is copied back by hand. |
 
 Reserved numbers were assigned per slice up front, so parallel work never collides on a number. A reserved row gains a link, a title and a status when its ADR lands.
 
