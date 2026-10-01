@@ -10,6 +10,35 @@ that only `pkg/belay` carries a compatibility promise. Everything under
 
 ### Added
 
+- **Best-of-N works: a run with `fanout.enabled` runs its candidates and
+  keeps the best.** Until now `fanout.enabled` changed nothing a run did —
+  nothing in the graph led to the fanout step, and that step only prepared
+  workspaces. A run that fans out now goes plan → approve → fanout → join:
+  once the plan is approved, each of `fanout.candidates` candidates codes,
+  tests, repairs and is reviewed in a workspace of its own, and `join` keeps
+  the one `fanout.select` prefers among those whose tests passed. A branch
+  run merges the winner onto its branch; an in-place run leaves it in its
+  workspace, and the run's last lines name the directory to copy it back
+  from. Each candidate is a run of its own, with its own journal, plan,
+  blackboard and spend, under `.belay/runs/<run-id>/candidate-runs/`, so a
+  crash or a Ctrl-C mid-fanout resumes like any run: finished candidates are
+  kept, and only the interrupted ones run again. The new
+  `fanout.concurrency` (default 3) says how many candidates run at once; it
+  is read again on every resume, so lowering it backs off a rate limit.
+  `budget.max_usd` is divided between the candidates before any of them
+  starts, and `belay run --dry-run` shows each one's share, the route each
+  candidate walks, how the winner is chosen, and how far past the ceiling a
+  fanout can end: up to one step per candidate, because a candidate is
+  checked before a step and not during one. `fanout.enabled`,
+  `fanout.candidates` and `fanout.select` are recorded when a run starts and
+  a resume keeps them, warning if `belay.yaml` has changed since. Several
+  candidates running at once are told apart on screen by a `[cand-02]`
+  prefix. `fanout.enabled` now requires `budget.max_usd` above zero, since
+  there is otherwise no ceiling to divide, and is refused with
+  `review.mode: sonar` or `ai`, whose SonarQube projects would be shared by
+  every run's candidates; both configurations used to load and do nothing.
+  A fanout leaves N workspaces and N candidate-run directories behind, and
+  belay has no command to remove them yet. ADR-0019 records the decision.
 - **Guardrails a run's change must obey, whatever its tests say.** The new
   `policy` section in `belay.yaml` declares paths a change may not touch
   (`forbidden_paths`), ceilings on its size (`max_changed_files`,
@@ -229,6 +258,18 @@ that only `pkg/belay` carries a compatibility promise. Everything under
 
 ### Fixed
 
+- **The golangci-lint gate waits for golangci-lint instead of failing on
+  it.** golangci-lint allows one instance per machine at a time, and one
+  that finds another running waits about five seconds and then gives up with
+  "parallel golangci-lint is running", which belay reported as a quality
+  gate that could not run — failing the step for something unrelated to the
+  code. Anything else running golangci-lint for more than five seconds, such
+  as an editor's integration or another run, could cause it, and best-of-N
+  would have caused it routinely: of five gates started together, one failed
+  in each of three tries. belay now passes
+  `--allow-serial-runners`, so a gate waits its turn. It does not pass
+  `--allow-parallel-runners`, which would let concurrent instances hand each
+  other findings through their shared cache.
 - **A repair's file list is checked against the disk, not taken on trust.**
   The fix step routed straight back to the tests, so a repair was the one
   change in a run that nothing verified: no claimed path was proven to be a

@@ -345,7 +345,7 @@ What to do when budget is exceeded:
 
 Best-of-N: giving one goal several independent candidates at once, so the best can be kept.
 
-A run with `fanout.enabled: true` takes a different route: plan → approve → fanout → join, and then promote when the run delivers its result on a branch. Each candidate is a **candidate run** with its own journal, blackboard, manifest and budget envelope, under `.belay/runs/<run-id>/candidate-runs/<candidate-id>/`, and its workspace beside it under `candidates/<candidate-id>/`. `belay timeline` shows one lane per candidate, and `belay timeline --candidate <id>` opens one candidate's own run. See [ADR-0019](adr/0019-fanout-candidates-as-candidate-runs.md).
+A run with `fanout.enabled: true` takes a different route: plan → approve → fanout → join, and then promote when the run delivers its result on a branch. Each candidate is a **candidate run** with its own journal, blackboard, manifest and budget envelope, under `.belay/runs/<run-id>/candidate-runs/<candidate-id>/`, and its workspace beside it under `candidates/<candidate-id>/`. `belay timeline` shows one lane per candidate, and `belay timeline --candidate <id>` opens one candidate's own run. See [ADR-0019](adr/0019-executing-fanout-candidates-as-candidate-runs.md).
 
 ### `fanout.enabled`
 
@@ -397,10 +397,12 @@ Isolation strategy for candidates:
 **Default**: `"fewest_issues"`  
 **Valid values**: `"fewest_issues"`, `"first_pass"`, `"fastest"`
 
-How the join node chooses the winning candidate. Only a candidate whose tests passed can win:
+How the join node chooses the winning candidate. Only a candidate whose tests passed, whose own run completed, and that broke none of the guardrails set under `policy` can win:
 - `"fewest_issues"`: The candidate with the fewest review issues. A tie goes to the lowest candidate ID.
 - `"first_pass"`: The first candidate whose tests passed, in the order fanout recorded the candidates.
-- `"fastest"`: Meant to be the candidate that finished soonest, but no candidate's duration is recorded, so join picks the first candidate whose tests passed in recorded order, as `"first_pass"` does, and logs a warning that the choice is approximate.
+- `"fastest"`: The candidate whose own run spent the least time in its steps, which is not the same as the one that finished first: candidates running at once share the machine. A tie goes to the lowest candidate ID. Lowering `fanout.concurrency` and resuming can change which candidate this picks.
+
+Like `fanout.enabled` and `fanout.candidates`, it is recorded in the run's manifest when the run starts, so a resumed run picks its winner the way it was going to.
 
 ## `output`
 

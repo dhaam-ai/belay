@@ -295,10 +295,11 @@ type RunContext struct {
 	// have — goroutines, child stores, durable writes — without holding
 	// any of it: see CandidateRunner.
 	//
-	// It is nil for every run that does not fan out, and for every run
-	// belay performs today, because nothing builds a runner yet. A node
-	// that needs it and finds it nil refuses with ErrNoCandidateRunner,
-	// like any other missing adapter.
+	// It is nil for every run that does not fan out: the dispatcher builds
+	// one only when it is given Options.CandidateRegistry, which the CLI
+	// passes for a run whose manifest pins a fanout. A node that needs it
+	// and finds it nil refuses with ErrNoCandidateRunner, like any other
+	// missing adapter.
 	CandidateRuns CandidateRunner
 }
 

@@ -37,9 +37,10 @@ import (
 // shape.
 //
 // The Dispatcher builds one when it is given Options.CandidateRegistry, and
-// leaves RunContext.CandidateRuns nil otherwise, which is every run belay
-// performs until a caller wires that registry: a node handed a nil one
-// refuses with ErrNoCandidateRunner. The interface stays the seam the node
+// leaves RunContext.CandidateRuns nil otherwise. internal/cli gives a run
+// that fans out the candidates' graph, and every other run none, so a node
+// handed a nil runner refuses with ErrNoCandidateRunner rather than running
+// candidates for a run that never asked for them. The interface stays the seam the node
 // is table-tested against, so the decisions can be tested with no
 // filesystem and the pool with no node.
 

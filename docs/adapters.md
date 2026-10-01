@@ -42,7 +42,7 @@ type AgentBackend interface {
 - `Turns`: number of agent turns taken (0 if the backend does not report it)
 - `Raw`: backend's unparsed output (e.g., raw JSON; never read by belay)
 
-**Concurrency**: Today the dispatcher runs one node at a time, no node calls an AgentBackend from more than one goroutine, and nothing runs fanout candidates, so no AgentBackend is called concurrently. Running candidates is planned (ADR-0019, reserved), and they may run in parallel, so an adapter that cannot safely serve concurrent Invoke calls must still serialize internally and document the constraint.
+**Concurrency**: A run that fans out calls its AgentBackend concurrently: up to `fanout.concurrency` candidate runs, each on a goroutine of its own, invoke it at once (ADR-0019). An adapter that cannot safely serve concurrent `Invoke` calls must serialize internally, or document that it cannot be used with fanout, as `pkg/belay` requires. The same holds for the TestRunner and the Linter, which several candidates' test and review nodes call at once, each over its own workspace.
 
 **Error Handling** (see `pkg/belay/errors.go`):
 - `ErrBudgetExceeded`: The backend tracked its own budget and refuses to proceed (rare; belay usually tracks budget itself)
@@ -160,7 +160,7 @@ type Isolator interface {
 - `Dir`: absolute path the agent, test runner, linter should treat as the working directory
 - `Ephemeral`: whether Destroy actually removes Dir (true) or leaves it alone (false, for debugging modes with no isolation)
 
-**Current Implementation**: `internal/isolate/dircopy` copies the source tree into one directory per candidate, leaving out `.git`, `node_modules`, `vendor` and similar directories (`dircopy.DefaultSkip`). Nothing in belay constructs it yet, because no run reaches the fanout node (see *Maturity & Limitations* in the README). Future implementations could use git worktrees or containers.
+**Current Implementations**: `internal/isolate/worktree` makes each candidate a git worktree on a branch of its own, for a run that delivers on a branch (ADR-0012); `internal/isolate/dircopy` copies the source tree into one directory per candidate otherwise, leaving out `.git`, `node_modules`, `vendor` and similar directories (`dircopy.DefaultSkip`). The CLI builds one per run, rooted at that run's `candidates/` directory, as `fanout.isolator` says. Future implementations could use containers.
 
 ## Custom Adapter Implementation
 
@@ -332,7 +332,7 @@ Adapters are given to the dispatcher when it is created, in `graph.Options`, and
 - `Runner belay.TestRunner`: used by the test node
 - `Linter belay.Linter`: used by the review node when review.mode is "lint"
 - `Reviewer belay.Reviewer`: used by the review node when review.mode is "sonar" (the SonarQube scanner) or "ai" (the reviewer that asks SonarQube through its MCP server, which `belay run` does not wire in yet)
-- `Isolator belay.Isolator`: used only by the fanout node, which no run reaches; the CLI sets none
+- `Isolator belay.Isolator`: used only by the candidate runner a fanout run's dispatcher builds, to make each candidate's workspace; the CLI sets one per run
 - `VCS vcs.Repository` (`internal/vcs`, deliberately not exported): used only by the promote node, in a run whose output is a branch; the CLI sets none yet, because nothing selects branch output
 
 The CLI builds all of this in `internal/cli/wire.go` (`resolve`, then `runPlan.options`). In outline, for a Go repository under review.mode "lint":
@@ -354,8 +354,9 @@ d, err := graph.NewDispatcher(graph.Options{
 	Agent:    claude.New(logger), // wrapped to record under agent.mode record; replay uses a cassette instead
 	Runner:   testRunner,
 	Linter:   linter.NewGolangCI(linter.WithRunner(execer), linter.WithLogger(logger)),
-	// Reviewer stays nil under review.mode "lint", and Isolator stays nil:
-	// only the fanout node uses one, and no run reaches it.
+	// Reviewer stays nil under review.mode "lint". A run that fans out
+	// also sets Isolator, CandidateRegistry, CandidateAgent and
+	// Concurrency; see internal/cli's runPlan.options.
 })
 if err != nil {
 	return err
