@@ -1,0 +1,16 @@
+[
+  {
+    "instance_id": "example__widget-9999",
+    "repo": "example/widget",
+    "base_commit": "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef",
+    "environment_setup_commit": "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef",
+    "problem_statement": "A refactor with no behavioural change and therefore no failing test.",
+    "patch": "diff --git a/widget/core.py b/widget/core.py\n",
+    "test_patch": "",
+    "hints_text": "",
+    "created_at": "2026-03-01T00:00:00Z",
+    "version": "2.1",
+    "FAIL_TO_PASS": [],
+    "PASS_TO_PASS": ["tests/test_core.py::test_resize_zero"]
+  }
+]
