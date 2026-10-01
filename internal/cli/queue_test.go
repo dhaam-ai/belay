@@ -17,6 +17,7 @@ import (
 	"github.com/dhaam-ai/belay/internal/nodes/approve"
 	"github.com/dhaam-ai/belay/internal/queue"
 	"github.com/dhaam-ai/belay/internal/state"
+	"github.com/dhaam-ai/belay/pkg/belay"
 )
 
 // TestCreateRunRefusesARunThatAlreadyExists pins the guard the queue needs
@@ -647,5 +648,120 @@ func TestTheReportShowsTheLastStartsResults(t *testing.T) {
 	}
 	if !strings.Contains(status, "add tests for the parser") {
 		t.Errorf("the status's list lost goal 1:\n%s", status)
+	}
+}
+
+// TestAGoalStoppedAtALimitIsPausedNotParked: the budget ceiling stops a run
+// before the step that would cross it, and when that step is the approve gate
+// the run is paused at approve without the gate ever having asked anything.
+// That goal is not waiting for an approval: it is stopped at one of belay's
+// limits, which only a person can raise, so the queue settles it as paused,
+// says which limit and how to carry on, refuses to approve it, and never runs
+// it again by itself.
+func TestAGoalStoppedAtALimitIsPausedNotParked(t *testing.T) {
+	ws := goWorkspace(t)
+	writeConfig(t, ws, "version: 1\nbudget:\n  max_usd: 0.01\n")
+	queueAdd(t, ws, "add tests for the parser")
+	expensive := func() *graph.Registry {
+		r := graph.NewRegistry()
+		r.MustRegister(planWriter{body: "# Plan\n\nwrite a test\n", usage: belay.Usage{USD: 0.05}}, approve.New())
+		return r
+	}
+
+	if _, err := startQueue(t.Context(), t, ws, expensive); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	stopped := goal(t, ws, 1)
+	if stopped.State != queue.StatePaused || !strings.Contains(stopped.Note, "budget") {
+		t.Fatalf("goal 1 = %+v, want it paused at the budget ceiling, saying so", stopped)
+	}
+	man, err := state.LoadManifest(runLayout(t, stopped).ManifestPath())
+	if err != nil || man.Status != state.RunStatusPaused || man.CurrentNode != graph.NodeApprove {
+		t.Fatalf("goal 1's run = %v at %q (%v), want this test's premise: paused at approve", man.Status, man.CurrentNode, err)
+	}
+
+	status, _, err := runCLI(t, "queue", "status", "--workspace", ws)
+	if err != nil {
+		t.Fatalf("belay queue status: %v", err)
+	}
+	for _, phrase := range []string{
+		"paused at a limit", "stopped at one of belay's limits",
+		"belay --workspace " + stopped.Dir + " resume " + stopped.RunID,
+	} {
+		if !strings.Contains(status, phrase) {
+			t.Errorf("belay queue status never says %q:\n%s", phrase, status)
+		}
+	}
+	if strings.Contains(status, "belay queue approve 1") {
+		t.Errorf("belay queue status offers to approve a goal no gate asked about:\n%s", status)
+	}
+	if _, _, err := runCLI(t, "queue", "approve", "--workspace", ws, "1"); err == nil {
+		t.Error("belay queue approve approved a goal that was stopped at a limit")
+	}
+
+	before := readFile(t, runLayout(t, stopped).JournalPath())
+	out, err := startQueue(t.Context(), t, ws, expensive)
+	if err != nil {
+		t.Fatalf("the next start: %v", err)
+	}
+	if got := readFile(t, runLayout(t, stopped).JournalPath()); got != before {
+		t.Errorf("the next start ran goal 1 again; the queue never retries a goal stopped at a limit:\n%s", out)
+	}
+}
+
+// TestCtrlCAtTheGateIsNotAnApproval: a Ctrl-C while the approve gate runs
+// pauses the run at the gate too, but nobody has been shown the plan. The
+// goal is still in hand, not parked, so it cannot be approved yet; the next
+// start runs the gate again, which asks, and only then is the goal parked.
+// Nothing about it ever reaches the code.
+func TestCtrlCAtTheGateIsNotAnApproval(t *testing.T) {
+	ws := goWorkspace(t)
+	queueAdd(t, ws, "add tests for the parser")
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	atTheGate := func() *graph.Registry {
+		r := graph.NewRegistry()
+		r.MustRegister(planWriter{body: "# Plan\n\nwrite a test\n"}, pressesCtrlC{name: graph.NodeApprove, cancel: cancel})
+		return r
+	}
+	if _, err := startQueue(ctx, t, ws, atTheGate); err == nil {
+		t.Fatal("the start was interrupted and reported no interruption")
+	}
+	if got := goal(t, ws, 1); got.State != queue.StateClaimed {
+		t.Fatalf("goal 1 is %s after Ctrl-C at the gate, want it still in hand", got.State)
+	}
+	if _, _, err := runCLI(t, "queue", "approve", "--workspace", ws, "1"); err == nil {
+		t.Error("belay queue approve approved a plan nobody had been asked about")
+	}
+
+	var reached []string
+	if _, err := startQueue(t.Context(), t, ws, fakeGoals(reaches{goals: &reached})); err != nil {
+		t.Fatalf("the next start: %v", err)
+	}
+	if got := goal(t, ws, 1); got.State != queue.StateWaiting {
+		t.Errorf("goal 1 is %s, want it parked once the gate has asked", got.State)
+	}
+	if len(reached) != 0 {
+		t.Errorf("goals that reached code = %v, want none", reached)
+	}
+}
+
+// TestQueueRmRefusesAGoalThatHasStarted: once a goal has a run, taking it out
+// of the queue would leave the run belonging to nothing.
+func TestQueueRmRefusesAGoalThatHasStarted(t *testing.T) {
+	ws := goWorkspace(t)
+	queueAdd(t, ws, "add tests for the parser")
+	var reached []string
+	if _, err := startQueue(t.Context(), t, ws, fakeGoals(reaches{goals: &reached})); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	parked := goal(t, ws, 1)
+
+	_, _, err := runCLI(t, "queue", "rm", "--workspace", ws, "1")
+	if err == nil || !strings.Contains(err.Error(), "has started") || !strings.Contains(err.Error(), parked.RunID) {
+		t.Errorf("belay queue rm of a parked goal = %v, want a refusal saying it has started, naming its run", err)
+	}
+	if got := goal(t, ws, 1); got.State != queue.StateWaiting {
+		t.Errorf("goal 1 is %s after the refused rm, want it still waiting", got.State)
 	}
 }
