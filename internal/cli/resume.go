@@ -167,7 +167,54 @@ func (p *runPlan) resumePreflight(ctx context.Context, store *state.Store) error
 	}
 	p.bindOutput(ctx, manifest)
 	p.bindPolicy(manifest)
+	p.bindFanout(manifest)
 	return nil
+}
+
+// bindFanout makes this plan continue the run with the fanout that run
+// started with, from its manifest and never from belay.yaml as it is now.
+//
+// Every direction of drift is wrong in its own way. A fanout run resumed with
+// fanout turned off would abandon candidates it has already paid for, with
+// their workspaces left for nothing to collect. A single run resumed with it
+// turned on would fan out a plan approved for one attempt, at a moment the
+// ceiling was never divided for. And a fanout reshaped mid-run changes what
+// was claimed under it: a new candidate count renames the candidates and
+// re-splits the envelopes, and a new strategy can crown a different winner
+// than the attempt that crashed reported. So the pin wins, and the registry
+// and the route are rebuilt from it.
+//
+// The nodes are protected separately: state.Manifest.PinnedConfig overlays
+// the same pin on the configuration fanout and join read. This is the half
+// that decides which nodes there are.
+//
+// Drift is a warning, not a refusal, as it is for the output and the policy:
+// the run is fine, it is finishing the way it started, and somebody who
+// changed belay.yaml and then resumed is entitled to know their change is not
+// what this run is doing. fanout.concurrency is not part of the pin and is
+// never warned about; it is read live on purpose.
+func (p *runPlan) bindFanout(manifest state.Manifest) {
+	pinned, live := manifest.Fanout, p.fanout
+	if pinned == nil && live == nil {
+		return
+	}
+	p.fanout = pinned
+	switch {
+	case pinned == nil:
+		p.warn("belay.yaml now enables fanout, and this run was started without it. belay finishes a run the way " +
+			"it started, so this run makes one attempt at its goal; fanout applies to the next run you start.")
+	case live == nil:
+		p.warn("belay.yaml no longer enables fanout, and this run was started with it. belay finishes a run the way "+
+			"it started, so this run keeps its %d candidates; the change applies to the next run you start.",
+			pinned.Candidates)
+	case *pinned != *live:
+		p.warn("this run's fanout has changed in belay.yaml since it started. belay finishes a run the way it "+
+			"started, so this run keeps %d candidates chosen by %q, as recorded in its manifest; the new settings "+
+			"apply to the next run you start.", pinned.Candidates, pinned.Select)
+	}
+	// The registry and the route follow the pin, so rebuilding one without
+	// the other shows a person a graph the dispatcher is not walking.
+	p.resolveRegistry()
 }
 
 // bindPolicy makes this plan hold the resumed run to the guardrails that run

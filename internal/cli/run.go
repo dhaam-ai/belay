@@ -225,6 +225,14 @@ func createRun(ctx context.Context, plan *runPlan, spec runSpec) (*state.Store, 
 		plan.unwindWorkspace(ctx, manifest.Output)
 		return nil, err
 	}
+	// The fanout's shape lands in the manifest's one write too, through
+	// SetFanout, so the field and the capability an older belay would have
+	// to refuse are one decision (ADR-0011): a belay that dropped the pin
+	// would resume this run as a single attempt and spend the ceiling again.
+	// From here on the pin, not belay.yaml, decides how this run is walked.
+	if plan.fanout != nil {
+		manifest.SetFanout(*plan.fanout)
+	}
 	if err := state.SaveManifest(layout.ManifestPath(), manifest); err != nil {
 		plan.unwindWorkspace(ctx, manifest.Output)
 		return nil, fmt.Errorf("cannot write %s: %w", layout.ManifestPath(), err)
