@@ -129,6 +129,38 @@ func (s *Store) settle(id int, state State, note string) (Entry, error) {
 	return s.change(Record{Event: EventSettled, ID: id, State: state, Note: note}, "settle", nil)
 }
 
+// workerStarted records that a worker, process pid, began working through
+// the queue.
+func (s *Store) workerStarted(pid int) error {
+	_, err := s.append(func(Queue) (Record, error) {
+		return Record{Event: EventWorkerStarted, PID: pid}, nil
+	})
+	return err
+}
+
+// workerStopped records that the worker stopped, for stop, with note saying
+// more. A note is cut to a length a person reads, as a run's journal notes
+// are: it is usually an error, and an error can quote a great deal.
+func (s *Store) workerStopped(stop Stop, note string) error {
+	_, err := s.append(func(Queue) (Record, error) {
+		return Record{Event: EventWorkerStopped, Stop: stop, Note: clip(note)}, nil
+	})
+	return err
+}
+
+// maxNoteRunes bounds a note the queue writes, as internal/graph bounds the
+// notes it writes into a run's journal.
+const maxNoteRunes = 500
+
+// clip cuts s to maxNoteRunes runes, marking the cut.
+func clip(s string) string {
+	runes := []rune(s)
+	if len(runes) <= maxNoteRunes {
+		return s
+	}
+	return string(runes[:maxNoteRunes-1]) + "…"
+}
+
 // change appends rec, a move of one goal, refusing it with a *StateError
 // when the goal cannot make it from where it stands, and with whatever check
 // returns. Both are decided under the log lock, from the log as it is then,
