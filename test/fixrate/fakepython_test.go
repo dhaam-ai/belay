@@ -17,9 +17,24 @@ import (
 
 // fakePythonEnv switches this test binary into fakePython. A test that needs
 // the official harness hands the binary itself to Harness.Python, with this
-// variable in Harness.Env: the harness's real exec path runs, and nothing
+// variable in Python.Env: the harness's real exec path runs, and nothing
 // needs Docker, Python or swebench.
 const fakePythonEnv = "FIXRATE_FAKE_PYTHON"
+
+// fakeLogDirEnv overrides the directory the fake harness writes its
+// evaluation logs under, and names when asked. Unset, it is the swebench
+// 5.0.2 release's RUN_EVALUATION_LOG_DIR, "logs/run_evaluation"; upstream's
+// main branch has since moved it to "logs/evaluation" without changing the
+// version number, which is why Evaluate asks rather than assumes.
+const fakeLogDirEnv = "FIXRATE_FAKE_LOG_DIR"
+
+// fakeLogDir is where the fake harness writes and says it writes.
+func fakeLogDir() string {
+	if dir := os.Getenv(fakeLogDirEnv); dir != "" {
+		return dir
+	}
+	return "logs/run_evaluation"
+}
 
 // TestMain lets this test binary stand in for the Python interpreter the
 // official harness runs under. See fakePython.
@@ -30,14 +45,14 @@ func TestMain(m *testing.M) {
 	os.Exit(m.Run())
 }
 
-// Markers a test writes into a prediction's patch to choose what the fake
-// harness does with it. They are added lines, as an agent's edit would be.
+// Markers anywhere in a prediction's patch choose what the fake harness does
+// with it -- in an added line, as an agent's edit would put them.
 const (
-	markFixed      = "+FIXED"       // every expected test passes
-	markDisagree   = "+DISAGREE"    // the report says resolved; the test log says a FAIL_TO_PASS test failed
-	markUnapplied  = "+UNAPPLIABLE" // the patch does not apply, so no report is written
-	markCrash      = "+CRASH"       // the harness process itself fails
-	markNoStatuses = "+NO-STATUSES" // the status-map helper prints something that is not its answer
+	markFixed      = "FIXED"       // every expected test passes
+	markDisagree   = "DISAGREE"    // the report says resolved; the test log says a FAIL_TO_PASS test failed
+	markUnapplied  = "UNAPPLIABLE" // the patch does not apply, so no report is written
+	markCrash      = "CRASH"       // the harness process itself fails
+	markNoStatuses = "NO-STATUSES" // the status-map helper prints something that is not its answer
 )
 
 // fakePython imitates exactly the three ways this package runs Python:
@@ -55,6 +70,9 @@ func fakePython(args []string, stdout, stderr io.Writer) int {
 		return fakeStatusMap(args[2:], stdout, stderr)
 	case len(args) >= 2 && args[0] == "-c" && strings.Contains(args[1], "os.replace(partial, target)"):
 		return fakeConvert(args[2:], stderr)
+	case len(args) >= 2 && args[0] == "-c" && strings.Contains(args[1], "RUN_EVALUATION_LOG_DIR"):
+		_, err := fmt.Fprintln(stdout, fakeLogDir())
+		return exitFor(err, stderr)
 	case len(args) >= 2 && args[0] == "-c" && strings.Contains(args[1], "__version__"):
 		_, err := fmt.Fprintln(stdout, SWEBenchHarnessVersion)
 		return exitFor(err, stderr)
@@ -125,7 +143,7 @@ func fakeRunEvaluation(args []string, stdout, stderr io.Writer) int {
 
 // fakeEvaluateOne writes one instance's evaluation logs.
 func fakeEvaluateOne(runID string, p Prediction, inst map[string]any) error {
-	dir := filepath.Join("logs", "evaluation", runID, strings.ReplaceAll(p.ModelNameOrPath, "/", "__"), p.InstanceID)
+	dir := filepath.Join(filepath.FromSlash(fakeLogDir()), runID, strings.ReplaceAll(p.ModelNameOrPath, "/", "__"), p.InstanceID)
 	if err := os.MkdirAll(dir, 0o750); err != nil {
 		return err
 	}

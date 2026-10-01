@@ -34,9 +34,15 @@ import (
 //
 // # How it is run, from the source
 //
-// Everything below was read from swebench 5.0.2 (upstream main
-// 02e7a74ffd0b707aab73d203fe87bdc7c76afc8e), swebench/harness/run_evaluation.py
-// and utils.py, and the evaluation guide docs/guides/evaluation.md:
+// Everything below was read from swebench/harness/run_evaluation.py, utils.py
+// and constants/__init__.py as the swebench 5.0.2 release installs them from
+// PyPI -- the package the live command requires -- and from the evaluation
+// guide, docs/guides/evaluation.md. Upstream's main branch
+// (02e7a74ffd0b707aab73d203fe87bdc7c76afc8e) still calls itself 5.0.2 but
+// differs from the release in two places, both about where files go: its
+// RUN_EVALUATION_LOG_DIR is logs/evaluation where the release's is
+// logs/run_evaluation, and it has dropped --report_dir. utils.py and
+// grading.py are identical in both.
 //
 //   - the entry point is `python -m swebench.harness.run_evaluation`, with
 //     --dataset_name, --split, --instance_ids, --predictions_path,
@@ -48,10 +54,15 @@ import (
 //   - a prediction is a record carrying instance_id, model_name_or_path and
 //     model_patch;
 //   - each instance's result lands in
-//     logs/evaluation/<run_id>/<model_name_or_path>/<instance_id>/report.json
+//     <RUN_EVALUATION_LOG_DIR>/<run_id>/<model_name_or_path>/<instance_id>/report.json
 //     under the harness's working directory, with "/" in the model name
 //     written "__"; report.json maps the instance id to resolved,
-//     patch_successfully_applied, infra_failure and tests_status;
+//     patch_successfully_applied, infra_failure and tests_status. Because
+//     that directory is the one thing the release and main disagree on,
+//     Evaluate asks the installed harness for its RUN_EVALUATION_LOG_DIR
+//     rather than assuming either: a report looked for in the wrong place is
+//     never found, and every cell would read as one the harness could not
+//     grade;
 //   - an instance with no report.json is one the harness could not grade --
 //     "a patch that did not apply, a container that did not start, or a run
 //     that timed out" -- and run_instance.log says which;
@@ -101,6 +112,10 @@ instance = load_swebench_dataset(dataset, "test", [instance_id])[0]
 status_map, found = get_logs_eval(make_test_spec(instance), test_log)
 json.dump({"found": found, "status_map": status_map}, sys.stdout)
 `
+
+// sweBenchLogDirScript prints the directory, relative to the harness's
+// working directory, that the installed harness writes evaluation logs under.
+const sweBenchLogDirScript = "from swebench.harness.constants import RUN_EVALUATION_LOG_DIR\nprint(RUN_EVALUATION_LOG_DIR)\n"
 
 // errHarnessConfig reports a Harness or an Evaluate call missing something it
 // needs. It is a wiring bug, not an evaluation outcome.
@@ -227,6 +242,10 @@ func (h Harness) Evaluate(ctx context.Context, task Task, system, patch string) 
 	if strings.TrimSpace(patch) == "" {
 		return Verdict{EmptyPatch: true}, nil
 	}
+	logRoot, err := h.logDir(ctx)
+	if err != nil {
+		return Verdict{}, err
+	}
 
 	preds := filepath.Join(h.Dir, "predictions", system, task.ID+".jsonl")
 	if err := writePrediction(preds, Prediction{InstanceID: task.ID, ModelNameOrPath: system, ModelPatch: patch}); err != nil {
@@ -246,7 +265,7 @@ func (h Harness) Evaluate(ctx context.Context, task Task, system, patch string) 
 			task.ID, system, err, logPath)
 	}
 
-	instDir := filepath.Join(h.Dir, "logs", "evaluation", h.RunID, strings.ReplaceAll(system, "/", "__"), task.ID)
+	instDir := filepath.Join(logRoot, h.RunID, strings.ReplaceAll(system, "/", "__"), task.ID)
 	data, err := os.ReadFile(filepath.Join(instDir, "report.json")) //nolint:gosec // composed from validated segments under Harness.Dir
 	switch {
 	case errors.Is(err, os.ErrNotExist):
@@ -275,6 +294,21 @@ func (h Harness) Evaluate(ctx context.Context, task Task, system, patch string) 
 		return Verdict{}, err
 	}
 	return v, nil
+}
+
+// logDir asks the installed harness where it writes evaluation logs, and
+// returns that directory under Harness.Dir. See this file's header comment
+// for why it asks.
+func (h Harness) logDir(ctx context.Context) (string, error) {
+	out, err := h.Python.output(ctx, "-c", sweBenchLogDirScript)
+	if err != nil {
+		return "", fmt.Errorf("fixrate: asking the installed harness where it writes its logs: %w", err)
+	}
+	dir := strings.TrimSpace(string(out))
+	if dir == "" || filepath.IsAbs(dir) || strings.Contains(dir, "..") {
+		return "", fmt.Errorf("fixrate: the installed harness names %q as its log directory, which is not a path under its working directory", dir)
+	}
+	return filepath.Join(h.Dir, filepath.FromSlash(dir)), nil
 }
 
 // writePrediction writes p as the one record of a predictions file at path.

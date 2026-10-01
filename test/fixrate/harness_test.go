@@ -48,10 +48,11 @@ func fakeHarness(t *testing.T) (Harness, Task) {
 	}, task
 }
 
-// patchWith is a prediction patch carrying one of fakePython's markers.
+// patchWith is a prediction patch carrying one of fakePython's markers in an
+// added line.
 func patchWith(marker string) string {
 	return "diff --git a/widget/core.py b/widget/core.py\n--- a/widget/core.py\n+++ b/widget/core.py\n" +
-		"@@ -1 +1 @@\n-    return int(n * f)\n" + marker + "\n"
+		"@@ -1 +1 @@\n-    return int(n * f)\n+" + marker + "\n"
 }
 
 // TestHarness_Evaluate is the authority rule: the official harness's
@@ -191,6 +192,31 @@ func TestHarness_Evaluate_RunsTheOfficialCommand(t *testing.T) {
 	}
 	if !slices.Equal(argv, wantArgv) {
 		t.Errorf("run_evaluation arguments = %q\nwant %q", argv, wantArgv)
+	}
+}
+
+// TestHarness_Evaluate_ReadsWhereTheInstalledHarnessWrites: the swebench
+// 5.0.2 release writes its evaluation logs under logs/run_evaluation, and
+// upstream's main branch -- still calling itself 5.0.2 -- under
+// logs/evaluation. A report looked for in the wrong one is a report never
+// found, and every cell would read as one the harness could not grade. So
+// Evaluate asks the installed harness for its own RUN_EVALUATION_LOG_DIR.
+func TestHarness_Evaluate_ReadsWhereTheInstalledHarnessWrites(t *testing.T) {
+	t.Parallel()
+
+	for _, dir := range []string{"logs/run_evaluation", "logs/evaluation"} {
+		t.Run(dir, func(t *testing.T) {
+			t.Parallel()
+			h, task := fakeHarness(t)
+			h.Python.Env = append(h.Python.Env, fakeLogDirEnv+"="+dir)
+			v, err := h.Evaluate(t.Context(), task, "belay-r1", patchWith(markFixed))
+			if err != nil {
+				t.Fatalf("Evaluate() error = %v", err)
+			}
+			if !v.Evaluated || !v.Resolved {
+				t.Errorf("Verdict = %+v, want the report under %s found and read", v, dir)
+			}
+		})
 	}
 }
 
