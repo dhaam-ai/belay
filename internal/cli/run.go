@@ -827,6 +827,9 @@ func nextSteps(view outcomeView) []string {
 	// it. Only a run that is paused or was interrupted is offered the
 	// command, so the report never names one that would refuse.
 	case outcome.Status == state.RunStatusCompleted:
+		if view.workspace != "" {
+			return completedInCopySteps(view)
+		}
 		// A branch run has already committed, on a branch the person's
 		// checkout is not on. "Review the change in your repository, then
 		// commit it" would name a change that is not there and a commit
