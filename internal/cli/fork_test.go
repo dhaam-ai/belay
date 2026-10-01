@@ -493,3 +493,38 @@ func TestRunsPointsAtTheForksOfItsRuns(t *testing.T) {
 		t.Fatalf("belay runs --json is not one JSON document: %v\n%s", err, out.String())
 	}
 }
+
+// TestAForkResumesFromItsCopy: carrying a fork on is an ordinary resume of
+// the new run, pointed at its copy, which is the command the fork's report
+// writes out. A dry run of it finds the fork, works in the copy, edits it in
+// place as the fork's manifest pinned, and is refused nothing.
+func TestAForkResumesFromItsCopy(t *testing.T) {
+	ws, id := forkSource(t)
+	var made bytes.Buffer
+	u := &ui{out: &made, err: &made}
+	req := forkRequest{runID: id, node: graph.NodeTest}
+	plan, err := resolve(resolveRequest{workspace: ws, logger: newLogger(u), override: req.configure})
+	if err != nil {
+		t.Fatalf("resolve: %v", err)
+	}
+	plan.registry, _ = forkScript()
+	if err := makeFork(cmdWithContext(), u, plan, req); err != nil {
+		t.Fatalf("makeFork: %v\n%s", err, made.String())
+	}
+	forks := forksIn(t, ws)
+	if len(forks) != 1 {
+		t.Fatalf("forks = %v, want one", forks)
+	}
+	copyDir := filepath.Join(ws, ".belay", "forks", forks[0])
+
+	stdout, stderr, err := runCLI(t, "--workspace", copyDir, "--dry-run", "resume", forks[0])
+	if err != nil {
+		t.Fatalf("dry run of the resume: %v\nstdout:\n%s\nstderr:\n%s", err, stdout, stderr)
+	}
+	t.Logf("verbatim output:\n%s", stdout)
+	for _, phrase := range []string{forks[0] + " — stopped at review", copyDir, "belay is editing this workspace directly"} {
+		if !strings.Contains(stdout, phrase) {
+			t.Errorf("the resume's dry run never says %q:\n%s", phrase, stdout)
+		}
+	}
+}
