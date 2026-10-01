@@ -2,8 +2,11 @@ package cli
 
 import (
 	"errors"
+	"slices"
 	"testing"
 
+	"github.com/dhaam-ai/belay/internal/config"
+	"github.com/dhaam-ai/belay/internal/graph"
 	"github.com/dhaam-ai/belay/internal/state"
 )
 
@@ -64,5 +67,36 @@ func TestCreateRunRefusesARunThatAlreadyExists(t *testing.T) {
 	}
 	if got, err := state.LoadManifest(layout.ManifestPath()); err != nil || got.Budget.SpentUSD != 1.25 {
 		t.Errorf("the run's spend after the refusal = %v (error %v), want the $1.25 it had spent", got.Budget.SpentUSD, err)
+	}
+}
+
+// TestResolveAppliesAnOverrideAndChecksIt: a queued goal's run is resolved
+// like any other, from the configuration its copy holds, with the queue's
+// own decisions on top -- in place, no archive, and no gate for a goal the
+// person added with --no-approval. Those are applied before anything is
+// built from the configuration, so the route a person is shown is the one
+// the run walks, and the result is validated again, so an override can never
+// produce a configuration belay.yaml itself could not.
+func TestResolveAppliesAnOverrideAndChecksIt(t *testing.T) {
+	ws := goWorkspace(t)
+	plan, err := resolve(resolveRequest{workspace: ws, logger: quietLogger(), override: func(c *config.Config) {
+		c.Graph.Approval = false
+		c.Plan.Archive = false
+	}})
+	if err != nil {
+		t.Fatalf("resolve: %v", err)
+	}
+	if plan.config.Graph.Approval || plan.config.Plan.Archive {
+		t.Errorf("the override did not reach the plan's configuration: approval %v, archive %v",
+			plan.config.Graph.Approval, plan.config.Plan.Archive)
+	}
+	if slices.Contains(plan.route, graph.NodeApprove) {
+		t.Errorf("route = %v, want no approve gate: the route is built after the override", plan.route)
+	}
+
+	if _, err := resolve(resolveRequest{workspace: ws, logger: quietLogger(), override: func(c *config.Config) {
+		c.Budget.MaxUSD = -1
+	}}); err == nil {
+		t.Error("resolve accepted an override that leaves budget.max_usd negative")
 	}
 }

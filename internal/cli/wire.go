@@ -53,6 +53,11 @@ type resolveRequest struct {
 	configPath string
 	cassette   string
 	logger     *slog.Logger
+	// override, when set, changes the configuration after it is loaded and
+	// before anything is resolved from it, and the result is validated
+	// again. It is for a caller that decides something about a run that no
+	// file says, as the queue decides that its goals run in place.
+	override func(*config.Config)
 	// ctx bounds the commands resolving runs, which is git and nothing
 	// else. It is optional so that a caller with no context of its own —
 	// every test that only wants a plan — still gets one.
@@ -272,6 +277,12 @@ func resolve(req resolveRequest) (*runPlan, error) {
 	cfg, err := config.Load(config.Options{Path: req.configPath, Dir: workspace})
 	if err != nil {
 		return nil, fmt.Errorf("that configuration cannot be used:\n  %w", err)
+	}
+	if req.override != nil {
+		req.override(&cfg)
+		if err := cfg.Validate(); err != nil {
+			return nil, fmt.Errorf("that configuration cannot be used:\n  %w", err)
+		}
 	}
 
 	logger := req.logger
