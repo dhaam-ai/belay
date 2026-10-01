@@ -5,10 +5,8 @@ package linter
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"log/slog"
 	"strings"
-	"time"
 
 	"github.com/dhaam-ai/belay/internal/detect"
 	"github.com/dhaam-ai/belay/internal/exec"
@@ -195,14 +193,6 @@ var (
 	golangciUnscoped = []string{"--new=false", "--new-from-rev=", "--new-from-merge-base=", "--new-from-patch=", "--whole-files=false"}
 )
 
-// Bounds for the git commands committed runs. Each is quick, and the longest
-// output is one directory level of names; the cap only has to leave that
-// output non-empty.
-const (
-	gitCheckTimeout         = 30 * time.Second
-	gitCheckMaxOutput int64 = 64 << 10
-)
-
 // gitCheckIgnoreName is the file committed asks git about, to learn whether a
 // file the run adds to dir would be ignored. No repository is expected to
 // ignore it by name, so only the rules that cover the directory decide.
@@ -294,7 +284,7 @@ func (g *GolangCI) Lint(ctx context.Context, dir string) (belay.QualityReport, e
 // change. Any other answer is logged, because it means every finding in dir
 // counts toward the gate.
 func (g *GolangCI) committed(ctx context.Context, dir string) bool {
-	reason := g.unscopable(ctx, dir)
+	reason := g.unscopable(ctx, dir, gitCheckIgnoreName)
 	if reason == "" {
 		return true
 	}
@@ -304,47 +294,6 @@ func (g *GolangCI) committed(ctx context.Context, dir string) bool {
 			slog.String("reason", reason))
 	}
 	return false
-}
-
-// unscopable returns why git cannot scope findings in dir, or "" when it can.
-func (g *GolangCI) unscopable(ctx context.Context, dir string) string {
-	// ls-tree lists dir's entries in HEAD, relative to dir. It prints
-	// nothing for a directory the repository ignores or has not committed,
-	// and fails with no repository or no commit.
-	res, err := g.git(ctx, dir, "ls-tree", "--name-only", "HEAD")
-	switch {
-	case err != nil:
-		return err.Error()
-	case strings.TrimSpace(res.Stdout) == "":
-		return "HEAD holds nothing in this directory: git ignores it, or it is not committed yet"
-	}
-
-	// HEAD can hold a file in a directory whose other files git ignores,
-	// such as ws/.gitkeep under "ws/*". git never reports an ignored file
-	// as changed, so ask whether a new file here would be ignored.
-	// check-ignore exits 0 when it would and 1 when it would not;
-	// --no-index answers from the ignore rules alone.
-	_, err = g.git(ctx, dir, "check-ignore", "--quiet", "--no-index", "--", gitCheckIgnoreName)
-	var exitErr *exec.ExitError
-	switch {
-	case err == nil:
-		return "git ignores new files in this directory"
-	case errors.As(err, &exitErr) && exitErr.Code == 1:
-		return ""
-	default:
-		return err.Error()
-	}
-}
-
-// git runs one git command in dir, with the base environment only.
-func (g *GolangCI) git(ctx context.Context, dir string, args ...string) (exec.Result, error) {
-	return g.runner.Run(ctx, exec.Command{
-		Path:      "git",
-		Args:      args,
-		Dir:       dir,
-		Timeout:   min(gitCheckTimeout, g.timeout),
-		MaxOutput: gitCheckMaxOutput,
-	})
 }
 
 // golangciReport is the top-level document golangci-lint's json output emits.
