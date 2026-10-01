@@ -435,6 +435,9 @@ type Task struct {
 	// EvalType is the grading rule Resolved applies. Instance.Task always
 	// writes it explicitly, so a task never relies on a default.
 	EvalType string `json:"eval_type"`
+	// Image is the official instance image the record names. Both arms'
+	// workspace is taken from it, and the official evaluation runs in it.
+	Image string `json:"image,omitempty"`
 }
 
 // Task converts i into a Task labelled with src, refusing an invalid
@@ -463,6 +466,7 @@ func (i Instance) Task(src Source) (Task, error) {
 		Version:    i.Version,
 		Difficulty: i.Difficulty,
 		EvalType:   evalType,
+		Image:      i.Image,
 	}, nil
 }
 
