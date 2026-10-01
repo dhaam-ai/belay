@@ -1224,7 +1224,10 @@ func winnerLine(strategy string) string {
 	case config.SelectFirstPass:
 		return "the winner is the first candidate, in order, that passed its tests"
 	case config.SelectFastest:
-		return "the winner is the candidate that finished in the least time" + among
+		// The time its own steps took, as join compares it, and not when it
+		// finished: under contention, finishing first is partly a fact
+		// about how the pool scheduled the candidates.
+		return "the winner is the candidate whose own steps took the least time" + among
 	default:
 		return fmt.Sprintf("the winner is chosen by %q", strategy)
 	}

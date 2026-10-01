@@ -498,6 +498,15 @@ func TestDryRunShowsEachCandidatesEnvelope(t *testing.T) {
 			want:   []string{"3 candidates, 3 at a time"},
 		},
 		{
+			// join's fastest compares the time each candidate's own steps
+			// took, not when it finished: under contention, finishing
+			// first is partly a fact about the pool's scheduling.
+			name:   "fastest is the least time spent, not the first to finish",
+			config: strings.Replace(fanoutConfig, "select: fewest_issues", "select: fastest", 1),
+			want:   []string{"the winner is the candidate whose own steps took the least time"},
+			absent: []string{"finished in the least time"},
+		},
+		{
 			name:   "a run that does not fan out has no candidates to describe",
 			config: singleConfig,
 			absent: []string{"its candidates"},
