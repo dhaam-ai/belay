@@ -765,3 +765,71 @@ func TestQueueRmRefusesAGoalThatHasStarted(t *testing.T) {
 		t.Errorf("goal 1 is %s after the refused rm, want it still waiting", got.State)
 	}
 }
+
+// rebooted is what crashesOnce panics with: the machine going down while a
+// node runs, so nothing after the panic happens.
+type rebooted struct{}
+
+// crashesOnce stands in for the code node, and the first time it runs the
+// machine goes down under it.
+type crashesOnce struct{ crashed *bool }
+
+func (crashesOnce) Name() string { return graph.NodeCode }
+
+func (n crashesOnce) Run(context.Context, *graph.RunContext) (graph.Result, error) {
+	if !*n.crashed {
+		*n.crashed = true
+		panic(rebooted{})
+	}
+	return graph.Result{Status: journal.StatusOK, Next: graph.End}, nil
+}
+
+// TestARebootMidGoalCarriesOnInTheSameRun is the reboot promise through belay
+// queue start's own driver. The machine goes down inside goal 1's code step,
+// leaving its run marked running and its journal open. The next start
+// continues goal 1 in that run, re-running only the step that died, then runs
+// goal 2, and says the start before it was cut off.
+func TestARebootMidGoalCarriesOnInTheSameRun(t *testing.T) {
+	ws := goWorkspace(t)
+	queueAdd(t, ws, "--no-approval", "add tests for the parser")
+	queueAdd(t, ws, "--no-approval", "add docs")
+
+	crashed := false
+	func() {
+		defer func() {
+			if r := recover(); r == nil {
+				return
+			} else if _, ok := r.(rebooted); !ok {
+				panic(r)
+			}
+		}()
+		_, err := startQueue(t.Context(), t, ws, fakeGoals(crashesOnce{crashed: &crashed}))
+		t.Fatalf("the start was meant to go down with the machine, and returned %v", err)
+	}()
+	cut := goal(t, ws, 1)
+	man, err := state.LoadManifest(runLayout(t, cut).ManifestPath())
+	if cut.State != queue.StateClaimed || err != nil || man.Status != state.RunStatusRunning {
+		t.Fatalf("after the crash goal 1 is %s and its run %v (%v); want claimed, and running as a crash leaves it",
+			cut.State, man.Status, err)
+	}
+
+	var reached []string
+	out, err := startQueue(t.Context(), t, ws, fakeGoals(reaches{goals: &reached}))
+	if err != nil {
+		t.Fatalf("the start after the reboot: %v", err)
+	}
+	if got := goal(t, ws, 1); got.State != queue.StateFinished || got.RunID != cut.RunID {
+		t.Errorf("goal 1 = %+v, want it finished in the run the crash cut short, %s", got, cut.RunID)
+	}
+	if got := goal(t, ws, 2); got.State != queue.StateFinished {
+		t.Errorf("goal 2 is %s, want finished after goal 1", got.State)
+	}
+	for _, phrase := range []string{"→ code      step 3, attempt 2", "was cut off"} {
+		if !strings.Contains(out, phrase) {
+			t.Errorf("the start after the reboot never says %q", phrase)
+		}
+	}
+	if !slices.Equal(reached, []string{"add tests for the parser", "add docs"}) {
+		t.Errorf("goals that reached code = %v, want goal 1 carried on before goal 2", reached)
+	}
+}
