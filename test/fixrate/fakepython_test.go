@@ -53,6 +53,8 @@ func fakePython(args []string, stdout, stderr io.Writer) int {
 		return fakeRunEvaluation(args[2:], stdout, stderr)
 	case len(args) >= 2 && args[0] == "-c" && strings.Contains(args[1], "get_logs_eval"):
 		return fakeStatusMap(args[2:], stdout, stderr)
+	case len(args) >= 2 && args[0] == "-c" && strings.Contains(args[1], "os.replace(partial, target)"):
+		return fakeConvert(args[2:], stderr)
 	case len(args) >= 2 && args[0] == "-c" && strings.Contains(args[1], "__version__"):
 		_, err := fmt.Fprintln(stdout, SWEBenchHarnessVersion)
 		return exitFor(err, stderr)
@@ -201,6 +203,31 @@ func fakeStatusMap(args []string, stdout, stderr io.Writer) int {
 		}
 	}
 	return exitFor(json.NewEncoder(stdout).Encode(map[string]any{"found": len(statuses) > 0, "status_map": statuses}), stderr)
+}
+
+// fakeConvert is the conversion helper. The "parquet" file a test hands it is
+// really JSON lines already, so converting is copying; each run is counted in
+// a file beside the target, so a test can tell whether it ran at all.
+func fakeConvert(args []string, stderr io.Writer) int {
+	if len(args) != 2 {
+		return exitFor(fmt.Errorf("convert wants a source and a target, got %q", args), stderr)
+	}
+	data, err := os.ReadFile(args[0]) //nolint:gosec // the source path the code under test passed
+	if err != nil {
+		return exitFor(err, stderr)
+	}
+	if strings.Contains(string(data), "CONVERT-FAILS") {
+		return exitFor(errors.New("pyarrow.lib.ArrowInvalid: Could not open Parquet input source"), stderr)
+	}
+	runs := args[1] + ".runs"
+	count, err := os.ReadFile(runs) //nolint:gosec // beside the target the code under test passed
+	if err != nil && !errors.Is(err, os.ErrNotExist) {
+		return exitFor(err, stderr)
+	}
+	if err := os.WriteFile(runs, append(count, 'x'), 0o600); err != nil { //nolint:gosec // beside the target the code under test passed
+		return exitFor(err, stderr)
+	}
+	return exitFor(os.WriteFile(args[1], data, 0o600), stderr) //nolint:gosec // the target the code under test passed
 }
 
 // instanceIDs collects run_evaluation's --instance_ids, which takes one or

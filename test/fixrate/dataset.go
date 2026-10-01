@@ -3,6 +3,7 @@
 package fixrate
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
@@ -11,6 +12,7 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"os/exec"
 	"path"
 	"path/filepath"
 	"strings"
@@ -248,4 +250,119 @@ func checkDigest(f DatasetFile, n int64, sum []byte) error {
 	default:
 		return nil
 	}
+}
+
+// PinnedRecordCount is the number of records the pinned revision's test split
+// holds, per the Hugging Face datasets-server: num_examples 500
+// (https://datasets-server.huggingface.co/info?dataset=SWE-bench%2FSWE-bench_Verified).
+const PinnedRecordCount = 500
+
+// sweBenchConvertScript turns the pinned parquet file into the JSON-lines
+// records file the corpus reads and the harness grades against, through the
+// harness's own loader: load_swebench_dataset reads a local .parquet file
+// with the same datasets library it would load the hub copy with
+// (swebench/harness/utils.py at swebench 5.0.2). Keys are sorted, so the same
+// records always convert to the same bytes, and the file appears under its
+// name only once it is complete.
+const sweBenchConvertScript = `import json, os, sys
+from swebench.harness.utils import load_swebench_dataset
+
+source, target = sys.argv[1:3]
+partial = target + ".partial"
+with open(partial, "w", encoding="utf-8") as out:
+    for row in load_swebench_dataset(source, "test"):
+        out.write(json.dumps(dict(row), ensure_ascii=False, sort_keys=True) + "\n")
+    out.flush()
+    os.fsync(out.fileno())
+os.replace(partial, target)
+`
+
+// Records is a converted and checked set of SWE-bench records: the
+// JSON-lines file, its sha256, and the records decoded from it.
+type Records struct {
+	// Path is the records file. The harness is given this same file.
+	Path string
+	// SHA256 is the lowercase hex sha256 of the file, which a corpus pins
+	// so that a resumed corpus can tell its records have not changed.
+	SHA256 string
+	// Instances are the records, in file order.
+	Instances []Instance
+}
+
+// ConvertRecords converts source, a dataset file Download verified, into the
+// records file target with the harness's own loader, and checks the result:
+// every record decodes against the pinned schema (DecodeInstances refuses an
+// unknown field), there are exactly want of them, and no instance id appears
+// twice. A target that already exists is read and checked without converting
+// again, which is what a resumed corpus does.
+//
+// A failed check wraps ErrDatasetMismatch: a conversion that dropped or
+// doubled a record would make a resolve rate over a corpus that is not the
+// pinned one, whatever its label says.
+func ConvertRecords(ctx context.Context, py Python, source, target string, want int) (Records, error) {
+	if want <= 0 {
+		return Records{}, fmt.Errorf("fixrate: ConvertRecords needs the number of records to expect, got %d", want)
+	}
+	switch _, err := os.Stat(target); {
+	case errors.Is(err, os.ErrNotExist):
+		if _, err := py.output(ctx, "-c", sweBenchConvertScript, source, target); err != nil {
+			return Records{}, fmt.Errorf("fixrate: converting %s with the harness's loader: %w", source, err)
+		}
+	case err != nil:
+		return Records{}, fmt.Errorf("fixrate: %w", err)
+	}
+	return readRecords(target, want)
+}
+
+// readRecords reads and checks a records file; see ConvertRecords.
+func readRecords(path string, want int) (Records, error) {
+	data, err := os.ReadFile(path) //nolint:gosec // a records file this package converted
+	if err != nil {
+		return Records{}, fmt.Errorf("fixrate: reading %s: %w", path, err)
+	}
+	instances, err := DecodeInstances(bytes.NewReader(data))
+	if err != nil {
+		return Records{}, fmt.Errorf("%w: %s: %w", ErrDatasetMismatch, path, err)
+	}
+	if len(instances) != want {
+		return Records{}, fmt.Errorf("%w: %s holds %d record(s), pinned at %d", ErrDatasetMismatch, path, len(instances), want)
+	}
+	seen := make(map[string]bool, len(instances))
+	for _, inst := range instances {
+		if seen[inst.InstanceID] {
+			return Records{}, fmt.Errorf("%w: %s holds instance %q twice", ErrDatasetMismatch, path, inst.InstanceID)
+		}
+		seen[inst.InstanceID] = true
+	}
+	sum := sha256.Sum256(data)
+	return Records{Path: path, SHA256: hex.EncodeToString(sum[:]), Instances: instances}, nil
+}
+
+// Python is an interpreter with swebench installed: the official harness
+// runs under it, and so do this package's two small helpers that ask the
+// harness's own code a question.
+type Python struct {
+	// Path is the interpreter to run, such as "python3" or a virtualenv's
+	// bin/python.
+	Path string
+	// Env is added to the environment it inherits from this process.
+	Env []string
+}
+
+// output runs the interpreter with args and returns what it printed on
+// stdout. A failure carries the end of what it printed on stderr, which is
+// where Python puts a traceback.
+func (p Python) output(ctx context.Context, args ...string) ([]byte, error) {
+	if p.Path == "" {
+		return nil, errors.New("no Python interpreter configured")
+	}
+	var stdout, stderr bytes.Buffer
+	cmd := exec.CommandContext(ctx, p.Path, args...) //nolint:gosec // the configured interpreter, with this package's own arguments
+	cmd.Env = append(os.Environ(), p.Env...)
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+	if err := cmd.Run(); err != nil {
+		return stdout.Bytes(), fmt.Errorf("%w: %s", err, lastLines(stderr.String(), 3))
+	}
+	return stdout.Bytes(), nil
 }

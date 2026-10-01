@@ -3,8 +3,10 @@
 package fixrate
 
 import (
+	"bytes"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"net/http"
 	"net/http/httptest"
@@ -228,5 +230,116 @@ func assertNoTempFiles(t *testing.T, dir string) {
 		if strings.HasPrefix(e.Name(), ".") {
 			t.Errorf("%s holds a leftover temporary file %q", dir, e.Name())
 		}
+	}
+}
+
+// syntheticRecords returns the synthetic fixture records as JSON lines, the
+// shape the conversion helper writes.
+func syntheticRecords(t *testing.T) []byte {
+	t.Helper()
+	var out []byte
+	for _, inst := range swebenchFixture(t, "instances-array.json") {
+		line, err := json.Marshal(inst)
+		if err != nil {
+			t.Fatalf("marshal fixture instance: %v", err)
+		}
+		out = append(append(out, line...), '\n')
+	}
+	return out
+}
+
+// fakePythonPath returns this test binary, for use as a Python interpreter
+// together with the fakePythonEnv variable.
+func fakePythonPath(t *testing.T) string {
+	t.Helper()
+	exe, err := os.Executable()
+	if err != nil {
+		t.Fatalf("os.Executable: %v", err)
+	}
+	return exe
+}
+
+// TestConvertRecords: the records the arms read and the records the harness
+// grades must be the same records, so they are produced by the harness's own
+// loader and then checked here -- every record decodes against the pinned
+// schema, the count is the pinned count, and no instance appears twice. A
+// conversion that dropped or doubled a record would otherwise make a resolve
+// rate over a corpus that is not the pinned one.
+func TestConvertRecords(t *testing.T) {
+	t.Parallel()
+
+	good := syntheticRecords(t)
+	tests := []struct {
+		name    string
+		source  []byte
+		want    int
+		wantErr bool
+	}{
+		{name: "the pinned count of well-formed records", source: good, want: 2},
+		{name: "fewer records than pinned", source: good, want: 3, wantErr: true},
+		{name: "a record twice", source: append(append([]byte{}, good...), bytes.SplitAfter(good, []byte("\n"))[0]...), want: 3, wantErr: true},
+		{name: "a field the pinned schema does not have", source: []byte(`{"instance_id":"x","FAIL_TO_FAIL":[]}` + "\n"), want: 1, wantErr: true},
+		{name: "a loader that fails", source: []byte("CONVERT-FAILS\n"), want: 1, wantErr: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			dir := t.TempDir()
+			source := filepath.Join(dir, "test-00000-of-00001.parquet")
+			if err := os.WriteFile(source, tt.source, 0o600); err != nil {
+				t.Fatalf("write source: %v", err)
+			}
+			py := Python{Path: fakePythonPath(t), Env: []string{fakePythonEnv + "=1"}}
+			recs, err := ConvertRecords(t.Context(), py, source, filepath.Join(dir, "instances.jsonl"), tt.want)
+			if tt.wantErr {
+				if err == nil {
+					t.Fatalf("ConvertRecords() = %d record(s), nil error; want a refusal", len(recs.Instances))
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("ConvertRecords() error = %v", err)
+			}
+			if len(recs.Instances) != tt.want {
+				t.Errorf("ConvertRecords() = %d record(s), want %d", len(recs.Instances), tt.want)
+			}
+			sum := sha256.Sum256(tt.source)
+			if recs.SHA256 != hex.EncodeToString(sum[:]) {
+				t.Errorf("SHA256 = %s, want the digest of the records file", recs.SHA256)
+			}
+		})
+	}
+}
+
+// TestConvertRecords_ConvertsOnce: a resumed corpus reads the records it
+// converted the first time, and must not convert again -- the records file is
+// part of what the corpus pinned.
+func TestConvertRecords_ConvertsOnce(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	source := filepath.Join(dir, "test-00000-of-00001.parquet")
+	if err := os.WriteFile(source, syntheticRecords(t), 0o600); err != nil {
+		t.Fatalf("write source: %v", err)
+	}
+	target := filepath.Join(dir, "instances.jsonl")
+	py := Python{Path: fakePythonPath(t), Env: []string{fakePythonEnv + "=1"}}
+	first, err := ConvertRecords(t.Context(), py, source, target, 2)
+	if err != nil {
+		t.Fatalf("first ConvertRecords() error = %v", err)
+	}
+	second, err := ConvertRecords(t.Context(), py, source, target, 2)
+	if err != nil {
+		t.Fatalf("second ConvertRecords() error = %v", err)
+	}
+	if first.SHA256 != second.SHA256 {
+		t.Errorf("the two reads disagree: %s and %s", first.SHA256, second.SHA256)
+	}
+	runs, err := os.ReadFile(target + ".runs") //nolint:gosec // this test's own temp directory
+	if err != nil {
+		t.Fatalf("reading the run count: %v", err)
+	}
+	if len(runs) != 1 {
+		t.Errorf("the loader ran %d time(s), want 1", len(runs))
 	}
 }

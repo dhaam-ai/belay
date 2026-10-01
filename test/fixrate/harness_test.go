@@ -41,11 +41,10 @@ func fakeHarness(t *testing.T) (Harness, Task) {
 		t.Fatalf("os.Executable: %v", err)
 	}
 	return Harness{
-		Python:  exe,
+		Python:  Python{Path: exe, Env: []string{fakePythonEnv + "=1"}},
 		Dataset: dataset,
 		Dir:     filepath.Join(dir, "evaluation"),
 		RunID:   "fixrate-test",
-		Env:     []string{fakePythonEnv + "=1"},
 	}, task
 }
 
@@ -237,7 +236,7 @@ func TestHarness_Evaluate_Refusals(t *testing.T) {
 		name   string
 		mutate func(*Harness, *Task, *string)
 	}{
-		{"no python", func(h *Harness, _ *Task, _ *string) { h.Python = "" }},
+		{"no python", func(h *Harness, _ *Task, _ *string) { h.Python.Path = "" }},
 		{"no dataset", func(h *Harness, _ *Task, _ *string) { h.Dataset = "" }},
 		{"a relative dataset", func(h *Harness, _ *Task, _ *string) { h.Dataset = "instances.jsonl" }},
 		{"no directory", func(h *Harness, _ *Task, _ *string) { h.Dir = "" }},

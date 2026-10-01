@@ -3,7 +3,6 @@
 package fixrate
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -114,8 +113,10 @@ var pathSegment = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]*$`)
 // Harness runs SWE-bench's official evaluation, one prediction at a time. See
 // this file's header comment.
 type Harness struct {
-	// Python is the interpreter swebench is installed under. Required.
-	Python string
+	// Python is the interpreter swebench is installed under. Required. Its
+	// Env reaches the harness process, for the harness's own settings such
+	// as SWEBENCH_DOCKER_TIMEOUT.
+	Python Python
 	// Dataset is the JSON-lines file the corpus's tasks were read from, as
 	// an absolute path. The harness grades against exactly these records.
 	Dataset string
@@ -128,10 +129,6 @@ type Harness struct {
 	// Timeout bounds one instance's tests, passed to --timeout in whole
 	// seconds. Zero leaves the harness's own default, 1800 seconds.
 	Timeout time.Duration
-	// Env is added to the environment the harness inherits from this
-	// process -- for the harness's own settings, such as
-	// SWEBENCH_DOCKER_TIMEOUT.
-	Env []string
 }
 
 // Prediction is one record of the predictions file run_evaluation reads.
@@ -197,7 +194,7 @@ type harnessReport struct {
 // safely use.
 func (h Harness) validate(instanceID, system string) error {
 	switch {
-	case h.Python == "":
+	case h.Python.Path == "":
 		return fmt.Errorf("%w: no Python interpreter", errHarnessConfig)
 	case !filepath.IsAbs(h.Dataset):
 		return fmt.Errorf("%w: the dataset %q is not an absolute path", errHarnessConfig, h.Dataset)
@@ -302,9 +299,9 @@ func (h Harness) run(ctx context.Context, logPath string, args ...string) error 
 	if err != nil {
 		return fmt.Errorf("create %s: %w", logPath, err)
 	}
-	cmd := exec.CommandContext(ctx, h.Python, args...) //nolint:gosec // the configured interpreter, with this file's own arguments
+	cmd := exec.CommandContext(ctx, h.Python.Path, args...) //nolint:gosec // the configured interpreter, with this file's own arguments
 	cmd.Dir = h.Dir
-	cmd.Env = append(os.Environ(), h.Env...)
+	cmd.Env = append(os.Environ(), h.Python.Env...)
 	cmd.Stdout = log
 	cmd.Stderr = log
 	runErr := cmd.Run()
@@ -320,22 +317,17 @@ func (h Harness) run(ctx context.Context, logPath string, args ...string) error 
 // crossCheck grades the statuses the harness graded with Task.Resolved; see
 // this file's "The cross-check".
 func (h Harness) crossCheck(ctx context.Context, task Task, testLog string, official bool) PortCheck {
-	var stdout, stderr bytes.Buffer
-	cmd := exec.CommandContext(ctx, h.Python, "-c", sweBenchStatusScript, h.Dataset, task.ID, testLog) //nolint:gosec // the configured interpreter, with this file's own script
-	cmd.Dir = h.Dir
-	cmd.Env = append(os.Environ(), h.Env...)
-	cmd.Stdout = &stdout
-	cmd.Stderr = &stderr
-	if err := cmd.Run(); err != nil {
-		return PortCheck{Unavailable: fmt.Sprintf("the harness's log reader could not be run: %v: %s", err, lastLines(stderr.String(), 3))}
+	out, err := h.Python.output(ctx, "-c", sweBenchStatusScript, h.Dataset, task.ID, testLog)
+	if err != nil {
+		return PortCheck{Unavailable: fmt.Sprintf("the harness's log reader could not be run: %v", err)}
 	}
 	var answer struct {
 		Found     *bool             `json:"found"`
 		StatusMap map[string]string `json:"status_map"`
 	}
-	if err := json.Unmarshal(stdout.Bytes(), &answer); err != nil || answer.Found == nil {
+	if err := json.Unmarshal(out, &answer); err != nil || answer.Found == nil {
 		return PortCheck{Unavailable: fmt.Sprintf("the harness's log reader printed something other than its answer: %q",
-			lastLines(stdout.String(), 3))}
+			lastLines(string(out), 3))}
 	}
 	if !*answer.Found {
 		return PortCheck{
