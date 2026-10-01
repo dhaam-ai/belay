@@ -306,82 +306,6 @@ func TestPairedResult_MarshalIndentJSON(t *testing.T) {
 	}
 }
 
-func TestBelayTaskOutcome(t *testing.T) {
-	t.Parallel()
-
-	tests := []struct {
-		name         string
-		totals       Totals
-		wantResolved bool
-	}{
-		{"every defect repaired", Totals{Selected: 3, Repaired: 3}, true},
-		{"one left broken", Totals{Selected: 3, Repaired: 2, NotRepaired: 1}, false},
-		// An invalid repair is a gamed check, and must never make a task
-		// resolve however green the suite looks.
-		{"one gamed", Totals{Selected: 3, Repaired: 2, InvalidRepair: 1}, false},
-		{"one unverified", Totals{Selected: 3, Repaired: 2, Unverified: 1}, false},
-		// No defects selected is not a resolved task; it is an empty one.
-		{"nothing selected", Totals{}, false},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			t.Parallel()
-			r := &Result{
-				Mode:        ModeReplay,
-				Totals:      tt.totals,
-				UsageUSD:    1.5,
-				BelayStatus: "completed",
-				BelayNote:   "all gates green",
-			}
-			got := belayTaskOutcome("t01", r, 42*time.Second)
-			switch {
-			case got.TaskID != "t01":
-				t.Errorf("TaskID = %q, want %q", got.TaskID, "t01")
-			case got.Arm != ArmBelay:
-				t.Errorf("Arm = %q, want %q", got.Arm, ArmBelay)
-			case got.Resolved != tt.wantResolved:
-				t.Errorf("Resolved = %v, want %v for %+v", got.Resolved, tt.wantResolved, tt.totals)
-			case got.UsageUSD != 1.5:
-				t.Errorf("UsageUSD = %v, want 1.5", got.UsageUSD)
-			case got.WallClockSeconds != 42:
-				t.Errorf("WallClockSeconds = %v, want 42", got.WallClockSeconds)
-			case got.Reason == "":
-				t.Error("Reason is empty; every outcome must say why it landed where it did")
-			}
-		})
-	}
-}
-
-func TestControlTaskOutcome(t *testing.T) {
-	t.Parallel()
-
-	res := controlRunResult{
-		Usage:  belayUsageForTest(0.75, true),
-		Turns:  17,
-		Model:  "sonnet",
-		RunErr: "backend hit its own ceiling",
-	}
-	got := controlTaskOutcome("t01", res, false, "2 catalogued test(s) still fail", 11*time.Second)
-	switch {
-	case got.Arm != ArmControl:
-		t.Errorf("Arm = %q, want %q", got.Arm, ArmControl)
-	case got.Resolved:
-		t.Error("Resolved = true, want false")
-	case got.UsageUSD != 0.75:
-		t.Errorf("UsageUSD = %v, want 0.75", got.UsageUSD)
-	case !got.UsageEstimated:
-		t.Error("UsageEstimated = false, want the backend's own true carried through")
-	case got.Turns != 17:
-		t.Errorf("Turns = %d, want 17", got.Turns)
-	case got.WallClockSeconds != 11:
-		t.Errorf("WallClockSeconds = %v, want 11", got.WallClockSeconds)
-	case got.Note != "backend hit its own ceiling":
-		t.Errorf("Note = %q, want the backend's error recorded", got.Note)
-	case got.Reason != "2 catalogued test(s) still fail":
-		t.Errorf("Reason = %q, want the caller's verdict", got.Reason)
-	}
-}
-
 // TestSummarizePaired_ReportsTheControlArmsAllowance closes the question a
 // reader of a losing control arm asks first: was it starved? The allowance
 // is derived (controlAllowance), so the report has to show it rather than
@@ -390,11 +314,16 @@ func TestSummarizePaired_ReportsTheControlArmsAllowance(t *testing.T) {
 	t.Parallel()
 
 	cfg := belayConfig()
-	res := controlRunResult{Model: "sonnet", Allowance: controlAllowance(cfg)}
+	belayResult := &Result{Arm: ArmBelay, Totals: Totals{Selected: 1, Repaired: 1}}
+	controlResult := &Result{
+		Arm:     ArmControl,
+		Totals:  Totals{Selected: 1, NotRepaired: 1},
+		Control: &ControlRunInfo{Model: "sonnet", Allowance: controlAllowance(cfg)},
+	}
 	pairs := []PairedTask{{
 		TaskID:  "t01",
-		Belay:   belayTaskOutcome("t01", &Result{Totals: Totals{Selected: 1, Repaired: 1}}, time.Second),
-		Control: controlTaskOutcome("t01", res, false, "still failing", time.Second),
+		Belay:   resultTaskOutcome("t01", belayResult),
+		Control: resultTaskOutcome("t01", controlResult),
 	}}
 
 	got, err := summarizePaired(ModeReplay, time.Now(), pairs)

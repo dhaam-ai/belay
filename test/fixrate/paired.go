@@ -98,10 +98,10 @@ type TaskOutcome struct {
 	// Turns is the agent turns the arm reported taking, or 0 when the
 	// backend does not report them.
 	Turns int `json:"turns"`
-	// WallClockSeconds is how long the arm took on this task. It is
-	// supplied by the caller rather than measured here so that a run with
-	// a pinned clock stays byte-reproducible, which is the property
-	// TestRun_Determinism_SameSeedTwice already holds this harness to.
+	// WallClockSeconds is how long the arm took on this task, copied from
+	// Result.WallClockSeconds: the arm's own work, measured with
+	// RunOptions.Now, so a pinned clock keeps it -- and every report built
+	// on it -- byte-reproducible.
 	WallClockSeconds float64 `json:"wall_clock_seconds"`
 	// Note is the arm's own account of how it ended -- the dispatcher's
 	// Outcome.Note for the belay arm, the backend's error for the control
@@ -116,17 +116,17 @@ type TaskOutcome struct {
 	// which makes it the one number a sceptical reader of a losing control
 	// arm needs and cannot recompute: they do not have the configuration.
 	// belay's own ceilings are its configuration, so there is nothing to
-	// promote and belayTaskOutcome leaves this nil.
+	// promote and resultTaskOutcome leaves this nil for the belay arm.
 	Allowance *Allowance `json:"allowance,omitempty"`
 
 	// Model is the model this outcome ran on, or empty when there is no
 	// single one to name.
 	//
 	// Only the control arm records one, because its whole run is one call
-	// on one model (controlRunResult.Model). The belay arm routes plan,
-	// code and fix separately (config.Agent.ModelFor), so a belay task
-	// has no single model and belayTaskOutcome deliberately leaves this
-	// empty rather than picking the code node's and implying the others.
+	// on one model (ControlRunInfo.Model). The belay arm routes plan, code
+	// and fix separately (config.Agent.ModelFor), so a belay task has no
+	// single model and resultTaskOutcome deliberately leaves this empty
+	// rather than picking the code node's and implying the others.
 	Model string `json:"model,omitempty"`
 }
 
@@ -463,12 +463,18 @@ func writeArm(b *strings.Builder, a ArmSummary) {
 		perFix, estimated)
 }
 
-// belayTaskOutcome converts a belay-arm Result into the TaskOutcome a
+// resultTaskOutcome converts either arm's Result into the TaskOutcome a
 // paired report consumes.
+//
+// It is ONE function for both arms on purpose. A task's resolution must be
+// decided by the identical rule in both arms or the comparison is between
+// two different questions; with one conversion over one Result type --
+// produced by one shared pipeline (runArm) -- that is structural, not a
+// promise each caller has to keep.
 //
 // # The resolution rule
 //
-// A task is resolved only when EVERY defect the task selected came back
+// A task is resolved only when EVERY defect it selected came back
 // StatusRepaired. Anything else -- one still broken, one unverified, and
 // above all one StatusInvalidRepair -- leaves the task unresolved. Crediting
 // a task with an invalid repair in it would defeat the cheat detector at the
@@ -477,7 +483,12 @@ func writeArm(b *strings.Builder, a ArmSummary) {
 //
 // A Result that selected no defects at all is not a resolved task; it is an
 // empty one, and resolving nothing is not a success.
-func belayTaskOutcome(taskID string, r *Result, wallClock time.Duration) TaskOutcome {
+//
+// The arm label is copied from the Result rather than assumed, so a Result
+// with no arm -- one built by hand rather than by Run or RunControl -- is
+// refused by summarizePaired instead of being paired as whichever arm the
+// caller happened to put it in.
+func resultTaskOutcome(taskID string, r *Result) TaskOutcome {
 	t := r.Totals
 	resolved := t.Selected > 0 && t.Repaired == t.Selected
 
@@ -492,40 +503,22 @@ func belayTaskOutcome(taskID string, r *Result, wallClock time.Duration) TaskOut
 			t.Repaired, t.Selected, t.NotRepaired, t.InvalidRepair, t.Unverified)
 	}
 
-	return TaskOutcome{
+	o := TaskOutcome{
 		TaskID:           taskID,
-		Arm:              ArmBelay,
+		Arm:              r.Arm,
 		Resolved:         resolved,
 		Reason:           reason,
 		UsageUSD:         r.UsageUSD,
 		UsageEstimated:   r.UsageEstimated,
-		WallClockSeconds: wallClock.Seconds(),
+		WallClockSeconds: r.WallClockSeconds,
 		Note:             r.BelayNote,
-		// Model is deliberately left empty; see TaskOutcome.Model.
 	}
-}
-
-// controlTaskOutcome converts a control-arm result into the TaskOutcome a
-// paired report consumes.
-//
-// resolved and reason come from the caller rather than from res, because a
-// control-arm run produces no verdict of its own: it makes one agent call
-// and stops. Whether the task resolved is entirely a matter of what the
-// corpus's own check says about the workspace afterwards, which is the
-// caller's to run -- and must be the IDENTICAL check the belay arm was
-// judged by, or the comparison is between two different questions.
-func controlTaskOutcome(taskID string, res controlRunResult, resolved bool, reason string, wallClock time.Duration) TaskOutcome {
-	return TaskOutcome{
-		TaskID:           taskID,
-		Arm:              ArmControl,
-		Resolved:         resolved,
-		Reason:           reason,
-		UsageUSD:         res.Usage.USD,
-		UsageEstimated:   res.Usage.Estimated,
-		Turns:            res.Turns,
-		WallClockSeconds: wallClock.Seconds(),
-		Note:             res.RunErr,
-		Model:            res.Model,
-		Allowance:        &res.Allowance,
+	if c := r.Control; c != nil {
+		allowance := c.Allowance
+		o.Turns = c.Turns
+		o.Model = c.Model
+		o.Allowance = &allowance
+		o.Note = c.RunErr
 	}
+	return o
 }

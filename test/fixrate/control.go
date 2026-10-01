@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"strings"
 	"time"
 
@@ -355,4 +356,38 @@ func runControl(ctx context.Context, workspace, goal string, agent belay.AgentBa
 		out.RunErr = err.Error()
 	}
 	return out, nil
+}
+
+// RunControl is Run with belay's graph taken away: it measures the control
+// arm over exactly the corpus, the selection and the evaluation Run uses.
+//
+// It shares Run's whole pipeline (runArm) and replaces only the drive
+// step. The defects are injected by the same subprocess, snapshotted the
+// same way, and after the one call the workspace is re-tested, re-linted
+// and put through the same cheat-aware classifier -- so the two arms are
+// judged by one check, by construction, rather than by two copies of it.
+// The Result is the same type, labelled ArmControl, with Control set and
+// the Belay* fields empty.
+//
+// Every refusal Run makes, RunControl makes, because it is runArm that
+// makes them: above all, ModeLive without RunOptions.Confirm set to
+// ConfirmLiveSpend, and a ModeReplay agent that reports spend. Like Run,
+// it never constructs an agent; a live control arm is the caller's own
+// wiring and the caller's own decision to spend.
+//
+// The single call gets the belay arm's goal (belayGoal) and is configured
+// from the belay arm's configuration (belayConfig), so the model it is
+// pinned to and the allowance it is given are derived from the very
+// configuration the belay arm runs under.
+func RunControl(ctx context.Context, opts RunOptions) (*Result, error) {
+	return runArm(ctx, opts, ArmControl, driveControl)
+}
+
+// driveControl is the control arm's drive step: one raw backend call.
+func driveControl(ctx context.Context, workspace string, agent belay.AgentBackend, _ func() time.Time, _ *slog.Logger) (armOutcome, error) {
+	r, err := runControl(ctx, workspace, belayGoal, agent, belayConfig())
+	if err != nil {
+		return armOutcome{}, err
+	}
+	return armOutcome{usage: r.Usage, control: &r}, nil
 }

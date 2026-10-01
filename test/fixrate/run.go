@@ -107,7 +107,7 @@ type RunOptions struct {
 // belay.AgentBackend is swappable, and it is the one piece of "belay" a
 // fix-rate number is actually trying to hold constant while varying.
 func Run(ctx context.Context, opts RunOptions) (*Result, error) {
-	return runArm(ctx, opts, driveBelay)
+	return runArm(ctx, opts, ArmBelay, driveBelay)
 }
 
 // armDrive is the one step of a measurement that differs between arms: it
@@ -124,6 +124,8 @@ type armOutcome struct {
 	usage belay.Usage
 	// belay is set by the belay arm's drive step.
 	belay *belayRunResult
+	// control is set by the control arm's drive step.
+	control *controlRunResult
 }
 
 // driveBelay is the belay arm's drive step: belay's real dispatcher graph.
@@ -135,8 +137,15 @@ func driveBelay(ctx context.Context, workspace string, agent belay.AgentBackend,
 	return armOutcome{usage: r.Outcome.Usage, belay: &r}, nil
 }
 
-// runArm is the measurement pipeline every arm shares; see armDrive.
-func runArm(ctx context.Context, opts RunOptions, drive armDrive) (*Result, error) {
+// runArm is the measurement pipeline every arm shares; see armDrive. arm
+// labels the Result it returns.
+//
+// Every refusal Run documents is made here, once, for every arm: an
+// unknown mode, a missing agent, ModeLive without ConfirmLiveSpend, an
+// invalid selection, and -- after the drive step -- a ModeReplay run that
+// recorded spend. An arm cannot opt out of any of them, because an arm is
+// only a drive step.
+func runArm(ctx context.Context, opts RunOptions, arm Arm, drive armDrive) (*Result, error) {
 	if !opts.Mode.Valid() {
 		return nil, fmt.Errorf("%w: %q", ErrUnknownMode, opts.Mode)
 	}
@@ -199,6 +208,7 @@ func runArm(ctx context.Context, opts RunOptions, drive armDrive) (*Result, erro
 	// lint check happen inside the isolated-cache window.
 	var (
 		out        armOutcome
+		wallClock  time.Duration
 		after      snapshot
 		postTests  map[string]string
 		lintOutput string
@@ -206,7 +216,9 @@ func runArm(ctx context.Context, opts RunOptions, drive armDrive) (*Result, erro
 	)
 	err = withIsolatedGolangciCache(parent, func() error {
 		var driveErr error
+		start := now()
 		out, driveErr = drive(ctx, workspace, opts.Agent, now, logger)
+		wallClock = now().Sub(start)
 		if driveErr != nil {
 			return driveErr
 		}
@@ -253,6 +265,8 @@ func runArm(ctx context.Context, opts RunOptions, drive armDrive) (*Result, erro
 		SchemaVersion: SchemaVersion,
 		Mode:          opts.Mode,
 		Provenance:    opts.Mode.provenance(),
+		Arm:           arm,
+		ArmProvenance: arm.provenance(),
 		GeneratedAt:   now().UTC(),
 		FixtureSrc:    pristineSrcDir,
 		Selection: SelectionInfo{
@@ -261,18 +275,22 @@ func runArm(ctx context.Context, opts RunOptions, drive armDrive) (*Result, erro
 			Random: manifest.Selection.Random,
 			Seed:   manifest.Selection.Seed,
 		},
-		UsageUSD:       usage.USD,
-		UsageEstimated: usage.Estimated,
-		LintAvailable:  lintAvailable,
-		Totals:         totals,
-		ClassBreakdown: breakdown,
-		Defects:        defects,
-		Warnings:       warnings,
+		UsageUSD:         usage.USD,
+		UsageEstimated:   usage.Estimated,
+		WallClockSeconds: wallClock.Seconds(),
+		LintAvailable:    lintAvailable,
+		Totals:           totals,
+		ClassBreakdown:   breakdown,
+		Defects:          defects,
+		Warnings:         warnings,
 	}
 	if out.belay != nil {
 		result.BelayStatus = out.belay.Outcome.Status.String()
 		result.BelaySteps = out.belay.Outcome.Steps
 		result.BelayNote = belayNote(*out.belay)
+	}
+	if c := out.control; c != nil {
+		result.Control = &ControlRunInfo{Model: c.Model, Turns: c.Turns, Allowance: c.Allowance, RunErr: c.RunErr}
 	}
 	return result, nil
 }

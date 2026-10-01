@@ -12,7 +12,13 @@ import (
 
 // SchemaVersion is Result's JSON schema version, bumped whenever a field
 // is added, removed or reinterpreted incompatibly.
-const SchemaVersion = 1
+//
+// Version 2 added arm, arm_provenance, control and wall_clock_seconds when
+// the control arm arrived, and made belay_status, belay_steps and
+// belay_note optional: a control-arm Result runs no graph and has none of
+// them, and printing them empty would read as a belay run whose status was
+// unknown.
+const SchemaVersion = 2
 
 // Status is the outcome the diff-against-injected.json + cheat-detector
 // pipeline (evaluate.go) assigns to one defect. It is never derived from
@@ -135,6 +141,14 @@ type Result struct {
 	SchemaVersion int    `json:"schema_version"`
 	Mode          Mode   `json:"mode"`
 	Provenance    string `json:"provenance"`
+	// Arm and ArmProvenance say which arm produced this Result -- belay's
+	// graph (Run) or one raw backend call (RunControl) -- in a label and in
+	// words. They sit beside Mode and Provenance, ahead of every number,
+	// because a mode label and an arm label answer different questions and
+	// a fix rate needs both answered: whether a real agent was involved at
+	// all, and whether belay's graph was. See Arm.provenance.
+	Arm           Arm    `json:"arm"`
+	ArmProvenance string `json:"arm_provenance"`
 
 	GeneratedAt time.Time     `json:"generated_at"`
 	FixtureSrc  string        `json:"fixture_src"`
@@ -144,14 +158,19 @@ type Result struct {
 	// (state.RunStatus.String()) — "completed", "failed", "aborted", or
 	// "paused" (which should never appear: Run disables graph.approval —
 	// see belayConfig — so nothing should ever pause it; a "paused"
-	// Result is itself worth investigating).
-	BelayStatus string `json:"belay_status"`
+	// Result is itself worth investigating). Empty, and omitted, for the
+	// control arm, which runs no graph.
+	BelayStatus string `json:"belay_status,omitempty"`
 	// BelaySteps is the number of graph node executions the run
-	// performed.
-	BelaySteps int `json:"belay_steps"`
+	// performed. Zero, and omitted, for the control arm.
+	BelaySteps int `json:"belay_steps,omitempty"`
 	// BelayNote is the dispatcher's own short, human-readable account of
-	// how the run ended.
-	BelayNote string `json:"belay_note"`
+	// how the run ended. Empty, and omitted, for the control arm.
+	BelayNote string `json:"belay_note,omitempty"`
+
+	// Control is the control arm's account of its single call, and nil
+	// for the belay arm.
+	Control *ControlRunInfo `json:"control,omitempty"`
 
 	// UsageUSD is the run's cumulative belay.Usage.USD across every
 	// AgentBackend.Invoke call. In ModeReplay this is always exactly 0 —
@@ -162,6 +181,14 @@ type Result struct {
 	// for the built-in ScriptedAgent, which reports a literal, non-
 	// estimated 0.
 	UsageEstimated bool `json:"usage_estimated"`
+
+	// WallClockSeconds is how long the arm itself worked: the belay run,
+	// or the control arm's one call. It deliberately excludes injection
+	// and the post-run evaluation, which are the same work in both arms
+	// and would only dilute a comparison of the two. It is measured with
+	// RunOptions.Now, so a pinned clock makes it exactly 0 and keeps a
+	// Result byte-reproducible (TestRun_Determinism_SameSeedTwice).
+	WallClockSeconds float64 `json:"wall_clock_seconds"`
 
 	// LintAvailable reports whether golangci-lint was found on PATH for
 	// this package's own POST-run verification. When false, every
@@ -203,12 +230,25 @@ func (r *Result) HumanSummary() string {
 	var b strings.Builder
 
 	fmt.Fprintln(&b, r.Provenance)
+	if r.ArmProvenance != "" {
+		fmt.Fprintln(&b, r.ArmProvenance)
+	}
 	fmt.Fprintln(&b)
 	fmt.Fprintf(&b, "fix rate: %d/%d (%.0f%%)  [not_repaired=%d invalid_repair=%d unverified=%d]\n",
 		r.Totals.Repaired, r.Totals.Selected, r.Totals.FixRate*100,
 		r.Totals.NotRepaired, r.Totals.InvalidRepair, r.Totals.Unverified)
-	fmt.Fprintf(&b, "belay run: %s in %d step(s) — %s\n", r.BelayStatus, r.BelaySteps, r.BelayNote)
+	if c := r.Control; c != nil {
+		note := ""
+		if c.RunErr != "" {
+			note = " — " + c.RunErr
+		}
+		fmt.Fprintf(&b, "control call: 1 agent call, %d turn(s) on model %q, allowed %d turn(s) and %s%s\n",
+			c.Turns, c.Model, c.Allowance.MaxTurns, c.Allowance.Timeout, note)
+	} else {
+		fmt.Fprintf(&b, "belay run: %s in %d step(s) — %s\n", r.BelayStatus, r.BelaySteps, r.BelayNote)
+	}
 	fmt.Fprintf(&b, "usage: $%.4f (estimated=%v)\n", r.UsageUSD, r.UsageEstimated)
+	fmt.Fprintf(&b, "wall clock: %.1fs\n", r.WallClockSeconds)
 	if !r.LintAvailable {
 		fmt.Fprintln(&b, "note: golangci-lint was not available for post-run verification; lint-channel defects are unverified")
 	}
@@ -300,4 +340,23 @@ func summarize(defects []DefectOutcome) (Totals, []ClassSummary) {
 		breakdown = append(breakdown, *c)
 	}
 	return totals, breakdown
+}
+
+// ControlRunInfo is the control arm's account of its single call: what it
+// was given and what it reported. It is the control-arm counterpart of
+// BelayStatus, BelaySteps and BelayNote, and like them it describes the
+// arm rather than the defects.
+type ControlRunInfo struct {
+	// Model is the model the call was pinned to: the code node's own, so
+	// the two arms cannot drift onto different models (see control.go).
+	Model string `json:"model"`
+	// Turns is the agent turns the backend reported taking, or 0 when it
+	// does not report them.
+	Turns int `json:"turns"`
+	// Allowance is the derived ceiling the call was given, recorded so a
+	// reader can check the control arm was not starved.
+	Allowance Allowance `json:"allowance"`
+	// RunErr is the backend's own error, if the call failed. A failed
+	// call is an outcome, not a harness failure; see controlRunResult.
+	RunErr string `json:"run_err,omitempty"`
 }
