@@ -462,8 +462,10 @@ func TestGolangCILintGateThresholds(t *testing.T) {
 // scopedArgs is the golangci-lint command line when findings are scoped to the
 // lines that differ from HEAD. Every issues.new* and whole-files setting is
 // pinned, so a repository's .golangci.yml cannot widen or narrow the scope.
+// --allow-serial-runners makes a gate wait for golangci-lint's machine-wide
+// lock rather than fail on it; see golangciSerial.
 var scopedArgs = []string{
-	"run", "--output.json.path=stdout",
+	"run", "--output.json.path=stdout", "--allow-serial-runners",
 	"--new=false", "--new-from-rev=HEAD", "--new-from-merge-base=", "--new-from-patch=", "--whole-files=false",
 	"./...",
 }
@@ -471,16 +473,18 @@ var scopedArgs = []string{
 // unscopedArgs is the command line when git cannot scope findings: the same
 // pins, with --new-from-rev cleared, so every finding counts.
 var unscopedArgs = []string{
-	"run", "--output.json.path=stdout",
+	"run", "--output.json.path=stdout", "--allow-serial-runners",
 	"--new=false", "--new-from-rev=", "--new-from-merge-base=", "--new-from-patch=", "--whole-files=false",
 	"./...",
 }
 
-// TestGolangCICommand pins the command line, and with it two decisions: the
+// TestGolangCICommand pins the command line, and with it three decisions: the
 // v1-versus-v2 flag spelling (v2.12.2 has no --out-format flag, so passing the
-// v1 spelling would fail every invocation rather than degrade), and scoping
-// findings to the lines that differ from HEAD. test/lintgate checks what that
-// scoping does with the real tool.
+// v1 spelling would fail every invocation rather than degrade), scoping
+// findings to the lines that differ from HEAD, and waiting for golangci-lint's
+// lock rather than failing on it, which several fanout candidates reaching the
+// review node at once depend on. test/lintgate checks what the scoping and the
+// lock do with the real tool.
 func TestGolangCICommand(t *testing.T) {
 	t.Parallel()
 
