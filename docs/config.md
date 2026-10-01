@@ -354,7 +354,7 @@ A run with `fanout.enabled: true` takes a different route: plan → approve → 
 
 Routes the run through the fanout and join nodes, so one goal gets `fanout.candidates` independent attempts and the best one is kept. It is decided once, when the run starts, and recorded in the run's `manifest.json`: `belay resume` finishes a run the way it started, whatever `belay.yaml` says by then, and warns when the two disagree.
 
-It requires `budget.max_usd` above zero, because the fanout divides the run's remaining ceiling into one envelope per candidate and has nothing to divide otherwise. It is also refused with `review.mode: sonar` or `review.mode: ai`, which belay cannot run several of at once.
+It requires `budget.max_usd` above zero, because the fanout divides the run's remaining ceiling into one envelope per candidate and has nothing to divide otherwise. It is also refused with `review.mode: sonar` or `review.mode: ai`: both name the SonarQube project after the directory they review, and every run's candidates are called `cand-01`, `cand-02` and so on, so their quality gates would read one another's results.
 
 A fanout can spend more than `budget.max_usd`: each candidate is capped at its own envelope, and a candidate is checked before a step rather than during one, so the overrun is bounded by one step per candidate. `--dry-run` prints the envelope and that bound.
 
