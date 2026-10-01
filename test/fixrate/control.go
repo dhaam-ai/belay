@@ -99,8 +99,8 @@ const (
 
 	// ArmControl drives the same backend with one raw
 	// belay.AgentBackend.Invoke per task and no graph at all -- what
-	// runControl does. CONTEXT.md calls this the control arm; it is
-	// deliberately not called a baseline, a bare mode or a vanilla run.
+	// runControl does. "Control arm" is CONTEXT.md's term for it, and the
+	// only one this package uses.
 	ArmControl Arm = "control"
 )
 

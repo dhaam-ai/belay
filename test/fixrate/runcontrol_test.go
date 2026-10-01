@@ -129,7 +129,7 @@ func TestRunControl_EndToEnd_PairsWithTheBelayArm(t *testing.T) {
 		case r.got.Mode != ModeReplay || r.got.Provenance != ModeReplay.provenance():
 			t.Errorf("%s Result mode/provenance = %q/%q, want replay's", r.name, r.got.Mode, r.got.Provenance)
 		case r.got.UsageUSD != 0:
-			t.Errorf("%s Result.UsageUSD = %v, want exactly 0 in replay mode", r.name, r.got.UsageUSD)
+			t.Errorf("%s Result.UsageUSD = %v, want exactly 0 in scripted mode (ModeReplay)", r.name, r.got.UsageUSD)
 		case r.got.WallClockSeconds != 0:
 			t.Errorf("%s Result.WallClockSeconds = %v, want 0 under a pinned clock", r.name, r.got.WallClockSeconds)
 		case len(r.got.Defects) != 1 || r.got.Defects[0].ID != "B25":

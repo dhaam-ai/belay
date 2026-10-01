@@ -245,7 +245,11 @@ func TestControlTools_MatchesTheCodeNode(t *testing.T) {
 		Attempt:   1,
 		Agent:     agent,
 	}
-	_, _ = code.New().Run(t.Context(), rc)
+	// Whatever the node concluded is irrelevant to this guard, but it is
+	// logged rather than discarded so a surprise is visible under -v.
+	if _, err := code.New().Run(t.Context(), rc); err != nil {
+		t.Logf("code node returned %v after the invocation (expected to be irrelevant here)", err)
+	}
 
 	if agent.CallCount() != 1 {
 		t.Fatalf("the code node made %d agent call(s), want 1; this guard cannot read its tool set", agent.CallCount())

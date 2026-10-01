@@ -19,7 +19,11 @@ func swebenchFixture(t *testing.T, name string) []Instance {
 	if err != nil {
 		t.Fatalf("opening %s: %v", name, err)
 	}
-	defer func() { _ = f.Close() }()
+	t.Cleanup(func() {
+		if err := f.Close(); err != nil {
+			t.Errorf("closing %s: %v", name, err)
+		}
+	})
 	got, err := DecodeInstances(f)
 	if err != nil {
 		t.Fatalf("DecodeInstances(%s) error = %v", name, err)
@@ -501,7 +505,8 @@ func TestTask_Resolved(t *testing.T) {
 func TestTask_Resolved_TruncatedParametrizedIDs(t *testing.T) {
 	t.Parallel()
 
-	const truncated = "tests/test_g.py::test_grammar[log(photon"
+	// An invented id, truncated mid-parameter the way upstream describes.
+	const truncated = "tests/test_g.py::test_scale[ratio(half"
 
 	tests := []struct {
 		name       string
