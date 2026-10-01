@@ -31,4 +31,26 @@
 // and only from the queue, so no history in which a goal was claimed twice
 // survives a fold, and a goal claimed twice is the only way one could run
 // twice.
+//
+// # Two locks, because two kinds of process share the queue
+//
+// A person adds goals from one terminal while `belay queue start` works
+// through them from another, and both write the log. Nothing in
+// internal/ndjson arbitrates between processes, so this package does, with two
+// flock(2) locks under .belay/queue:
+//
+//   - The log lock, queue.lock, is held by every writer for the few
+//     milliseconds it takes to read the log, check that what it is about to
+//     record still makes sense, and append it. That check under the lock is
+//     what keeps `belay queue rm` from removing a goal a worker claimed a
+//     moment earlier, and two `belay queue add`s from giving out one id.
+//   - The worker lock, worker.lock, is held by one `belay queue start` for as
+//     long as it works (WorkerLock). It is what makes the queue run one goal at
+//     a time across every process on the machine, not just within one.
+//
+// Both are flocks rather than files whose existence means "locked", because a
+// flock dies with its holder: the kernel drops it when a killed process's
+// descriptors are closed, so a reboot or a kill -9 never leaves the queue
+// locked behind a process that is gone. flock is not reliable on network
+// filesystems, and a queue in a workspace on one is not supported.
 package queue
