@@ -941,11 +941,13 @@ func (s timelineStyle) outcome(o TimelineOutcome, text string) string {
 // TimelineColorEnabled reports whether w should receive terminal color.
 //
 // Color is on only for a character device — an actual terminal — and only
-// when NO_COLOR is unset. Per the NO_COLOR convention the variable's mere
-// presence disables color regardless of its value, and a TERM of "dumb"
-// declares a terminal that cannot render it.
+// when NO_COLOR is unset or empty. no-color.org asks for color off when the
+// variable is "present and not an empty string", and every other command
+// reads it that way (colorEnabled), so an exported-but-empty NO_COLOR must
+// not turn the timeline plain while `belay runs` beside it stays colored. A
+// TERM of "dumb" declares a terminal that cannot render color.
 func TimelineColorEnabled(w io.Writer) bool {
-	if _, ok := os.LookupEnv("NO_COLOR"); ok {
+	if os.Getenv("NO_COLOR") != "" {
 		return false
 	}
 	if os.Getenv("TERM") == "dumb" {

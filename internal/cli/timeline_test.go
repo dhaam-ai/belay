@@ -1129,7 +1129,9 @@ func TestTimelineColorEnabledRespectsNoColorAndNonTTY(t *testing.T) {
 	}{
 		{name: "character device with no NO_COLOR", term: "xterm-256color", w: charDevice, want: true},
 		{name: "NO_COLOR set", noColor: ptr("1"), term: "xterm-256color", w: charDevice, want: false},
-		{name: "NO_COLOR present but empty", noColor: ptr(""), term: "xterm-256color", w: charDevice, want: false},
+		// no-color.org asks for colour off only when NO_COLOR is set AND
+		// non-empty, which is what every other command does (colorEnabled).
+		{name: "NO_COLOR present but empty", noColor: ptr(""), term: "xterm-256color", w: charDevice, want: true},
 		{name: "dumb terminal", term: "dumb", w: charDevice, want: false},
 		{name: "redirected to a regular file", term: "xterm-256color", w: regularFile, want: false},
 		{name: "piped to a non-file writer", term: "xterm-256color", w: &strings.Builder{}, want: false},

@@ -586,6 +586,10 @@ that only `pkg/belay` carries a compatibility promise. Everything under
   still running from the step that was interrupted. It checks each process's
   start time first, so a process id that has since been given to something
   else is never signalled.
+- **An empty `NO_COLOR` no longer turns `belay timeline` plain.** The
+  timeline switched colour off whenever `NO_COLOR` existed, even exported
+  empty, while every other command waits for a non-empty value, as
+  no-color.org asks. It now reads it the same way as the rest of belay.
 
 ## v0.1.4 — 2026-09-17
 
