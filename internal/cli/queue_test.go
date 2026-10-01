@@ -833,3 +833,42 @@ func TestARebootMidGoalCarriesOnInTheSameRun(t *testing.T) {
 		t.Errorf("goals that reached code = %v, want goal 1 carried on before goal 2", reached)
 	}
 }
+
+// TestABelayCopyIsNotTheCheckoutAroundIt: a queued goal's copy lives inside
+// the person's repository, under .belay. Opened as a workspace -- `belay
+// --workspace <copy> resume <run-id>` is what belay queue tells a person to
+// type for a goal stopped at a limit -- git finds the person's own repository
+// a few directories up. That repository is not this workspace's to branch:
+// the copy is belay's scratch, and work in it happens in place. Read the
+// other way, a resume there warns that belay.yaml now asks for a branch,
+// which nobody changed, and a run started there branches the person's repo.
+func TestABelayCopyIsNotTheCheckoutAroundIt(t *testing.T) {
+	ws := gitWorkspace(t)
+	inside := filepath.Join(ws, ".belay", "queue", "work", "20260930T220000Z-000000000001")
+	if err := os.MkdirAll(inside, 0o750); err != nil {
+		t.Fatalf("MkdirAll: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(inside, "go.mod"), []byte("module example.com/scratch\n\ngo 1.26.3\n"), 0o600); err != nil {
+		t.Fatalf("write go.mod: %v", err)
+	}
+
+	plan, err := resolve(resolveRequest{workspace: inside, logger: quietLogger()})
+	if err != nil {
+		t.Fatalf("resolve: %v", err)
+	}
+	if plan.output.Branched() {
+		t.Errorf("a copy under .belay was taken for the checkout around it: output %+v (%s)", plan.output, plan.outputReason)
+	}
+	if !strings.Contains(plan.outputReason, ".belay") {
+		t.Errorf("the reason belay edits the copy in place does not say why: %q", plan.outputReason)
+	}
+
+	writeConfig(t, inside, "version: 1\noutput:\n  mode: branch\n")
+	plan, err = resolve(resolveRequest{workspace: inside, logger: quietLogger()})
+	if err != nil {
+		t.Fatalf("resolve: %v", err)
+	}
+	if !strings.Contains(blockerText(plan), "output.mode is \"branch\"") {
+		t.Errorf("output.mode branch in a copy under .belay was not refused; blockers: %s", blockerText(plan))
+	}
+}

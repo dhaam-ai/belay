@@ -250,6 +250,13 @@ that only `pkg/belay` carries a compatibility promise. Everything under
 
 ### Fixed
 
+- **belay no longer takes a copy it made for the repository around it.** A
+  queued goal's copy lives under the repository's `.belay`, and git finds the
+  repository a few directories up, so `belay --workspace <copy> resume` —
+  the command `belay queue` prints for a goal stopped at a limit — decided to
+  branch the person's own repository, and warned that `belay.yaml` now asked
+  for a branch when nobody had changed it. A workspace under `.belay` now
+  edits in place, says why, and refuses `output.mode: branch`.
 - **A repair's file list is checked against the disk, not taken on trust.**
   The fix step routed straight back to the tests, so a repair was the one
   change in a run that nothing verified: no claimed path was proven to be a
