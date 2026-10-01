@@ -107,6 +107,45 @@ type RunOptions struct {
 // belay.AgentBackend is swappable, and it is the one piece of "belay" a
 // fix-rate number is actually trying to hold constant while varying.
 func Run(ctx context.Context, opts RunOptions) (*Result, error) {
+	return runArm(ctx, opts, ArmBelay, driveBelay)
+}
+
+// armDrive is the one step of a measurement that differs between arms: it
+// takes a freshly injected workspace and works on it with agent. Everything
+// before it (validation, injection, the pre-run snapshot) and everything
+// after it (the zero-spend check, the post-run tests and lint, the
+// cheat-aware classifier) is runArm's, and identical for every arm.
+type armDrive func(ctx context.Context, workspace string, agent belay.AgentBackend, now func() time.Time, logger *slog.Logger) (armOutcome, error)
+
+// armOutcome is what an armDrive hands back to runArm: the spend the
+// zero-cost check and the report read, and the arm's own account of how it
+// went.
+type armOutcome struct {
+	usage belay.Usage
+	// belay is set by the belay arm's drive step.
+	belay *belayRunResult
+	// control is set by the control arm's drive step.
+	control *controlRunResult
+}
+
+// driveBelay is the belay arm's drive step: belay's real dispatcher graph.
+func driveBelay(ctx context.Context, workspace string, agent belay.AgentBackend, now func() time.Time, logger *slog.Logger) (armOutcome, error) {
+	r, err := runBelay(ctx, workspace, agent, now, logger)
+	if err != nil {
+		return armOutcome{}, err
+	}
+	return armOutcome{usage: r.Outcome.Usage, belay: &r}, nil
+}
+
+// runArm is the measurement pipeline every arm shares; see armDrive. arm
+// labels the Result it returns.
+//
+// Every refusal Run documents is made here, once, for every arm: an
+// unknown mode, a missing agent, ModeLive without ConfirmLiveSpend, an
+// invalid selection, and -- after the drive step -- a ModeReplay run that
+// recorded spend. An arm cannot opt out of any of them, because an arm is
+// only a drive step.
+func runArm(ctx context.Context, opts RunOptions, arm Arm, drive armDrive) (*Result, error) {
 	if !opts.Mode.Valid() {
 		return nil, fmt.Errorf("%w: %q", ErrUnknownMode, opts.Mode)
 	}
@@ -168,20 +207,23 @@ func Run(ctx context.Context, opts RunOptions) (*Result, error) {
 	// review node invokes golangci-lint) and this package's own post-run
 	// lint check happen inside the isolated-cache window.
 	var (
-		belayResult belayRunResult
-		after       snapshot
-		postTests   map[string]string
-		lintOutput  string
-		lintAvail   bool
+		out        armOutcome
+		wallClock  time.Duration
+		after      snapshot
+		postTests  map[string]string
+		lintOutput string
+		lintAvail  bool
 	)
 	err = withIsolatedGolangciCache(parent, func() error {
-		var runErr error
-		belayResult, runErr = runBelay(ctx, workspace, opts.Agent, now, logger)
-		if runErr != nil {
-			return runErr
+		var driveErr error
+		start := now()
+		out, driveErr = drive(ctx, workspace, opts.Agent, now, logger)
+		wallClock = now().Sub(start)
+		if driveErr != nil {
+			return driveErr
 		}
 
-		usage := belayResult.Outcome.Usage
+		usage := out.usage
 		if opts.Mode == ModeReplay && (usage.USD != 0 || usage.InputTokens != 0 || usage.OutputTokens != 0) {
 			return fmt.Errorf("%w (recorded $%.6f, %d input token(s), %d output token(s))",
 				ErrReplayModeSpentMoney, usage.USD, usage.InputTokens, usage.OutputTokens)
@@ -205,7 +247,7 @@ func Run(ctx context.Context, opts RunOptions) (*Result, error) {
 	if err != nil {
 		return nil, err
 	}
-	usage := belayResult.Outcome.Usage
+	usage := out.usage
 	lintAvailable := lintAvail
 
 	defects := make([]DefectOutcome, 0, len(manifest.Defects))
@@ -223,6 +265,8 @@ func Run(ctx context.Context, opts RunOptions) (*Result, error) {
 		SchemaVersion: SchemaVersion,
 		Mode:          opts.Mode,
 		Provenance:    opts.Mode.provenance(),
+		Arm:           arm,
+		ArmProvenance: arm.provenance(),
 		GeneratedAt:   now().UTC(),
 		FixtureSrc:    pristineSrcDir,
 		Selection: SelectionInfo{
@@ -231,16 +275,22 @@ func Run(ctx context.Context, opts RunOptions) (*Result, error) {
 			Random: manifest.Selection.Random,
 			Seed:   manifest.Selection.Seed,
 		},
-		BelayStatus:    belayResult.Outcome.Status.String(),
-		BelaySteps:     belayResult.Outcome.Steps,
-		BelayNote:      belayNote(belayResult),
-		UsageUSD:       usage.USD,
-		UsageEstimated: usage.Estimated,
-		LintAvailable:  lintAvailable,
-		Totals:         totals,
-		ClassBreakdown: breakdown,
-		Defects:        defects,
-		Warnings:       warnings,
+		UsageUSD:         usage.USD,
+		UsageEstimated:   usage.Estimated,
+		WallClockSeconds: wallClock.Seconds(),
+		LintAvailable:    lintAvailable,
+		Totals:           totals,
+		ClassBreakdown:   breakdown,
+		Defects:          defects,
+		Warnings:         warnings,
+	}
+	if out.belay != nil {
+		result.BelayStatus = out.belay.Outcome.Status.String()
+		result.BelaySteps = out.belay.Outcome.Steps
+		result.BelayNote = belayNote(*out.belay)
+	}
+	if c := out.control; c != nil {
+		result.Control = &ControlRunInfo{Model: c.Model, Turns: c.Turns, Allowance: c.Allowance, RunErr: c.RunErr}
 	}
 	return result, nil
 }

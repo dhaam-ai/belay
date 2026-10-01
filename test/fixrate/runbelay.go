@@ -100,12 +100,19 @@ func runBelay(ctx context.Context, workspace string, agent belay.AgentBackend, n
 	}
 
 	store := state.NewStore(layout)
+	// The manifest is written LAST, after state.json, matching what
+	// internal/cli's createRun does ("Only now, with the run findable").
+	// The manifest is what makes a run discoverable: every reader of a run
+	// reads it first, and state.Store.Preflight loads state.json only once
+	// a manifest has pointed it at one. A manifest beside a missing
+	// state.json therefore advertises a run nothing can load. Writing it
+	// last means a creation that fails part-way leaves nothing to find.
+	if err := store.SaveState(state.NewState(belayGoal)); err != nil {
+		return belayRunResult{}, fmt.Errorf("fixrate: save initial state: %w", err)
+	}
 	manifest := state.NewManifest(now(), belayRunID, workspace, belayGoal, cfg)
 	if err := store.SaveManifest(manifest); err != nil {
 		return belayRunResult{}, fmt.Errorf("fixrate: save manifest: %w", err)
-	}
-	if err := store.SaveState(state.NewState(belayGoal)); err != nil {
-		return belayRunResult{}, fmt.Errorf("fixrate: save initial state: %w", err)
 	}
 
 	registry, err := nodes.Default(cfg)
