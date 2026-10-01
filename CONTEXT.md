@@ -171,7 +171,10 @@ A run's spend ceiling in dollars and tokens, checked before spending, never afte
 _Avoid_: quota, limit, cap (fine in prose)
 
 **Queue**:
-An ordered list of goals belay works through unattended, one run per goal.
+An ordered list of goals belay works through unattended, one run per goal, each
+in its own copy of the workspace. A goal whose plan stops at the approve gate is
+parked, and the queue moves on to the next; only a person approving it, or
+having added it with `--no-approval`, takes it past the gate.
 _Avoid_: batch, backlog, job list
 
 ## Recorded agents

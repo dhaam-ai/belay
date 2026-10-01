@@ -184,6 +184,8 @@ The run progresses through a directed graph of nodes (see `internal/graph/node.g
 
 If a node returns an error or an invalid Result, the dispatcher stops the run and records the failure. The user inspects the journal with `belay timeline`, fixes the underlying issue, and starts a new run: `belay resume` refuses a run that has failed.
 
+**Goal queue**: `belay queue` keeps its own append-only log, `.belay/queue/queue.ndjson`, written through `internal/ndjson` like the journal, and read by a fold that refuses any history no belay writes (see `internal/queue`, ADR-0017). Every writer holds a flock on `.belay/queue/queue.lock` for the one append it makes, and `belay queue start` holds a flock on `.belay/queue/worker.lock` for as long as it works, so one goal runs at a time across processes; both locks die with the process that holds them. Each goal runs in a directory copy of the workspace at `.belay/queue/work/<run-id>`, and its run is an ordinary in-place run inside that copy, at `.belay/queue/work/<run-id>/.belay/runs/<run-id>/`. The worker records a goal's claim (its run id and copy) in the log before it makes either, so after a crash the next worker makes that same run rather than a second one, and continues it through the dispatcher's own resume.
+
 ## Isolation & Fanout
 
 **Isolator Interface** (see `pkg/belay/isolate.go`): Abstracts workspace isolation so the graph is implementation-agnostic. Two methods:
