@@ -76,7 +76,16 @@ func (r resolveRequest) ctx() context.Context {
 type blocker struct {
 	problem string
 	fix     string
+	// key names a blocker that is re-derived rather than accumulated: one
+	// that depends on a pin, which a resume settles from the run's manifest
+	// after resolve has already judged belay.yaml. Re-deriving one first
+	// removes every blocker with its key. Empty for every other blocker.
+	key string
 }
+
+// fanoutReviewKey is the key of the blocker refusing a fanout over a review
+// mode its candidates cannot share; see checkFanoutReview.
+const fanoutReviewKey = "fanout-review"
 
 // runPlan is one resolved run: every decision belay made and every adapter it
 // would use, assembled without creating a file or spending a cent.
@@ -737,6 +746,47 @@ func (p *runPlan) resolveRegistry() {
 	}
 	p.registry = registry
 	p.resolveCandidates()
+	p.checkFanoutReview()
+}
+
+// checkFanoutReview refuses a run that fans out into a quality gate its
+// candidates cannot each run: SonarQube, or the AI review that asks
+// SonarQube for its verdict.
+//
+// Both name the SonarQube project after the directory they review, and a
+// candidate's workspace is called cand-01, cand-02 and so on -- in every run,
+// in every repository. So every candidate would analyse into projects shared
+// with every other run's candidates, and each quality gate would read results
+// another candidate or another run wrote; the project's history, which is
+// what SonarQube judges new code against, would be a jumble of unrelated
+// changes. That is not a verdict about this candidate's code at all. Lint
+// review runs in the candidate's own directory and reports on it alone, so
+// it is unaffected -- and since golangci-lint is now told to wait for its
+// machine-wide lock, several of them can run at once.
+//
+// It judges the fanout this run walks -- the pin, on a resume -- against the
+// review mode belay.yaml gives now, which is read live. resolveRegistry calls
+// it on every rebuild, so it first removes what an earlier call found: a
+// resume settles the fanout from the manifest after resolve has judged the
+// file's, and a run started without a fanout must not be refused for one it
+// does not have.
+func (p *runPlan) checkFanoutReview() {
+	p.blockers = slices.DeleteFunc(p.blockers, func(b blocker) bool { return b.key == fanoutReviewKey })
+	if p.fanout == nil {
+		return
+	}
+	mode := p.config.Review.Mode
+	if mode != config.ReviewModeSonar && mode != config.ReviewModeAI {
+		return
+	}
+	p.blockers = append(p.blockers, blocker{
+		problem: fmt.Sprintf("this run fans out, and review.mode is %q: belay names the SonarQube project after "+
+			"the directory it reviews, so every candidate would share projects called cand-01, cand-02 and so on "+
+			"with every other run's candidates, and its quality gate would read results it did not produce.", mode),
+		fix: "set review.mode to lint for a run that fans out; SonarQube project keys are not yet scoped per " +
+			"candidate. A run not yet started can instead set fanout.enabled to false.",
+		key: fanoutReviewKey,
+	})
 }
 
 // resolveCandidates builds the graph a fanout run's candidates are driven
@@ -806,7 +856,13 @@ func (p *runPlan) resolveModels() {
 	routable := config.RoutableNodes()
 	blocked := map[string]bool{}
 
-	for _, node := range p.route {
+	// A fanout run's own walk calls one model, the plan's; its candidates
+	// call the rest, once each. Walking only the run's route would wave a
+	// bad agent.models.code through here and fail it inside every
+	// candidate instead, so the candidates' walk is checked too. The
+	// combined walk reaches each routable node once, in the order a run
+	// reaches it, whether or not the run fans out.
+	for _, node := range slices.Concat(p.route, p.candidateRoute) {
 		if !slices.Contains(routable, node) {
 			continue
 		}

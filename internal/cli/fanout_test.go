@@ -339,3 +339,121 @@ func TestEachCandidateReplaysItsOwnAnswers(t *testing.T) {
 		}
 	}
 }
+
+// fanoutReviewBlocked counts the blockers that refuse a fanout over its review
+// mode, so a test can tell "refused once" from "refused twice" -- a resume
+// re-derives this blocker after resolve has already judged the file.
+func fanoutReviewBlocked(p *runPlan) int {
+	n := 0
+	for _, b := range p.blockers {
+		if strings.Contains(b.problem, "fans out") && strings.Contains(b.problem, "review.mode") {
+			n++
+		}
+	}
+	return n
+}
+
+// TestFanoutRefusesAReviewItCannotRunPerCandidate: SonarQube and AI review
+// both name the SonarQube project after the directory they review, and a
+// candidate's directory is cand-01, cand-02 and so on in every run in every
+// repository. Every candidate would share projects with every other run's
+// candidates, and each quality gate would read results somebody else wrote.
+// Until project keys are scoped per candidate, a fanout with either mode is
+// refused before anything is spent.
+//
+// The fanout is the run's pin and the review mode is read live, so a resume
+// judges the pair the run will actually walk: a fanout run resumed into
+// SonarQube is refused, once, and a single run resumed while the file
+// enables fanout is not refused for a fanout it does not have.
+func TestFanoutRefusesAReviewItCannotRunPerCandidate(t *testing.T) {
+	const aiReview = "review:\n  mode: ai\n  ai:\n    mcp:\n      mode: docker\n"
+	for _, tc := range []struct {
+		name   string
+		config string
+		want   int
+	}{
+		{name: "lint review fans out", config: fanoutConfig, want: 0},
+		{name: "SonarQube review cannot fan out", config: fanoutConfig + "review:\n  mode: sonar\n", want: 1},
+		{name: "AI review cannot fan out", config: fanoutConfig + aiReview, want: 1},
+		{name: "SonarQube review without a fanout", config: singleConfig + "review:\n  mode: sonar\n", want: 0},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ws := goWorkspace(t)
+			writeConfig(t, ws, tc.config)
+			plan, err := resolve(resolveRequest{workspace: ws, logger: quietLogger()})
+			if err != nil {
+				t.Fatalf("resolve: %v", err)
+			}
+			if got := fanoutReviewBlocked(plan); got != tc.want {
+				t.Errorf("refused over the review mode %d times, want %d; blockers: %s", got, tc.want, blockerText(plan))
+			}
+		})
+	}
+
+	for _, tc := range []struct {
+		name             string
+		created, resumed string
+		want             int
+	}{
+		{
+			name:    "a fanout run resumed into SonarQube is refused once",
+			created: fanoutConfig, resumed: fanoutConfig + "review:\n  mode: sonar\n", want: 1,
+		},
+		{
+			name:    "a single run resumed while the file fans out into SonarQube is not refused for it",
+			created: singleConfig, resumed: fanoutConfig + "review:\n  mode: sonar\n", want: 0,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ws := goWorkspace(t)
+			writeConfig(t, ws, tc.created)
+			plan, err := resolve(resolveRequest{workspace: ws, logger: quietLogger()})
+			if err != nil {
+				t.Fatalf("resolve: %v", err)
+			}
+			const runID = "20260101T000000Z-abcdef123456"
+			if _, err := createRun(context.Background(), plan, runSpec{
+				Workspace: ws, RunID: runID, Goal: "add tests",
+			}); err != nil {
+				t.Fatalf("createRun: %v", err)
+			}
+			writeConfig(t, ws, tc.resumed)
+			resumed, err := resolve(resolveRequest{workspace: ws, logger: quietLogger()})
+			if err != nil {
+				t.Fatalf("resolve after the file changed: %v", err)
+			}
+			layout, err := state.NewLayout(ws, runID)
+			if err != nil {
+				t.Fatalf("NewLayout: %v", err)
+			}
+			if err := resumed.resumePreflight(context.Background(), state.NewStore(layout)); err != nil {
+				t.Fatalf("resumePreflight: %v", err)
+			}
+			if got := fanoutReviewBlocked(resumed); got != tc.want {
+				t.Errorf("refused over the review mode %d times, want %d; blockers: %s", got, tc.want, blockerText(resumed))
+			}
+		})
+	}
+}
+
+// TestAFanoutRunsModelsAreCheckedWhereTheyAreSpent: a model belay cannot
+// price stops a run before it starts rather than in the middle of it, and
+// the check walks the nodes a run reaches. A fanout run's code and fix
+// nodes are on its candidates' walk, not its own, so a check that walked
+// only the parent's route would wave through a bad agent.models.code -- and
+// then fail inside every candidate, N times over.
+func TestAFanoutRunsModelsAreCheckedWhereTheyAreSpent(t *testing.T) {
+	ws := goWorkspace(t)
+	writeConfig(t, ws, fanoutConfig)
+	plan, err := resolve(resolveRequest{workspace: ws, logger: quietLogger()})
+	if err != nil {
+		t.Fatalf("resolve: %v", err)
+	}
+	var got []string
+	for _, m := range plan.models {
+		got = append(got, m.node)
+	}
+	if want := []string{graph.NodePlan, graph.NodeCode, graph.NodeFix}; !slices.Equal(got, want) {
+		t.Errorf("models are checked for %v, want %v", got, want)
+	}
+}
