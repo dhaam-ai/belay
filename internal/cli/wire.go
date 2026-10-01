@@ -133,7 +133,12 @@ type runPlan struct {
 	registry *graph.Registry
 	// route is the order registry is walked in, for showing a person; see
 	// resolveRegistry.
-	route  []string
+	route []string
+	// candidates is the graph each candidate of a fanout run is driven
+	// over, and candidateRoute the order it walks it in. Both are nil for a
+	// run that does not fan out; resolveRegistry sets them with the rest.
+	candidates     *graph.Registry
+	candidateRoute []string
 	redact func(string) string
 
 	// recorder is the record-mode wrapper whose cassette must be saved when
@@ -178,7 +183,45 @@ func (p *runPlan) options(store *state.Store) graph.Options {
 		// a fingerprint of the workspace beside it, so a fork of the run can
 		// tell whether the files have changed since the visit it re-runs.
 		Fingerprint: surveyWorkspace,
+		// These three are what make a fanout run's candidates run at all.
+		// Without a candidate registry the dispatcher builds no candidate
+		// runner, RunContext.CandidateRuns is nil, and the fanout node
+		// refuses with graph.ErrNoCandidateRunner. A run that does not fan
+		// out passes nil and gets none.
+		CandidateRegistry: p.candidates,
+		CandidateAgent:    p.candidateAgent(),
+		// Read from belay.yaml as it is now, on every invocation, and never
+		// from the run's pin: lowering it and resuming is how a person backs
+		// off a rate limit or a machine that cannot take the load.
+		Concurrency: p.config.Fanout.Concurrency,
 	}
+}
+
+// candidateAgent is the backend each candidate of a fanout run is given, by
+// candidate id, or nil for a run that does not fan out.
+//
+// Every backend belay builds is a replay.Backend -- in live mode a
+// pass-through, in record and replay mode the cassette -- and each candidate
+// gets Scoped(id) of it. That matters only for a cassette, and there it is
+// the whole difference: N candidates given one goal ask the same question, a
+// fingerprint deliberately leaves the workspace out, and an unscoped cassette
+// would hand whichever candidate asked first whichever answer was recorded
+// first. Scoped by the candidate's id, each records and replays its own
+// conversation in whatever order the candidates run. A live pass-through
+// ignores the scope.
+//
+// A backend that is not a replay.Backend is shared as it is, which
+// pkg/belay's contract already makes safe: Invoke must be safe for
+// concurrent use.
+func (p *runPlan) candidateAgent() func(id string) belay.AgentBackend {
+	if p.candidates == nil {
+		return nil
+	}
+	cassette, ok := p.agent.(*replay.Backend)
+	if !ok {
+		return nil
+	}
+	return func(id string) belay.AgentBackend { return cassette.Scoped(id) }
 }
 
 // vcs is the repository the promote node commits to, and nil for an in-place
@@ -200,10 +243,13 @@ func (p *runPlan) vcs() vcs.Repository {
 //
 // It is built per store, because both isolators are rooted at one run's
 // candidates directory. A store it cannot be built for — no run yet, or a
-// root it cannot create — is not an error here: fanout is on no route belay
-// walks today, and refusing to start a run over an isolator nothing reaches
-// would stop runs that are fine. The failure is logged and the run proceeds
-// without one, which fanout itself refuses.
+// root it cannot create — is not an error here, because most runs never fan
+// out and refusing to start one over an isolator it will not use would stop
+// runs that are fine. The failure is logged and the run proceeds without
+// one. A run that does fan out then cannot make any candidate's workspace:
+// every candidate reports that it has no isolator, and the fanout pauses
+// with that reason rather than settling, so `belay resume` tries again once
+// the cause is fixed.
 func (p *runPlan) isolator(store *state.Store) belay.Isolator {
 	if store == nil {
 		return nil
@@ -315,26 +361,8 @@ func resolve(req resolveRequest) (*runPlan, error) {
 	p.resolveFanout()
 	p.resolveRegistry()
 	p.resolveModels()
-	p.warnAboutFanout()
 
 	return p, nil
-}
-
-// warnAboutFanout says that fanout.enabled changes nothing yet.
-//
-// It is a warning rather than a blocker: the setting is valid, the loader
-// checks it, and a run with it on is exactly the run it would be with it off.
-// That is the problem. Somebody who turned it on is expecting N attempts at
-// their goal and watching what N attempts would cost, and belay would take
-// one attempt and say nothing about it. Silence is only safe for a setting
-// that does what it says.
-func (p *runPlan) warnAboutFanout() {
-	if !p.config.Fanout.Enabled {
-		return
-	}
-	p.warn("fanout.enabled is true, but nothing runs the candidates yet: no step of the graph leads to "+
-		"the fanout node, so this run takes the ordinary route once and fanout.candidates (%d) changes "+
-		"nothing it does or spends. ADR-0019 is reserved for the decision.", p.config.Fanout.Candidates)
 }
 
 // resolveWorkspace turns the --workspace flag into the absolute path the rest
@@ -708,6 +736,36 @@ func (p *runPlan) resolveRegistry() {
 		return
 	}
 	p.registry = registry
+	p.resolveCandidates()
+}
+
+// resolveCandidates builds the graph a fanout run's candidates are driven
+// over, from the same pins as the run's own: the policy gate is in it when
+// the run has a policy, because a fanout run's change is made by its
+// candidates and has to be judged there. Branch output is not: a candidate's
+// passing gate ends the candidate, and promoting the winner is the parent's.
+//
+// It clears both fields for a run that does not fan out, so a resume that
+// rebinds a pin never leaves the previous plan's candidates behind.
+func (p *runPlan) resolveCandidates() {
+	p.candidates, p.candidateRoute = nil, nil
+	if p.fanout == nil {
+		return
+	}
+	var opts []nodes.Option
+	if p.policy != nil {
+		opts = append(opts, nodes.WithPolicyGate())
+	}
+	p.candidateRoute = nodes.CandidateRoute(opts...)
+	candidates, err := nodes.Candidate(opts...)
+	if err != nil {
+		p.block(
+			fmt.Sprintf("belay cannot assemble the graph its candidates run: %v", err),
+			"this is a bug in belay; please report it",
+		)
+		return
+	}
+	p.candidates = candidates
 }
 
 // nodeModel is one node of the route, the model it would be sent, and what

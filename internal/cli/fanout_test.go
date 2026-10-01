@@ -2,12 +2,17 @@ package cli
 
 import (
 	"context"
+	"os"
+	"path/filepath"
 	"slices"
 	"strings"
 	"testing"
 
+	"github.com/dhaam-ai/belay/internal/agent/replay"
 	"github.com/dhaam-ai/belay/internal/graph"
 	"github.com/dhaam-ai/belay/internal/state"
+	"github.com/dhaam-ai/belay/pkg/belay"
+	"github.com/dhaam-ai/belay/pkg/belay/belaytest"
 )
 
 // fanoutConfig is a belay.yaml for an in-place run that fans out to three
@@ -203,4 +208,134 @@ func fanoutDriftWarned(warnings []string) bool {
 	return slices.ContainsFunc(warnings, func(w string) bool {
 		return strings.Contains(w, "fanout") && strings.Contains(w, "the way it started")
 	})
+}
+
+// TestOptionsHandAFanoutRunItsCandidates: the dispatcher can only run
+// candidates it is given the means to run. Until options() passes a candidate
+// registry, RunContext.CandidateRuns is nil and the fanout node refuses with
+// graph.ErrNoCandidateRunner, which is the dormant state the pool shipped in.
+//
+// The registry is the candidates' graph, with the policy gate in it when the
+// run has a policy, because the candidates are where a fanout run's change is
+// made. Concurrency is fanout.concurrency as the file says it now, never a
+// pinned value: lowering it on a resume is how a person backs off.
+func TestOptionsHandAFanoutRunItsCandidates(t *testing.T) {
+	work := []string{graph.NodeCode, graph.NodeFix, graph.NodeReview, graph.NodeTest, graph.NodeWrite}
+	guarded := []string{graph.NodeCode, graph.NodeFix, graph.NodePolicy, graph.NodeReview, graph.NodeTest, graph.NodeWrite}
+
+	for _, tc := range []struct {
+		name            string
+		config          string
+		wantRegistry    []string
+		wantConcurrency int
+	}{
+		{
+			name: "a run that fans out", config: fanoutConfig + "  concurrency: 2\n",
+			wantRegistry: work, wantConcurrency: 2,
+		},
+		{
+			name: "a guarded run that fans out", config: fanoutConfig + "policy:\n  max_changed_files: 25\n",
+			wantRegistry: guarded, wantConcurrency: 3,
+		},
+		{name: "a run that does not fan out", config: singleConfig, wantConcurrency: 3},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ws := goWorkspace(t)
+			writeConfig(t, ws, tc.config)
+			plan, err := resolve(resolveRequest{workspace: ws, logger: quietLogger()})
+			if err != nil {
+				t.Fatalf("resolve: %v", err)
+			}
+			if len(plan.blockers) > 0 {
+				t.Fatalf("the plan is blocked: %s", blockerText(plan))
+			}
+			store, err := createRun(context.Background(), plan, runSpec{
+				Workspace: ws, RunID: "20260101T000000Z-abcdef123456", Goal: "add tests",
+			})
+			if err != nil {
+				t.Fatalf("createRun: %v", err)
+			}
+			opts := plan.options(store)
+
+			switch {
+			case tc.wantRegistry == nil && opts.CandidateRegistry != nil:
+				t.Errorf("CandidateRegistry = %v, want nil for a run that does not fan out",
+					opts.CandidateRegistry.Names())
+			case tc.wantRegistry != nil && opts.CandidateRegistry == nil:
+				t.Fatal("CandidateRegistry is nil: the fanout node would refuse with ErrNoCandidateRunner")
+			case tc.wantRegistry != nil && !slices.Equal(opts.CandidateRegistry.Names(), tc.wantRegistry):
+				t.Errorf("CandidateRegistry = %v, want %v", opts.CandidateRegistry.Names(), tc.wantRegistry)
+			}
+			if (opts.CandidateAgent != nil) != (tc.wantRegistry != nil) {
+				t.Errorf("CandidateAgent set = %v, want %v", opts.CandidateAgent != nil, tc.wantRegistry != nil)
+			}
+			if opts.Concurrency != tc.wantConcurrency {
+				t.Errorf("Concurrency = %d, want %d", opts.Concurrency, tc.wantConcurrency)
+			}
+		})
+	}
+}
+
+// TestEachCandidateReplaysItsOwnAnswers is item 4 of the switch, end to end
+// through the CLI's wiring: N candidates given one goal ask the agent the
+// same question, so an unscoped cassette hands whichever candidate asks first
+// whichever answer was recorded first. Each candidate must be given
+// Backend.Scoped(its id), and then it gets its own answer back whatever order
+// the candidates run in.
+//
+// The replay below runs in the opposite order to the recording, which is what
+// a concurrent fanout does whenever the scheduler likes.
+func TestEachCandidateReplaysItsOwnAnswers(t *testing.T) {
+	ws := goWorkspace(t)
+	answers := &belaytest.FakeAgent{
+		NameValue: "claude-code",
+		Func: func(_ context.Context, r belay.AgentRequest) (belay.AgentResponse, error) {
+			return belay.AgentResponse{Text: "work from " + filepath.Base(r.WorkDir)}, nil
+		},
+	}
+	rec := replay.Record(answers, replay.Provenance{BelayVersion: "v-test"})
+	ask := func(dir string) belay.AgentRequest {
+		return belay.AgentRequest{Prompt: "implement the plan", WorkDir: dir, Model: "sonnet"}
+	}
+	for _, id := range []string{"cand-01", "cand-02"} {
+		if _, err := rec.Scoped(id).Invoke(t.Context(), ask("/recorded/"+id)); err != nil {
+			t.Fatalf("record %s: %v", id, err)
+		}
+	}
+	path := cassettePath(ws, "")
+	if err := os.MkdirAll(filepath.Dir(path), 0o750); err != nil {
+		t.Fatalf("MkdirAll: %v", err)
+	}
+	cassette := rec.Cassette()
+	if err := cassette.Save(path); err != nil {
+		t.Fatalf("save the cassette: %v", err)
+	}
+
+	writeConfig(t, ws, fanoutConfig+"agent:\n  mode: replay\n")
+	plan, err := resolve(resolveRequest{workspace: ws, logger: quietLogger()})
+	if err != nil {
+		t.Fatalf("resolve: %v", err)
+	}
+	if len(plan.blockers) > 0 {
+		t.Fatalf("the plan is blocked: %s", blockerText(plan))
+	}
+	store, err := createRun(context.Background(), plan, runSpec{
+		Workspace: ws, RunID: "20260101T000000Z-abcdef123456", Goal: "add tests",
+	})
+	if err != nil {
+		t.Fatalf("createRun: %v", err)
+	}
+	opts := plan.options(store)
+	if opts.CandidateAgent == nil {
+		t.Fatal("CandidateAgent is nil, so every candidate would share one unscoped cassette")
+	}
+	for _, id := range []string{"cand-02", "cand-01"} {
+		resp, err := opts.CandidateAgent(id).Invoke(t.Context(), ask("/somewhere/else/"+id))
+		if err != nil {
+			t.Fatalf("%s replay: %v", id, err)
+		}
+		if want := "work from " + id; resp.Text != want {
+			t.Errorf("%s was replayed %q, want its own %q", id, resp.Text, want)
+		}
+	}
 }
