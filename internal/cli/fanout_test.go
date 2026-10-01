@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"bytes"
 	"context"
 	"os"
 	"path/filepath"
@@ -455,5 +456,95 @@ func TestAFanoutRunsModelsAreCheckedWhereTheyAreSpent(t *testing.T) {
 	}
 	if want := []string{graph.NodePlan, graph.NodeCode, graph.NodeFix}; !slices.Equal(got, want) {
 		t.Errorf("models are checked for %v, want %v", got, want)
+	}
+}
+
+// TestDryRunShowsEachCandidatesEnvelope: a fanout multiplies a run's bill by
+// N, so the dry run -- the place a person checks what they are about to pay
+// for -- says how the work is divided and what each candidate may spend:
+// the ceiling, divided once, evenly, before any candidate runs. It never
+// invents a total; it states the share, the graph each candidate walks, the
+// strategy that picks the winner, and the one way the run can pass
+// budget.max_usd, so nobody reads the ceiling as a hard cap it is not.
+func TestDryRunShowsEachCandidatesEnvelope(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		config string
+		want   []string
+		absent []string
+	}{
+		{
+			name:   "three at a time",
+			config: fanoutConfig,
+			want: []string{
+				"its candidates",
+				"3 candidates, 3 at a time, up to $1.00 and 666,666 tokens each",
+				"each walks code → write → test → fix → review → done, in a workspace of its own",
+				"the winner is the candidate with the fewest review issues",
+				"up to one step per candidate over budget.max_usd",
+				"each candidate gives up after 3 rounds of its test-and-fix loop, or 60 steps of its own",
+			},
+		},
+		{
+			name:   "one at a time, and never more at a time than there are candidates",
+			config: fanoutConfig + "  concurrency: 1\n",
+			want:   []string{"3 candidates, one at a time, up to $1.00 and 666,666 tokens each"},
+		},
+		{
+			name:   "concurrency above the candidate count behaves as the count",
+			config: fanoutConfig + "  concurrency: 9\n",
+			want:   []string{"3 candidates, 3 at a time"},
+		},
+		{
+			name:   "a run that does not fan out has no candidates to describe",
+			config: singleConfig,
+			absent: []string{"its candidates"},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ws := goWorkspace(t)
+			writeConfig(t, ws, tc.config)
+			out, _, err := runCLI(t, "--dry-run", "run", "--workspace", ws, "add tests")
+			if err != nil {
+				t.Fatalf("belay --dry-run run: %v\n%s", err, out)
+			}
+			for _, want := range tc.want {
+				if !strings.Contains(out, want) {
+					t.Errorf("the dry run never says %q; got:\n%s", want, out)
+				}
+			}
+			for _, absent := range tc.absent {
+				if strings.Contains(out, absent) {
+					t.Errorf("the dry run says %q, and should not; got:\n%s", absent, out)
+				}
+			}
+		})
+	}
+}
+
+// TestAFanoutRunAnnouncesItsCandidates: the lines a real run prints as it
+// starts say what each candidate may spend, beside the ceiling they are a
+// share of, because that is the figure a person watching N candidates spend
+// at once wants to hold them to.
+func TestAFanoutRunAnnouncesItsCandidates(t *testing.T) {
+	ws := goWorkspace(t)
+	writeConfig(t, ws, fanoutConfig)
+	var out bytes.Buffer
+	u := &ui{out: &out, err: &out}
+	plan, err := resolve(resolveRequest{workspace: ws, logger: newLogger(u)})
+	if err != nil {
+		t.Fatalf("resolve: %v", err)
+	}
+	store := seedRunDir(t, plan, "add tests")
+	announceStart(u, plan, store.Layout(), "add tests")
+
+	got := out.String()
+	for _, want := range []string{
+		"candidates:          3, 3 at a time, up to $1.00 and 666,666 tokens each",
+		"route:  plan → approve → fanout → join → done",
+	} {
+		if !strings.Contains(got, want) {
+			t.Errorf("the run never says %q; got:\n%s", want, got)
+		}
 	}
 }

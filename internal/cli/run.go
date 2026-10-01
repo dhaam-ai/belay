@@ -18,9 +18,11 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"github.com/dhaam-ai/belay/internal/budget"
 	"github.com/dhaam-ai/belay/internal/config"
 	"github.com/dhaam-ai/belay/internal/detect"
 	"github.com/dhaam-ai/belay/internal/graph"
+	"github.com/dhaam-ai/belay/internal/nodes/fanout"
 	"github.com/dhaam-ai/belay/internal/planarchive"
 	"github.com/dhaam-ai/belay/internal/policy"
 	"github.com/dhaam-ai/belay/internal/state"
@@ -604,6 +606,9 @@ func announceStart(u *ui, plan *runPlan, layout state.Layout, want string) {
 	u.say("  where it goes:       %s", plan.outputReason)
 	u.say("  most it can spend:   %s", u.emph(budgetCeiling(plan.config.Budget)))
 	u.say("  when it gets there:  %s", budgetOnExceed(plan.config.Budget))
+	if plan.fanout != nil {
+		u.say("  candidates:          %d, %s", plan.fanout.Candidates, candidateShare(plan))
+	}
 	u.say("  to stop it:          press Ctrl-C once; belay saves its state and exits")
 	u.say("")
 	u.say("run %s", layout.RunID())
@@ -988,6 +993,11 @@ func dryRunSections(u *ui, plan *runPlan, want, resuming string) []dryRunSection
 		dryRunOutput(plan),
 		dryRunSpend(u, plan),
 	)
+	// A run that does not fan out gets no section: one attempt is what every
+	// other section already describes.
+	if candidates := dryRunFanout(plan, resuming != ""); len(candidates.lines) > 0 {
+		sections = append(sections, candidates)
+	}
 	// A run whose graph could not be assembled has no nodes to price, and an
 	// empty section is a heading over nothing.
 	if models := dryRunModels(plan); len(models.lines) > 0 {
@@ -1036,6 +1046,82 @@ func dryRunSpend(u *ui, plan *runPlan) dryRunSection {
 		u.emph(budgetCeiling(plan.config.Budget)),
 		budgetOnExceed(plan.config.Budget),
 	}}
+}
+
+// dryRunFanout is how a fanout run divides its work and its money, and it
+// is empty for a run that does not fan out.
+//
+// It follows the discipline dryRunModels states: a share and never a total.
+// belay knows what each candidate may spend, because the fanout divides the
+// ceiling once, evenly, before any candidate runs; it does not know what
+// each will spend, so it says nothing about that. It also says the one thing
+// a person reading budget.max_usd as a hard cap would get wrong -- that a
+// candidate is checked before a step and not during one -- so the run's
+// final bill can pass the ceiling by a bounded amount, and the bound is
+// named.
+func dryRunFanout(plan *runPlan, resuming bool) dryRunSection {
+	if plan.fanout == nil {
+		return dryRunSection{}
+	}
+	n := plan.fanout.Candidates
+	share := fmt.Sprintf("%d candidates, %s", n, candidateShare(plan))
+	if resuming {
+		share += "; a candidate already claimed keeps the share it was given, or more if budget.max_usd " +
+			"has been raised since"
+	}
+	return dryRunSection{title: "its candidates", lines: []string{
+		share,
+		"budget.max_usd, less what the plan has cost, is divided evenly between them once, before any of them runs",
+		"each walks " + routeLine(plan.candidateRoute) + ", in a workspace of its own",
+		winnerLine(plan.fanout.Select),
+		"a candidate is checked before each step and not during one, so the run can end up to one step " +
+			"per candidate over budget.max_usd (two, if every candidate is stopped part-way through a step " +
+			"and resumed)",
+	}}
+}
+
+// candidateShare is how many of a fanout run's candidates run at a time, and
+// the most each may spend: "3 at a time, up to $1.00 and 666,666 tokens
+// each".
+//
+// The share is the one the fanout node computes, from the same function,
+// with nothing spent yet. The real fanout runs after the plan has been paid
+// for, so each real share is a little smaller, which is why this says "up
+// to". How many run at a time is fanout.concurrency, never more than there
+// are candidates, read from belay.yaml as it is now.
+func candidateShare(plan *runPlan) string {
+	n := plan.fanout.Candidates
+	together := min(max(plan.config.Fanout.Concurrency, 1), max(n, 1))
+	atATime := fmt.Sprintf("%d at a time", together)
+	if together == 1 {
+		atATime = "one at a time"
+	}
+	env, err := fanout.Envelopes(budget.Snapshot{}, plan.config.Budget, n)
+	if err != nil {
+		return atATime + ", and belay cannot divide budget.max_usd between them: " + err.Error()
+	}
+	each := "up to " + dollars(env.LimitUSD)
+	if env.LimitTokens > 0 {
+		each += " and " + thousands(env.LimitTokens) + " tokens"
+	}
+	return atATime + ", " + each + " each"
+}
+
+// winnerLine says how join will choose, in the words of the strategy the run
+// is pinned to. A strategy this belay does not know is named as it is
+// written: join refuses it, in one place, and this only describes.
+func winnerLine(strategy string) string {
+	const among = ", among those that passed their tests"
+	switch config.SelectStrategy(strategy) {
+	case config.SelectFewestIssues:
+		return "the winner is the candidate with the fewest review issues" + among
+	case config.SelectFirstPass:
+		return "the winner is the first candidate, in order, that passed its tests"
+	case config.SelectFastest:
+		return "the winner is the candidate that finished in the least time" + among
+	default:
+		return fmt.Sprintf("the winner is chosen by %q", strategy)
+	}
 }
 
 // dryRunModels is what each step that calls a model would be sent, and what
@@ -1165,11 +1251,20 @@ func dryRunSettings(plan *runPlan) dryRunSection {
 
 // dryRunRoute is the walk through the graph, and what bounds it.
 func dryRunRoute(plan *runPlan) dryRunSection {
+	work := graph.NodeCode
+	limits := fmt.Sprintf("it gives up after %d rounds of the test-and-fix loop, or %d steps in all",
+		plan.config.Graph.GiveUp, plan.config.Graph.MaxSteps)
+	// A fanout run has no test-and-fix loop of its own: each candidate has
+	// one, and each candidate run is held to these limits separately.
+	if plan.fanout != nil {
+		work = graph.NodeFanout
+		limits = fmt.Sprintf("each candidate gives up after %d rounds of its test-and-fix loop, or %d steps of its own",
+			plan.config.Graph.GiveUp, plan.config.Graph.MaxSteps)
+	}
 	return dryRunSection{title: "the route it would take", lines: []string{
 		routeLine(plan.route),
-		approvalLine(plan.config.Graph),
-		fmt.Sprintf("it gives up after %d rounds of the test-and-fix loop, or %d steps in all",
-			plan.config.Graph.GiveUp, plan.config.Graph.MaxSteps),
+		approvalLine(plan.config.Graph, work),
+		limits,
 	}}
 }
 
@@ -1235,12 +1330,13 @@ func routeLine(route []string) string {
 	return strings.Join(append(slices.Clone(route), "done"), " → ")
 }
 
-// approvalLine explains the one step that stops for a human.
-func approvalLine(g config.Graph) string {
+// approvalLine explains the one step that stops for a human. work is where
+// the run goes once the plan is accepted: code, or the fanout.
+func approvalLine(g config.Graph, work string) string {
 	if g.Approval {
 		return "approve stops the run so you can read the plan before any code is written"
 	}
-	return "graph.approval is false, so belay will not stop for you: it goes from plan straight to code"
+	return "graph.approval is false, so belay will not stop for you: it goes from plan straight to " + work
 }
 
 // projectLine names what belay recognised in the workspace.
