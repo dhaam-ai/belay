@@ -158,6 +158,26 @@ func (a Allowance) MarshalJSON() ([]byte, error) {
 	}{a.MaxTurns, a.Timeout.String(), a.AgentCalls})
 }
 
+// UnmarshalJSON reads what MarshalJSON writes. A corpus keeps a control
+// cell's allowance on disk and reads it back when it resumes, so the
+// human-readable form has to round-trip.
+func (a *Allowance) UnmarshalJSON(data []byte) error {
+	var raw struct {
+		MaxTurns   int    `json:"max_turns"`
+		Timeout    string `json:"timeout"`
+		AgentCalls int    `json:"agent_calls"`
+	}
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return err
+	}
+	timeout, err := time.ParseDuration(raw.Timeout)
+	if err != nil {
+		return fmt.Errorf("fixrate: an allowance's timeout %q: %w", raw.Timeout, err)
+	}
+	*a = Allowance{MaxTurns: raw.MaxTurns, Timeout: timeout, AgentCalls: raw.AgentCalls}
+	return nil
+}
+
 // controlAllowance derives the control arm's allowance from cfg: the
 // largest turn and wall-clock budget belay's graph could have spent on
 // agent invocations under the same configuration.
