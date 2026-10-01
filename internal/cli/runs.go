@@ -777,10 +777,14 @@ func runRuns(u *ui, opts runsOptions) error {
 		// sentence rather than a blank table: the reader needs to know
 		// belay looked and found nothing, not wonder whether it looked.
 		u.say("No runs yet in %s. Start one with belay run.", opts.workspace)
-		return nil
+	} else {
+		renderRunsTable(u, shown, len(all), opts.now)
 	}
-
-	renderRunsTable(u, shown, len(all), opts.now)
+	// Runs the queue made live in its goals' copies, not here; the JSON above
+	// keeps its documented shape, and the table says where they are.
+	for _, line := range queueRunsHint(opts.workspace) {
+		u.say("%s", line)
+	}
 	return nil
 }
 

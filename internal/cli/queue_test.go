@@ -1,12 +1,21 @@
 package cli
 
 import (
+	"bytes"
+	"context"
+	"encoding/json"
 	"errors"
+	"os"
+	"path/filepath"
 	"slices"
+	"strings"
 	"testing"
 
 	"github.com/dhaam-ai/belay/internal/config"
 	"github.com/dhaam-ai/belay/internal/graph"
+	"github.com/dhaam-ai/belay/internal/journal"
+	"github.com/dhaam-ai/belay/internal/nodes/approve"
+	"github.com/dhaam-ai/belay/internal/queue"
 	"github.com/dhaam-ai/belay/internal/state"
 )
 
@@ -98,5 +107,545 @@ func TestResolveAppliesAnOverrideAndChecksIt(t *testing.T) {
 		c.Budget.MaxUSD = -1
 	}}); err == nil {
 		t.Error("resolve accepted an override that leaves budget.max_usd negative")
+	}
+}
+
+// reaches stands in for the code node and everything after it, and notes
+// which goal got there: the one thing a parked goal must never do.
+type reaches struct{ goals *[]string }
+
+func (reaches) Name() string { return graph.NodeCode }
+
+func (n reaches) Run(_ context.Context, rc *graph.RunContext) (graph.Result, error) {
+	*n.goals = append(*n.goals, rc.Goal)
+	return graph.Result{Status: journal.StatusOK, Next: graph.End, Note: "done"}, nil
+}
+
+// fakeGoals returns a registry of a plan writer, the real approve gate, and
+// nodes, so a queued goal's run is real in every way that matters here --
+// its manifest, journal, gate and pause -- except the agent.
+func fakeGoals(nodes ...graph.Node) func() *graph.Registry {
+	return func() *graph.Registry {
+		r := graph.NewRegistry()
+		r.MustRegister(append([]graph.Node{planWriter{body: "# Plan\n\nwrite a test\n"}, approve.New()}, nodes...)...)
+		return r
+	}
+}
+
+// startQueue does what `belay queue start` does once it has decided to
+// start: build its worker, work through the queue and report. registry
+// replaces the graph each goal's run would get, so no agent is called.
+func startQueue(ctx context.Context, t *testing.T, ws string, registry func() *graph.Registry) (string, error) {
+	t.Helper()
+	var out bytes.Buffer
+	u := &ui{out: &out, err: &out}
+	store := openQueue(t, ws)
+	driver := newQueueDriver(u, ws, "", "")
+	driver.adjust = func(p *runPlan) { p.registry = registry() }
+	w, err := newQueueWorker(u, ws, store, driver)
+	if err != nil {
+		t.Fatalf("newQueueWorker: %v", err)
+	}
+	err = workQueue(ctx, u, w)
+	t.Logf("verbatim output of the start:\n%s", out.String())
+	return out.String(), err
+}
+
+// openQueue opens the queue of ws.
+func openQueue(t *testing.T, ws string) *queue.Store {
+	t.Helper()
+	store, err := queue.Open(ws)
+	if err != nil {
+		t.Fatalf("queue.Open: %v", err)
+	}
+	return store
+}
+
+// goal reads goal id from the queue of ws.
+func goal(t *testing.T, ws string, id int) queue.Entry {
+	t.Helper()
+	q, err := openQueue(t, ws).Read()
+	if err != nil {
+		t.Fatalf("read the queue: %v", err)
+	}
+	e, ok := q.Entry(id)
+	if !ok {
+		t.Fatalf("the queue has no goal %d: %+v", id, q.Entries)
+	}
+	return e
+}
+
+// queueAdd runs `belay queue add`, failing the test if it fails.
+func queueAdd(t *testing.T, ws string, args ...string) string {
+	t.Helper()
+	out, _, err := runCLI(t, append([]string{"queue", "add", "--workspace", ws}, args...)...)
+	if err != nil {
+		t.Fatalf("belay queue add %v: %v\n%s", args, err, out)
+	}
+	return out
+}
+
+// runLayout returns the layout of goal e's run, in its copy.
+func runLayout(t *testing.T, e queue.Entry) state.Layout {
+	t.Helper()
+	layout, err := state.NewLayout(e.Dir, e.RunID)
+	if err != nil {
+		t.Fatalf("state.NewLayout(%s, %s): %v", e.Dir, e.RunID, err)
+	}
+	return layout
+}
+
+// TestQueueAddPutsTheGoalAtTheEnd covers adding and listing: each goal gets
+// the next id and says what will happen to its plan, and the listing --
+// table and JSON -- shows the goals in the order they will run.
+func TestQueueAddPutsTheGoalAtTheEnd(t *testing.T) {
+	ws := goWorkspace(t)
+
+	first := queueAdd(t, ws, "add tests for the parser")
+	second := queueAdd(t, ws, "--no-approval", "add docs")
+	t.Logf("verbatim output of the adds:\n%s%s", first, second)
+	for _, phrase := range []string{"added goal 1", "nothing is ahead of it", "belay queue approve 1", "belay queue start"} {
+		if !strings.Contains(first, phrase) {
+			t.Errorf("adding the first goal never says %q:\n%s", phrase, first)
+		}
+	}
+	for _, phrase := range []string{"added goal 2", "1 goal is ahead of it", "--no-approval"} {
+		if !strings.Contains(second, phrase) {
+			t.Errorf("adding the second goal never says %q:\n%s", phrase, second)
+		}
+	}
+	if strings.Contains(second, "belay queue approve 2") {
+		t.Errorf("a goal added with --no-approval was told to wait for an approval:\n%s", second)
+	}
+
+	table, _, err := runCLI(t, "queue", "list", "--workspace", ws)
+	if err != nil {
+		t.Fatalf("belay queue list: %v", err)
+	}
+	t.Logf("verbatim list:\n%s", table)
+	if i, j := strings.Index(table, "add tests for the parser"), strings.Index(table, "add docs"); i < 0 || j < i {
+		t.Errorf("the list does not show both goals in the order they run:\n%s", table)
+	}
+
+	raw, _, err := runCLI(t, "queue", "list", "--workspace", ws, "--json")
+	if err != nil {
+		t.Fatalf("belay queue list --json: %v", err)
+	}
+	var listing QueueListing
+	if err := json.Unmarshal([]byte(raw), &listing); err != nil {
+		t.Fatalf("belay queue list --json is not the documented shape: %v\n%s", err, raw)
+	}
+	if listing.Workspace != ws || len(listing.Goals) != 2 {
+		t.Fatalf("listing = %+v, want both goals of %s", listing, ws)
+	}
+	if g := listing.Goals[1]; g.ID != 2 || g.Goal != "add docs" || !g.NoApproval || g.State != "queued" || g.RunID != "" {
+		t.Errorf("goal 2 in JSON = %+v, want it queued, with no run, added with --no-approval", g)
+	}
+	for _, key := range []string{`"id"`, `"goal"`, `"no_approval"`, `"state"`, `"run_id"`, `"copy"`, `"spent_usd"`, `"note"`} {
+		if !strings.Contains(raw, key) {
+			t.Errorf("belay queue list --json has no %s key; every documented key is always present:\n%s", key, raw)
+		}
+	}
+}
+
+// TestQueueRmTakesBackOnlyAGoalNothingStarted: rm removes a goal that is
+// still waiting its turn, and says why it will not remove one that has
+// started, or one that is not there.
+func TestQueueRmTakesBackOnlyAGoalNothingStarted(t *testing.T) {
+	ws := goWorkspace(t)
+	queueAdd(t, ws, "add tests for the parser")
+	queueAdd(t, ws, "add docs")
+
+	out, _, err := runCLI(t, "queue", "rm", "--workspace", ws, "1")
+	if err != nil || !strings.Contains(out, "removed goal 1") {
+		t.Fatalf("belay queue rm 1 = (%v)\n%s", err, out)
+	}
+	if got := goal(t, ws, 1); got.State != queue.StateRemoved {
+		t.Errorf("goal 1 is %s after rm, want removed", got.State)
+	}
+	list, _, err := runCLI(t, "queue", "list", "--workspace", ws)
+	if err != nil || strings.Contains(list, "add tests for the parser") {
+		t.Errorf("the list still shows the removed goal (%v):\n%s", err, list)
+	}
+
+	for _, tc := range []struct{ id, want string }{
+		{id: "1", want: "removed"},
+		{id: "9", want: "no goal 9"},
+		{id: "two", want: "goal number"},
+	} {
+		_, _, err := runCLI(t, "queue", "rm", "--workspace", ws, tc.id)
+		if err == nil || !strings.Contains(err.Error(), tc.want) {
+			t.Errorf("belay queue rm %s = %v, want a refusal saying %q", tc.id, err, tc.want)
+		}
+	}
+}
+
+// TestTheQueueParksAGoalAtItsPlanAndRunsTheNext is the crux of the queue,
+// end to end through belay's own worker and dispatcher. A goal whose plan
+// stops for review is parked and the queue moves on to the next; only the
+// goal the person added with --no-approval skips the gate. Every goal runs in
+// its own copy, in place, filing no plan, and the checkout gets no run of its
+// own. Approving the parked goal and starting again continues that goal's
+// own run past its gate.
+func TestTheQueueParksAGoalAtItsPlanAndRunsTheNext(t *testing.T) {
+	ws := goWorkspace(t)
+	queueAdd(t, ws, "add tests for the parser")
+	queueAdd(t, ws, "--no-approval", "add docs")
+	var reached []string
+	registry := fakeGoals(reaches{goals: &reached})
+
+	out, err := startQueue(t.Context(), t, ws, registry)
+	if err != nil {
+		t.Fatalf("the first start: %v", err)
+	}
+	parked, done := goal(t, ws, 1), goal(t, ws, 2)
+	if parked.State != queue.StateWaiting || done.State != queue.StateFinished {
+		t.Fatalf("goal 1 is %s and goal 2 is %s, want goal 1 parked and goal 2 finished", parked.State, done.State)
+	}
+	if !slices.Equal(reached, []string{"add docs"}) {
+		t.Errorf("goals that reached code = %v, want only the one added with --no-approval", reached)
+	}
+	for _, phrase := range []string{"goal 1", "waiting for you", "plan.md", "belay queue approve 1", "goal 2", "finished"} {
+		if !strings.Contains(out, phrase) {
+			t.Errorf("the start never says %q", phrase)
+		}
+	}
+
+	work := filepath.Join(ws, ".belay", "queue", "work")
+	for _, e := range []queue.Entry{parked, done} {
+		if filepath.Dir(e.Dir) != work || filepath.Base(e.Dir) != e.RunID {
+			t.Errorf("goal %d's copy is %s, want %s", e.ID, e.Dir, filepath.Join(work, e.RunID))
+		}
+		man, err := state.LoadManifest(runLayout(t, e).ManifestPath())
+		if err != nil {
+			t.Fatalf("goal %d's run has no manifest in its copy: %v", e.ID, err)
+		}
+		if man.Workspace != e.Dir || man.Goal != e.Goal {
+			t.Errorf("goal %d's run works in %s on %q, want its copy %s and its goal", e.ID, man.Workspace, man.Goal, e.Dir)
+		}
+		if man.Output.Branched() || man.ArchivedPlan.Dir != "" {
+			t.Errorf("goal %d's run pinned output %+v and archive %q, want in place and no archive",
+				e.ID, man.Output, man.ArchivedPlan.Dir)
+		}
+	}
+	if _, err := os.Stat(filepath.Join(ws, ".belay", "runs")); !errors.Is(err, os.ErrNotExist) {
+		t.Errorf("the checkout has a run of its own (stat error %v); every goal runs in its copy", err)
+	}
+
+	if out, _, err := runCLI(t, "queue", "approve", "--workspace", ws, "1"); err != nil {
+		t.Fatalf("belay queue approve 1: %v\n%s", err, out)
+	}
+	blackboard, err := state.LoadState(runLayout(t, parked).StatePath())
+	if err != nil || !blackboard.Plan.Approved {
+		t.Fatalf("after belay queue approve the run's plan is approved = %v (%v), want true", blackboard.Plan.Approved, err)
+	}
+	if got := goal(t, ws, 1); got.State != queue.StateApproved {
+		t.Errorf("goal 1 is %s after approve, want approved", got.State)
+	}
+
+	if _, err := startQueue(t.Context(), t, ws, registry); err != nil {
+		t.Fatalf("the second start: %v", err)
+	}
+	if got := goal(t, ws, 1); got.State != queue.StateFinished || got.RunID != parked.RunID {
+		t.Errorf("goal 1 after the approval = %+v, want it finished, in the run it parked in, %s", got, parked.RunID)
+	}
+	if !slices.Equal(reached, []string{"add docs", "add tests for the parser"}) {
+		t.Errorf("goals that reached code = %v, want goal 1 to follow once approved", reached)
+	}
+}
+
+// TestQueueApproveRecordsTheRunsApprovalFirst pins the order of approve's two
+// writes. The approval the gate reads is the run's own; the queue's record
+// only sends the next worker to it. Written the other way round, a failure
+// in between would send a worker into a gate with nothing approved. Here the
+// queue's log refuses the write: the run is approved, the goal still waits,
+// and approving again once the log takes writes finishes the job.
+func TestQueueApproveRecordsTheRunsApprovalFirst(t *testing.T) {
+	ws := goWorkspace(t)
+	queueAdd(t, ws, "add tests for the parser")
+	var reached []string
+	if _, err := startQueue(t.Context(), t, ws, fakeGoals(reaches{goals: &reached})); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	parked := goal(t, ws, 1)
+	log := openQueue(t, ws).LogPath()
+	if err := os.Chmod(log, 0o400); err != nil {
+		t.Fatalf("make the log read-only: %v", err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(log, 0o600) })
+
+	if _, _, err := runCLI(t, "queue", "approve", "--workspace", ws, "1"); err == nil {
+		t.Fatal("belay queue approve succeeded with a log it cannot write to")
+	}
+	blackboard, err := state.LoadState(runLayout(t, parked).StatePath())
+	if err != nil || !blackboard.Plan.Approved {
+		t.Errorf("the run's plan approved = %v (%v), want true: the run's approval is written first", blackboard.Plan.Approved, err)
+	}
+	if got := goal(t, ws, 1); got.State != queue.StateWaiting {
+		t.Errorf("goal 1 is %s, want it still waiting", got.State)
+	}
+
+	if err := os.Chmod(log, 0o600); err != nil {
+		t.Fatalf("make the log writable: %v", err)
+	}
+	if out, _, err := runCLI(t, "queue", "approve", "--workspace", ws, "1"); err != nil {
+		t.Fatalf("belay queue approve again: %v\n%s", err, out)
+	}
+	if got := goal(t, ws, 1); got.State != queue.StateApproved {
+		t.Errorf("goal 1 is %s, want approved", got.State)
+	}
+
+	if _, _, err := runCLI(t, "queue", "approve", "--workspace", ws, "1"); err == nil ||
+		!strings.Contains(err.Error(), "not waiting") {
+		t.Errorf("approving an approved goal = %v, want a refusal saying it is not waiting", err)
+	}
+}
+
+// TestCtrlCLeavesTheGoalInHandForTheNextStart: Ctrl-C during a goal pauses
+// that goal's run where it stands, the start says how to carry on, and the
+// next start continues the same run -- re-running the step that was cut
+// short -- before it touches the next goal.
+func TestCtrlCLeavesTheGoalInHandForTheNextStart(t *testing.T) {
+	ws := goWorkspace(t)
+	queueAdd(t, ws, "--no-approval", "add tests for the parser")
+	queueAdd(t, ws, "--no-approval", "add docs")
+
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	out, err := startQueue(ctx, t, ws, fakeGoals(pressesCtrlC{name: graph.NodeCode, cancel: cancel}))
+	var exit *ExitError
+	if !errors.As(err, &exit) || exit.Code != graph.ExitAborted {
+		t.Fatalf("start = %v, want the exit code a Ctrl-C always has, %d", err, graph.ExitAborted)
+	}
+	if !strings.Contains(out, "belay queue start") {
+		t.Errorf("after Ctrl-C the start never says how to carry on:\n%s", out)
+	}
+	first := goal(t, ws, 1)
+	if first.State != queue.StateClaimed {
+		t.Fatalf("goal 1 is %s after Ctrl-C, want it still in hand", first.State)
+	}
+	man, err := state.LoadManifest(runLayout(t, first).ManifestPath())
+	if err != nil || man.Status != state.RunStatusPaused {
+		t.Fatalf("goal 1's run is %v (%v), want paused where Ctrl-C stopped it", man.Status, err)
+	}
+	if got := goal(t, ws, 2); got.State != queue.StateQueued {
+		t.Errorf("goal 2 is %s, want it untouched", got.State)
+	}
+
+	var reached []string
+	if _, err := startQueue(t.Context(), t, ws, fakeGoals(reaches{goals: &reached})); err != nil {
+		t.Fatalf("the next start: %v", err)
+	}
+	if got := goal(t, ws, 1); got.State != queue.StateFinished || got.RunID != first.RunID {
+		t.Errorf("goal 1 = %+v, want it finished in the run Ctrl-C paused, %s", got, first.RunID)
+	}
+	if !slices.Equal(reached, []string{"add tests for the parser", "add docs"}) {
+		t.Errorf("goals that reached code = %v, want goal 1 continued before goal 2", reached)
+	}
+	read, err := journal.ReadFile(runLayout(t, first).JournalPath())
+	if err != nil {
+		t.Fatalf("read goal 1's journal: %v", err)
+	}
+	plans := 0
+	for _, rec := range read.Records {
+		if rec.Event == journal.EventNodeStarted && rec.Node == graph.NodePlan {
+			plans++
+		}
+	}
+	if plans != 1 {
+		t.Errorf("goal 1's plan ran %d times, want once: the steps that finished are not run again", plans)
+	}
+}
+
+// TestQueueStartRefusesWhatItShouldNotStart: nothing is claimed, copied or
+// spent when the queue cannot be worked through safely.
+func TestQueueStartRefusesWhatItShouldNotStart(t *testing.T) {
+	t.Run("a ceiling nobody watches", func(t *testing.T) {
+		ws := goWorkspace(t)
+		writeConfig(t, ws, "version: 1\nbudget:\n  max_usd: 5\n  on_exceed: warn\n")
+		queueAdd(t, ws, "add tests for the parser")
+		before := readFile(t, openQueue(t, ws).LogPath())
+
+		out, _, err := runCLI(t, "queue", "start", "--workspace", ws)
+		if err == nil || !strings.Contains(out, "budget.on_exceed") {
+			t.Errorf("start with budget.on_exceed warn = %v, want a refusal naming the setting:\n%s", err, out)
+		}
+		assertNothingStarted(t, ws, before)
+	})
+
+	t.Run("another start working through the queue", func(t *testing.T) {
+		ws := goWorkspace(t)
+		queueAdd(t, ws, "add tests for the parser")
+		lock, err := openQueue(t, ws).LockWorker()
+		if err != nil {
+			t.Fatalf("LockWorker: %v", err)
+		}
+		defer func() { _ = lock.Release() }()
+		before := readFile(t, openQueue(t, ws).LogPath())
+
+		out, _, err := runCLI(t, "queue", "start", "--workspace", ws)
+		var exit *ExitError
+		if !errors.As(err, &exit) || exit.Code != graph.ExitFailed || !strings.Contains(out, "already working through this queue") {
+			t.Errorf("start while another holds the queue = %v, want a refusal saying so:\n%s", err, out)
+		}
+		assertNothingStarted(t, ws, before)
+	})
+}
+
+// assertNothingStarted fails the test unless the queue's log is as it was and
+// no copy was made.
+func assertNothingStarted(t *testing.T, ws, before string) {
+	t.Helper()
+	if got := readFile(t, openQueue(t, ws).LogPath()); got != before {
+		t.Errorf("the queue's log changed:\nbefore: %s\nafter:  %s", before, got)
+	}
+	if _, err := os.Stat(filepath.Join(ws, ".belay", "queue", "work")); !errors.Is(err, os.ErrNotExist) {
+		t.Errorf("a copy directory was made (stat error %v)", err)
+	}
+}
+
+// TestQueueStartAnnouncesTheMostItCanSpend: before anything is spent, a start
+// says how many goals it will run, the most each can spend, and the product,
+// which is the most the whole queue can spend. A dry run says the same and
+// creates nothing.
+func TestQueueStartAnnouncesTheMostItCanSpend(t *testing.T) {
+	ws := goWorkspace(t)
+	writeConfig(t, ws, "version: 1\nbudget:\n  max_usd: 2.5\n")
+	queueAdd(t, ws, "add tests for the parser")
+	queueAdd(t, ws, "--no-approval", "add docs")
+	queueAdd(t, ws, "upgrade the client")
+	before := readFile(t, openQueue(t, ws).LogPath())
+
+	out, _, err := runCLI(t, "queue", "start", "--workspace", ws, "--dry-run")
+	if err != nil {
+		t.Fatalf("belay queue start --dry-run: %v\n%s", err, out)
+	}
+	t.Logf("verbatim dry run:\n%s", out)
+	for _, phrase := range []string{"3 goals", "$2.50", "3 × $2.50", "$7.50", "goals 1 and 3", "Nothing was created and nothing was spent"} {
+		if !strings.Contains(out, phrase) {
+			t.Errorf("the dry run never says %q", phrase)
+		}
+	}
+	assertNothingStarted(t, ws, before)
+}
+
+// TestQueueStartWithNothingToRun: an empty queue, or one whose goals are all
+// parked or ended, is not an error.
+func TestQueueStartWithNothingToRun(t *testing.T) {
+	ws := goWorkspace(t)
+	out, _, err := runCLI(t, "queue", "start", "--workspace", ws)
+	if err != nil || !strings.Contains(out, "nothing in the queue") {
+		t.Errorf("start with an empty queue = %v, want it to say there is nothing to run:\n%s", err, out)
+	}
+}
+
+// TestQueueStatusIsTheMorningReport: after a night's start, status says
+// what happened to each goal, what was spent, and the exact commands that
+// continue -- with no subcommand at all, too.
+func TestQueueStatusIsTheMorningReport(t *testing.T) {
+	ws := goWorkspace(t)
+	queueAdd(t, ws, "add tests for the parser")
+	queueAdd(t, ws, "--no-approval", "add docs")
+	var reached []string
+	if _, err := startQueue(t.Context(), t, ws, fakeGoals(reaches{goals: &reached})); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	finished := goal(t, ws, 2)
+
+	for _, args := range [][]string{{"queue", "status"}, {"queue"}} {
+		out, _, err := runCLI(t, append(args, "--workspace", ws)...)
+		if err != nil {
+			t.Fatalf("belay %v: %v", args, err)
+		}
+		t.Logf("verbatim belay %v:\n%s", args, out)
+		for _, phrase := range []string{
+			"1 waiting for plan approval", "1 finished",
+			"belay queue approve 1",
+			"belay --workspace " + finished.Dir + " timeline " + finished.RunID,
+			"nothing left it could run",
+		} {
+			if !strings.Contains(out, phrase) {
+				t.Errorf("belay %v never says %q", args, phrase)
+			}
+		}
+	}
+}
+
+// TestBelayRunsPointsAtRunsInQueueCopies: a queued goal's run lives in its
+// copy, so `belay runs` in the checkout does not list it. Its JSON is what it
+// always was; the table says where those runs are and how to list them.
+func TestBelayRunsPointsAtRunsInQueueCopies(t *testing.T) {
+	ws := goWorkspace(t)
+	queueAdd(t, ws, "--no-approval", "add docs")
+	var reached []string
+	if _, err := startQueue(t.Context(), t, ws, fakeGoals(reaches{goals: &reached})); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	ran := goal(t, ws, 1)
+
+	table, _, err := runCLI(t, "runs", "--workspace", ws)
+	if err != nil {
+		t.Fatalf("belay runs: %v", err)
+	}
+	t.Logf("verbatim belay runs:\n%s", table)
+	if want := "belay --workspace " + ran.Dir + " runs"; !strings.Contains(table, want) {
+		t.Errorf("belay runs never says %q", want)
+	}
+
+	raw, _, err := runCLI(t, "runs", "--workspace", ws, "--json")
+	if err != nil {
+		t.Fatalf("belay runs --json: %v", err)
+	}
+	var listing map[string]json.RawMessage
+	if err := json.Unmarshal([]byte(raw), &listing); err != nil {
+		t.Fatalf("belay runs --json: %v\n%s", err, raw)
+	}
+	keys := make([]string, 0, len(listing))
+	for k := range listing {
+		keys = append(keys, k)
+	}
+	slices.Sort(keys)
+	if want := []string{"hidden", "runs", "shown", "total", "workspace"}; !slices.Equal(keys, want) {
+		t.Errorf("belay runs --json keys = %v, want the documented %v, unchanged", keys, want)
+	}
+}
+
+// TestTheReportShowsTheLastStartsResults: the closing report of a start, and
+// the status after it, say what became of the goals that start ran. A queue
+// used for weeks must not repeat every goal it ever finished each morning;
+// the list still has them all.
+func TestTheReportShowsTheLastStartsResults(t *testing.T) {
+	ws := goWorkspace(t)
+	var reached []string
+	registry := fakeGoals(reaches{goals: &reached})
+
+	queueAdd(t, ws, "--no-approval", "add tests for the parser")
+	if _, err := startQueue(t.Context(), t, ws, registry); err != nil {
+		t.Fatalf("the first start: %v", err)
+	}
+	earlier := goal(t, ws, 1)
+
+	queueAdd(t, ws, "--no-approval", "add docs")
+	out, err := startQueue(t.Context(), t, ws, registry)
+	if err != nil {
+		t.Fatalf("the second start: %v", err)
+	}
+	status, _, err := runCLI(t, "queue", "status", "--workspace", ws)
+	if err != nil {
+		t.Fatalf("belay queue status: %v", err)
+	}
+	t.Logf("verbatim status:\n%s", status)
+
+	latest := goal(t, ws, 2)
+	for name, text := range map[string]string{"the second start": out, "the status after it": status} {
+		if !strings.Contains(text, "timeline "+latest.RunID) {
+			t.Errorf("%s never points at goal 2, which it finished:\n%s", name, text)
+		}
+		if strings.Contains(text, "timeline "+earlier.RunID) {
+			t.Errorf("%s repeats goal 1, which an earlier start finished:\n%s", name, text)
+		}
+	}
+	if !strings.Contains(status, "add tests for the parser") {
+		t.Errorf("the status's list lost goal 1:\n%s", status)
 	}
 }
