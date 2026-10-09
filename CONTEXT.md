@@ -205,3 +205,9 @@ _Avoid_: source, metadata
 The same backend on the same corpus and budget with no graph — one call per task —
 against which belay's fix rate is compared.
 _Avoid_: baseline (overloaded), bare mode, vanilla
+
+**Cell**:
+One task of a measurement corpus, in one arm, at one replicate — the unit a
+corpus run finishes, pays for and scores once, and never again when it is
+resumed. A full SWE-bench Verified run is 500 tasks in two arms: 1,000 cells.
+_Avoid_: trial, sample, job
