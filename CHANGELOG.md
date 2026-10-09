@@ -788,6 +788,17 @@ that only `pkg/belay` carries a compatibility promise. Everything under
   listed as unreadable. A Ctrl-C during the copy now cancels it, removes
   what was copied, and says nothing was kept or spent.
 
+- **belay says why the lint gate has nothing to run, instead of claiming it
+  found no project.** With `review.mode: lint` in a Python project that
+  never configured ruff, belay refused to start because it "recognises no
+  Go, Node or Python project" there, although it had recognised the project
+  and would have run its tests. It now says it found a Python project with
+  no ruff configuration, and that an empty `[tool.ruff]` table in
+  `pyproject.toml`, or a `ruff.toml`, gives the gate ruff's default rules
+  (judged only on the lines a run changes); or to set `review.mode` to
+  `sonar`. A Node project without ESLint gets the same, and a directory with
+  no project at all keeps the message it had.
+
 ### Security
 
 - **Text belay did not write can no longer drive your terminal.** A plan, a

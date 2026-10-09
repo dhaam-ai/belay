@@ -571,10 +571,12 @@ func (p *runPlan) resolveGate(execer *exec.Runner) {
 	case config.ReviewModeLint:
 		p.linter = pickLinter(p.workspace, p.config, execer, p.logger)
 		if p.linter == nil {
-			p.block(
-				fmt.Sprintf("review.mode is \"lint\", but belay recognises no Go, Node or Python project in %s to lint.", p.workspace),
-				"point --workspace at the repository, or set review.mode to \"sonar\" in belay.yaml",
-			)
+			// linter.Explain names what belay found and the change that
+			// gives the gate something to run. Above all it does not say
+			// "no project" for a Python project that never configured ruff,
+			// which belay recognises and whose tests it would run.
+			why, _ := linter.Explain(p.workspace)
+			p.block(why.Problem, why.Fix)
 		}
 	case config.ReviewModeSonar:
 		p.reviewer = newScanner(p.config, execer, p.logger)
