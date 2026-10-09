@@ -2056,3 +2056,73 @@ func TestACancelledPoolAdmitsNoFurtherCandidate(t *testing.T) {
 		}
 	}
 }
+
+// TestACandidateCutShortInItsFirstPaidStepIsChargedItsParentsCostliestStep:
+// a candidate's own ledger is empty until its first paid step finishes, so
+// the estimate an attempt cut short is charged (the costliest step the run
+// has paid for) was zero for every Ctrl-C, timeout or kill during a
+// candidate's first step, which is when most of them land. The parent has
+// already paid for its plan by then, and that is evidence of what one step
+// of this run costs, so a candidate run is charged at least that. Without it
+// interrupting a fanout and resuming it, again and again, bought one paid
+// first step per candidate per cycle and recorded none of them.
+func TestACandidateCutShortInItsFirstPaidStepIsChargedItsParentsCostliestStep(t *testing.T) {
+	planSpend := journal.Usage{InputTokens: 1000, OutputTokens: 200, USD: 0.40}
+	h := newRun(t, budgetCfg(5.00, 0), "charge every cut, from the first")
+	h.seedJournal(t,
+		journal.Record{Event: journal.EventRunStarted},
+		journal.Record{Event: journal.EventNodeStarted, Node: graph.NodePlan, Attempt: 1},
+		journal.Record{
+			Event: journal.EventNodeFinished, Node: graph.NodePlan, Attempt: 1,
+			Status: journal.StatusOK, Next: graph.NodeFanout, Usage: &planSpend,
+		},
+	)
+	iso := reclaimingIsolator{newFakeIsolator(h.layout.CandidatesDir())}
+	specs := poolSpecs(h, 1)
+	specs[0].Envelope = state.Envelope{LimitUSD: 1.00}
+
+	// The code node cancels the dispatch it is running in, as a Ctrl-C
+	// would, and reports nothing, as a killed agent CLI does.
+	var cancelCurrent atomic.Pointer[context.CancelFunc]
+	code := newCandidateNode(graph.NodeCode, func(ctx context.Context, _ string, _ *graph.RunContext) (graph.Result, error) {
+		(*cancelCurrent.Load())()
+		<-ctx.Done()
+		return Result{}, ctx.Err()
+	})
+
+	var budgetStopped bool
+	for range 10 {
+		ctx, cancel := context.WithCancel(context.Background())
+		cancelCurrent.Store(&cancel)
+		node := &runsCandidates{specs: specs}
+		_, _ = h.poolDispatcher(t, pool{
+			registry: candidateRegistry(t, code), isolator: iso, concurrency: 1, pauseOnCancel: true,
+		}, node).Resume(ctx)
+		cancel()
+		if node.outcomes != nil && node.outcomes[0].Status == state.RunStatusPaused && node.err == nil {
+			budgetStopped = true
+			break
+		}
+	}
+
+	recs := candidateRecords(t, h, "cand-01")
+	var first *journal.Record
+	for i := range recs {
+		if recs[i].Interrupted() {
+			first = &recs[i]
+			break
+		}
+	}
+	want := journal.Usage{InputTokens: 1000, OutputTokens: 200, USD: 0.40, Estimated: true}
+	if first == nil || first.Usage == nil || *first.Usage != want {
+		t.Fatalf("the candidate's first cut-short attempt was charged %+v, want the parent's plan %+v", first, want)
+	}
+	if !budgetStopped {
+		t.Fatalf("ten Ctrl-C and resume cycles never brought the candidate to its envelope; code ran %d times", code.ran("cand-01"))
+	}
+	// $0.40 a cut against a $1.00 envelope: the guard lets a third cut start
+	// at $0.80 and stops the fourth at $1.20.
+	if n := code.ran("cand-01"); n != 3 {
+		t.Errorf("the candidate's first step started %d times, want 3 before its envelope stopped it", n)
+	}
+}

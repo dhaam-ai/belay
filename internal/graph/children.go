@@ -310,6 +310,10 @@ func (r *candidateRunner) Run(ctx context.Context, specs []CandidateSpec) ([]Can
 	if err != nil {
 		return outcomes, fmt.Errorf("graph: load the parent manifest before claiming candidates: %w", err)
 	}
+	floor, err := r.costliestParentStep()
+	if err != nil {
+		return outcomes, err
+	}
 
 	claims := make([]*candidateClaim, len(specs))
 	whole := true
@@ -322,6 +326,7 @@ func (r *candidateRunner) Run(ctx context.Context, specs []CandidateSpec) ([]Can
 				slog.String("candidate", spec.ID), slog.String("error", err.Error()))
 			continue
 		}
+		c.floor = floor
 		claims[i] = c
 		outcomes[i].RunDir = c.runDir
 	}
@@ -341,6 +346,30 @@ func (r *candidateRunner) Run(ctx context.Context, specs []CandidateSpec) ([]Can
 		return outcomes, fmt.Errorf("graph: the candidate runs were interrupted: %w", err)
 	}
 	return outcomes, nil
+}
+
+// costliestParentStep is the most any one step of the parent run has cost,
+// in each dimension, as its journal records it: what every candidate run is
+// handed as Options.InterruptedFloor, so that an attempt of a candidate's
+// first paid step cut short with nothing reported is charged something.
+//
+// It is read from the parent's journal and not passed down from its ledger,
+// because the parent is not running a node that could hand it over: the
+// fanout node is, and a node never sees the ledger. Reading it here, once per
+// call, is also what keeps it a function of the parent's durable record, so
+// every attempt of the fanout hands its candidates the same figure.
+func (r *candidateRunner) costliestParentStep() (belay.Usage, error) {
+	read, err := journal.ReadFile(r.parent.store.Layout().JournalPath())
+	if err != nil {
+		return belay.Usage{}, fmt.Errorf("graph: read the parent journal before claiming candidates: %w", err)
+	}
+	largest := rebuildLedger(read.Records, state.Budget{}).Largest()
+	floor := r.parent.floor
+	return belay.Usage{
+		InputTokens:  max(largest.InputTokens, floor.InputTokens),
+		OutputTokens: max(largest.OutputTokens, floor.OutputTokens),
+		USD:          max(largest.USD, floor.USD),
+	}, nil
 }
 
 // drive runs the claimed candidates, at most concurrency of them at a time,
@@ -563,6 +592,9 @@ func (r *candidateRunner) resume(ctx context.Context, c *candidateClaim, out *Ca
 //     journal.FirstNode is "plan", a node its registry does not have. That
 //     includes a journal holding run_started and nothing else, which is
 //     what a Ctrl-C or a kill between Create and the first node leaves;
+//   - InterruptedFloor is the parent's costliest step, so that a step of the
+//     candidate cut short before its own ledger holds anything is charged
+//     what one step of this run has been seen to cost, not nothing;
 //   - Config is the parent's with the budget replaced by this candidate's
 //     persisted envelope, enforced as abort. budget.on_exceed: warn is
 //     deliberately not honoured inside a candidate: a warning per candidate
@@ -590,20 +622,21 @@ func (r *candidateRunner) childOptions(c *candidateClaim, store *state.Store) Op
 		agent = r.agentFor(c.spec.ID)
 	}
 	return Options{
-		Store:         store,
-		Registry:      r.registry,
-		Config:        candidateConfig(p.cfg, c.envelope),
-		Entry:         NodeCode,
-		Logger:        p.logger.With(slog.String("candidate", c.spec.ID)),
-		Now:           p.now,
-		Redact:        p.redact,
-		PauseOnCancel: true,
-		PauseAfter:    0,
-		Fingerprint:   p.fingerprint,
-		Agent:         agent,
-		Runner:        p.runner,
-		Linter:        p.linter,
-		Reviewer:      p.reviewer,
+		Store:            store,
+		Registry:         r.registry,
+		Config:           candidateConfig(p.cfg, c.envelope),
+		Entry:            NodeCode,
+		InterruptedFloor: c.floor,
+		Logger:           p.logger.With(slog.String("candidate", c.spec.ID)),
+		Now:              p.now,
+		Redact:           p.redact,
+		PauseOnCancel:    true,
+		PauseAfter:       0,
+		Fingerprint:      p.fingerprint,
+		Agent:            agent,
+		Runner:           p.runner,
+		Linter:           p.linter,
+		Reviewer:         p.reviewer,
 	}
 }
 
@@ -714,6 +747,9 @@ type candidateClaim struct {
 	// call found it, which is what decides whether debris a Create that
 	// died part-way left has to be reclaimed before another is attempted.
 	adopted bool
+	// floor is the parent's costliest step, the candidate run's
+	// Options.InterruptedFloor (see costliestParentStep).
+	floor belay.Usage
 }
 
 // claim makes sure spec has a run directory, either by writing one or by

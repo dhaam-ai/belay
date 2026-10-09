@@ -68,7 +68,7 @@ SonarQube and AI review are refused with fanout. Both name the SonarQube project
 - **`fanout.concurrency: 1` is sequential execution for free.**
 
 ### Negative
-- **The overshoot is N-fold.** A candidate is checked before a step and not during one, so each can pass its envelope by the cost of the step that crossed it: a fanout can end up to one step per candidate over `budget.max_usd`, and up to two per candidate when every candidate is killed during its first paid step, which the run has no evidence to charge for. A single run can overshoot by one step. The dry run says so.
+- **The overshoot is N-fold.** A candidate is checked before a step and not during one, so each can pass its envelope by the cost of the step that crossed it: a fanout can end up to one step per candidate over `budget.max_usd`. A single run can overshoot by one step. The dry run says so. A step cut short by a Ctrl-C, a timeout or a kill is charged the costliest step recorded before it, and a candidate's record starts from its parent's, so a cut adds overshoot only when the step it cut cost more than any step before it, by the difference; every cut is charged something, so a step cut short again and again is still stopped by its envelope (ADR-0007, amended 2026-10-09). An earlier version of this bullet said "up to two steps per candidate"; that was wrong both ways, because an attempt cut short with nothing recorded was charged nothing, every time.
 - **Disk is N-fold, and nothing collects it.** A fanout run leaves N workspaces — N directory copies of the tree, or N worktrees — and N candidate-run directories, each with its own snapshots and evidence. Promote destroys ephemeral workspaces in a branch run; an in-place run keeps every candidate's copy, because the winner's change is copied back from it by hand. The `belay cleanup` command ADR-0004 named as a follow-up is still owed, and it is now N run directories larger.
 - **An in-place fanout does not merge.** Its winner's change stays in the winner's workspace, and the run's next steps name the directory and the timeline command; only a branch run promotes the winner.
 - **An unspent envelope is not given to the other candidates,** and lowering `budget.max_usd` mid-fanout does not take back a share already given.
@@ -103,7 +103,7 @@ SonarQube and AI review are refused with fanout. Both name the SonarQube project
 - Anyone asks for two `belay resume` of one parent at once. That needs the run lock first.
 
 ## References
-- ADR-0002, ADR-0003, ADR-0004, ADR-0007 (amended 2026-09-19), ADR-0011, ADR-0012, ADR-0014
+- ADR-0002, ADR-0003, ADR-0004, ADR-0007 (amended 2026-09-19 and 2026-10-09), ADR-0011, ADR-0012, ADR-0014
 - `internal/nodes/fanout` — the package doc, which quotes what it used to say
 - `internal/nodes/wire.go` — `WithFanout`, `Candidate`, and the conditional-node rule
 - `internal/graph/children.go` — the candidate runner

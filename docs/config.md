@@ -376,7 +376,7 @@ Routes the run through the fanout and join nodes, so one goal gets `fanout.candi
 
 It requires `budget.max_usd` above zero, because the fanout divides the run's remaining ceiling into one envelope per candidate and has nothing to divide otherwise. It is also refused with `review.mode: sonar` or `review.mode: ai`: both name the SonarQube project after the directory they review, and every run's candidates are called `cand-01`, `cand-02` and so on, so their quality gates would read one another's results.
 
-A fanout can spend more than `budget.max_usd`: each candidate is capped at its own envelope, and a candidate is checked before a step rather than during one, so the overrun is bounded by one step per candidate. `--dry-run` prints the envelope and that bound.
+A fanout can spend more than `budget.max_usd`: each candidate is capped at its own envelope, and a candidate is checked before a step rather than during one, so the overrun is bounded by one step per candidate. A step cut short by Ctrl-C, `graph.node_timeout` or a crash reports nothing of what it spent, so it is charged the costliest step recorded before it, marked as an estimate; that adds to the overrun only when the step that was cut cost more than any before it. `--dry-run` prints the envelope and that bound.
 
 ### `fanout.candidates`
 

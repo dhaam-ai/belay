@@ -207,6 +207,20 @@ type Options struct {
 	// change.
 	Concurrency int
 
+	// InterruptedFloor is the least an attempt whose spend belay cannot know
+	// is charged, in each dimension, when the run's own ledger holds less.
+	// See interruptedCharge, which uses it.
+	//
+	// It exists for a candidate run, and the candidate runner is the only
+	// caller that sets it. A candidate's ledger is empty until its first
+	// paid step finishes, so the run's own evidence of what a step costs is
+	// nothing at exactly the moment most interruptions land, and every
+	// Ctrl-C, timeout or kill during a candidate's first step was charged
+	// zero. Its parent has paid for its plan by then, which is evidence of
+	// what one step of this work costs, and the runner passes the parent's
+	// costliest step here. Zero, the default, adds nothing.
+	InterruptedFloor belay.Usage
+
 	// Logger receives the dispatcher's structured log. Defaults to
 	// slog.Default.
 	Logger *slog.Logger
@@ -420,6 +434,7 @@ type Dispatcher struct {
 	registry *Registry
 	cfg      config.Config
 	entry    string
+	floor    belay.Usage
 	logger   *slog.Logger
 	now      func() time.Time
 	redact   func(string) string
@@ -464,6 +479,7 @@ func NewDispatcher(opts Options) (*Dispatcher, error) {
 		registry: opts.Registry,
 		cfg:      opts.Config,
 		entry:    opts.Entry,
+		floor:    opts.InterruptedFloor,
 		logger:   opts.Logger,
 		now:      opts.Now,
 		redact:   opts.Redact,
@@ -669,7 +685,7 @@ func (d *Dispatcher) heal(
 		// would ever look for, because the journal would no longer end in an
 		// attempt nothing closed.
 		killed := d.reap()
-		charge := interruptedCharge(ledger)
+		charge := d.interruptedCharge(ledger)
 		note := fmt.Sprintf("interrupted: no completion record for attempt %d (the process died inside this node); "+
 			"charged $%.2f, estimated, since what it spent is unknown", last.Attempt, charge.USD)
 		if killed > 0 {
@@ -767,9 +783,11 @@ func (d *Dispatcher) reap() int {
 	return killed
 }
 
-// interruptedCharge is what heal charges an attempt a crash left open: the
-// most any single node execution of this run has recorded, in each dimension
-// (budget.Ledger.Largest), marked as estimated. ADR-0007 records the decision.
+// interruptedCharge is what heal charges an attempt a crash left open, and
+// cutShortCharge one a cancellation or a timeout cut short with nothing
+// reported: the most any single node execution of this run has recorded, in
+// each dimension (budget.Ledger.Largest), marked as estimated. ADR-0007
+// records the decision.
 //
 // The attempt's real cost is unknowable. The process that would have
 // reported it was killed, and an agent may have spent any amount before the
@@ -786,12 +804,28 @@ func (d *Dispatcher) reap() int {
 // every total that includes the charge says it is partly a guess, which is
 // the truth.
 //
-// When the run has recorded nothing yet, the charge is zero. With no step
-// paid for there is no evidence to charge from, and inventing a figure would
-// be a guess dressed as a measurement. That leaves one gap open: a run killed
-// during its first paid step can go past its ceiling by what that step cost.
-func interruptedCharge(ledger *budget.Ledger) belay.Usage {
-	charge := ledger.Largest()
+// A candidate run's evidence includes its parent's: the charge is raised to
+// Options.InterruptedFloor, the costliest step the parent had paid for when
+// it fanned out, in each dimension where that is larger. A candidate's own
+// ledger is empty until its first paid step finishes, which is when most
+// interruptions land, and charging nothing there let a fanout be interrupted
+// and resumed indefinitely with every candidate's first paid step free.
+//
+// When neither the run nor its parent has recorded anything yet, the charge
+// is zero. With no step paid for there is no evidence to charge from, and
+// inventing a figure would be a guess dressed as a measurement. That leaves
+// one gap open, and only in a run's very first paid step: every attempt of
+// it cut short before any step has finished is charged nothing, so a person
+// who keeps interrupting that one step and resuming can spend past the
+// ceiling by what each attempt cost. Every later step of the run, and every
+// step of its candidates, is covered.
+func (d *Dispatcher) interruptedCharge(ledger *budget.Ledger) belay.Usage {
+	largest := ledger.Largest()
+	charge := belay.Usage{
+		InputTokens:  max(largest.InputTokens, d.floor.InputTokens),
+		OutputTokens: max(largest.OutputTokens, d.floor.OutputTokens),
+		USD:          max(largest.USD, d.floor.USD),
+	}
 	if isZeroUsage(charge) {
 		return belay.Usage{}
 	}
@@ -819,7 +853,7 @@ func (d *Dispatcher) cutShortCharge(ledger *budget.Ledger, node string, reported
 	if !isZeroUsage(reported) || !d.estimable(node) {
 		return reported, ""
 	}
-	charge := interruptedCharge(ledger)
+	charge := d.interruptedCharge(ledger)
 	if isZeroUsage(charge) {
 		return charge, ""
 	}
