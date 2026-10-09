@@ -12,6 +12,8 @@ belay builds its configuration from up to three files, merged onto its built-in 
 
 Merging is per field, not per file: a file that sets only `budget.max_usd` keeps every other setting from the layers below it, including the other `budget` settings. A file that is missing is skipped, except the one `--config` names, which must exist. With no files at all, belay runs on the defaults this document lists.
 
+The [`policy`](#policy) section is the one exception. Its rules combine across the files instead of the later one winning, so that no file can remove a guardrail a file below it declared.
+
 ## Top-Level Fields
 
 ```yaml
@@ -465,6 +467,7 @@ When a policy is set, belay adds a `policy` gate to the run's route, between `wr
 
 - **The rules are fixed when the run starts.** belay records them, and the dependencies your workspace declared, in the run's `manifest.json`, and `belay resume` judges the change against those and not against `belay.yaml` as it is by then. A run started with no policy never grows one: it has no gate, and no record of what its workspace looked like before the agent ran, so a policy added mid-run could only fail it for something it did not do. ADR-0014 records the decision.
 - **A violation is one of two kinds.** `forbidden_paths`, `max_changed_files` and `max_changed_lines` **end the run**: a change that touched a path it may not touch is not something to ask an agent to repair. Everything else goes to the **fix loop**, which tells the agent what it broke and asks for a repair, bounded by `graph.give_up` like any other repair.
+- **Every file's rules apply.** Unlike every other setting, a later file cannot replace a policy rule, only add to it: the lists (`forbidden_paths`, `required_tests`, `forbidden_content`) are joined, each rule once; each ceiling (`max_changed_files`, `max_changed_lines`) is the smallest one any file sets, and `0` in a later file does not lift a ceiling set below it; and `no_new_dependencies` holds if any file sets it. So the rules in your own `~/.config/belay/config.yaml` hold in every repository, and a repository's `belay.yaml`, which is a file the agent can edit, can tighten them but not loosen them. `belay run --dry-run` prints the combined rules. ADR-0014 records why this section breaks the per-field rule.
 
 `review.fail_on` has nothing to do with this section. It is the threshold a linter's findings are judged against; a policy violation always counts.
 

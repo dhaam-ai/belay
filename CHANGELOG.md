@@ -304,6 +304,16 @@ that only `pkg/belay` carries a compatibility promise. Everything under
 
 ### Fixed
 
+- **A repository's `belay.yaml` can no longer drop your own guardrails.**
+  Policy rules from a later configuration file replaced the earlier ones
+  outright, so a project `belay.yaml` forbidding `secrets/**` silently
+  discarded the `.github/workflows/**` and `infra/**` your
+  `~/.config/belay/config.yaml` forbade, and the dry run showed only the
+  project's rule. Policy now combines across files to the most restrictive
+  result: forbidden paths, required tests and forbidden content are joined,
+  each ceiling is the smallest any file sets (a later `0` does not lift
+  one), and `no_new_dependencies` holds if any file sets it. Every other
+  setting still takes the later file's value.
 - **A policy pattern that describes a secret is no longer redacted as one.**
   `belay run` printed "redacted secret-shaped config values" on every run
   whose `policy.forbidden_content` held a pattern like the documented

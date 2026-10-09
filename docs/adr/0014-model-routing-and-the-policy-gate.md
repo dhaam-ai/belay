@@ -1,7 +1,7 @@
 # ADR-0014: Per-node model routing, and the policy gate
 
 ## Status
-Accepted
+Accepted, amended 2026-10-09 (policy layers combine; see "Policy layers combine to the most restrictive rule set")
 
 ## Context
 
@@ -44,6 +44,14 @@ Both directions are therefore a **warning and not a refusal**: the run finishes 
 Defence in depth, because the consequence of getting this wrong is a run failed for nothing: `state.Manifest.PinnedConfig` **clears** the live policy section before a node sees it, so a node cannot reach today's rules even by mistake; `graph.RunContext.Policy` is a pointer, so "this run has no baseline" and "this run's rules are all switched off" can never be the same value; and the gate node, if it is ever reached without a pin, returns a `Result` saying nothing was checked rather than an error. An error there would end a run that has done nothing wrong, and end it again on every resume.
 
 The dispatcher's **limits** are deliberately still read live — `budget.max_usd`, `budget.max_tokens`, `graph.max_steps`, `graph.node_timeout` — so raising one and resuming continues a run that met it. Limits, routing, shape: three categories, and only the third is pinned.
+
+### Policy layers combine to the most restrictive rule set
+
+Every other setting merges per field: the highest configuration layer that sets it wins. `policy.*` deliberately does not, and this is the one exception (amended 2026-10-09, reversing the slice 4 decision that a later layer's policy replaces an earlier one's, like every other field).
+
+The per-field rule is right for a setting that says what a person wants: the project's `belay.yaml` knows this repository's test command better than the user's own file does. It is wrong for a guardrail, which is a promise somebody relies on. Under it, a project file that forbade `secrets/**` silently dropped the `.github/workflows/**` and `infra/**` the user's own configuration forbade, and the run was held to one rule and said nothing about the other two. And the layer that wins is the repository's `belay.yaml`, which is the one file in the chain a coding agent can edit.
+
+So the layers combine to the most restrictive result: `forbidden_paths`, `required_tests` and `forbidden_content` are joined, each rule once, in the order first declared; `max_changed_files` and `max_changed_lines` take the smallest non-zero value any layer sets, so a later `0` cannot lift a ceiling; and `no_new_dependencies` holds if any layer sets it. A layer can add rules and tighten ceilings; no layer can loosen or remove what a lower one declared, including `--config`. The combined set is what is pinned, and `belay run --dry-run` prints every rule in it, so nobody has to read it out of two files. `config.Policy.tighten` is where it happens, applied as each document is merged.
 
 ### Two classes of violation, decided by the rule
 
@@ -108,6 +116,7 @@ Best-of-N must not be the way around a guardrail. Without this, the route past a
 - **`pyproject.toml` dependencies are not read.** A TOML parser and PEP 621's several spellings of a dependency are more than this slice could do correctly, and a parser that got it half right would report dependencies a project does not have or miss ones it does. The documented workaround is to name the file in `forbidden_paths`, which stops the change belay cannot judge rather than waving it through.
 - **A guarded run requires a capability.** `policy.gate` means an older belay refuses to resume it, which is the point, but it is one more run a v0.1.x binary cannot pick up. An unguarded run requires nothing.
 - **One more step per repair.** `fix → write → policy → test` counts two extra steps against `graph.max_steps`, which is 60 by default against a `give_up` of 3.
+- **The policy section merges differently from every other section.** A person who has learnt that a later file wins will be surprised that a project `belay.yaml` cannot loosen their own rules. The documentation says so where the layers are described and at the policy section, and the dry run shows the combined rules.
 - **Two more categories of setting to keep straight.** Limits are live, routing is live, shape is pinned. Each new setting has to be placed in one of the three, and the answer is not obvious from the setting alone.
 - **Adding the section changed every configuration digest**, so a run started before this reports drift on resume. That is true of any added section, and the drift is a warning.
 
@@ -120,6 +129,8 @@ Best-of-N must not be the way around a guardrail. Without this, the route past a
 ## Alternatives Considered
 
 **Pin routing too, for consistency.** Rejected: it changes no node and no edge, and a pinned `agent.models` over a live `agent.model` gives a person two settings that behave differently for no reason they could infer.
+
+**Merge policy per field, like every other setting.** The original slice 4 decision, reversed on 2026-10-09: it let the file an agent can edit replace the person's own guardrails without a word, which is the silently-weaker outcome this feature exists to prevent.
 
 **Read the policy live, and survey the baseline at gate time.** The cheapest thing to build, and wrong. The baseline would then be a survey of the tree *after* the agent edited it, so `no_new_dependencies` would compare the tree to itself and could never fire — a guardrail that loads, validates and does nothing.
 

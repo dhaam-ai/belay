@@ -15,6 +15,10 @@
 // budget.max_usd keeps every other default, including its siblings inside
 // budget. An absent or empty file therefore yields exactly Default().
 //
+// The policy section is the one exception: its rules combine across layers
+// to the most restrictive result, so no layer can remove a guardrail a lower
+// one declared. See Policy.tighten.
+//
 // # Strictness
 //
 // Decoding is strict: a key that does not name a field is an error rather
@@ -259,6 +263,75 @@ type Policy struct {
 	// ForbiddenContent are the regular expressions a changed file may not
 	// match.
 	ForbiddenContent []ContentRule `yaml:"forbidden_content"`
+}
+
+// tighten combines the rules an earlier layer declared (p) with what a later
+// layer's document decoded to (later), and returns the most restrictive of
+// the two: every forbidden path, required test and content rule either one
+// names, in the order they were first declared and each once; the smaller of
+// two ceilings, where zero is no ceiling and so never the smaller; and
+// no_new_dependencies if either sets it.
+//
+// It is the one deliberate exception to merging per field (ADR-0014). For
+// every other setting the highest layer that sets it wins, because a later
+// layer is a person saying what they want for this repository or this
+// invocation. A guardrail is different in kind: it is a promise somebody
+// relies on, and the layer that would replace it is the repository's own
+// belay.yaml, which is exactly the file a coding agent can edit. Under the
+// per-field rule, a project file that forbade one path silently dropped every
+// path the user's own configuration forbade, and a run held to the project's
+// rule alone said nothing about it. So a layer may add rules and tighten
+// ceilings, and no layer can loosen or remove one a lower layer declared.
+//
+// later already holds p's value wherever its document did not set a key,
+// which is what makes this safe to apply to every document: combining a rule
+// set with itself changes nothing.
+func (p Policy) tighten(later Policy) Policy {
+	return Policy{
+		ForbiddenPaths:    unionOf(p.ForbiddenPaths, later.ForbiddenPaths, func(a, b string) bool { return a == b }),
+		MaxChangedFiles:   tighterCeiling(p.MaxChangedFiles, later.MaxChangedFiles),
+		MaxChangedLines:   tighterCeiling(p.MaxChangedLines, later.MaxChangedLines),
+		NoNewDependencies: p.NoNewDependencies || later.NoNewDependencies,
+		RequiredTests:     unionOf(p.RequiredTests, later.RequiredTests, func(a, b TestRule) bool { return a == b }),
+		ForbiddenContent:  unionOf(p.ForbiddenContent, later.ForbiddenContent, sameContentRule),
+	}
+}
+
+// tighterCeiling returns the smaller of two ceilings, where zero means no
+// ceiling at all. A negative value is kept rather than ignored, so Validate
+// refuses it by name instead of a layer quietly choosing another.
+func tighterCeiling(a, b int) int {
+	switch {
+	case a == 0:
+		return b
+	case b == 0:
+		return a
+	default:
+		return min(a, b)
+	}
+}
+
+// unionOf returns every element of a, then every element of b that a does
+// not already hold, as a fresh slice: a decoded document must never share a
+// backing array with the configuration it was merged onto. It returns nil
+// when both are empty, so a layer that declared nothing leaves the field
+// exactly as Default leaves it.
+func unionOf[T any](a, b []T, same func(T, T) bool) []T {
+	var out []T
+	for _, list := range [][]T{a, b} {
+		for _, v := range list {
+			if !slices.ContainsFunc(out, func(have T) bool { return same(have, v) }) {
+				out = append(out, v)
+			}
+		}
+	}
+	return out
+}
+
+// sameContentRule reports whether two content rules ask for the same thing:
+// the same pattern over the same paths, told with the same reason.
+func sameContentRule(a, b ContentRule) bool {
+	return a.Pattern == b.Pattern && a.Reason == b.Reason && slices.Equal(a.Paths, b.Paths)
 }
 
 // TestRule requires that a change touching a file matching When also touches
@@ -725,6 +798,8 @@ func (c *Config) Merge(src []byte, source string) error {
 		return fmt.Errorf("%s: %w: belay reads one YAML document per file", source, ErrMalformed)
 	}
 
+	// The one exception to the per-field rule: see Policy.tighten.
+	merged.Policy = c.Policy.tighten(merged.Policy)
 	*c = merged
 	return nil
 }
