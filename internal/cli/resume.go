@@ -277,13 +277,34 @@ func (p *runPlan) bindPolicy(manifest state.Manifest) {
 // Drift is a warning, not a refusal. The run is fine — it is finishing the
 // way it started — but somebody who changed output.mode and then resumed is
 // entitled to know their change is not what this run is doing.
+//
+// That includes a belay.yaml asking for a branch this workspace cannot take.
+// resolve refused it, rightly, for a run that would start here now; but this
+// run started already, and a refusal of the file's output is not a refusal of
+// the pin. A fork and a queued goal are both pinned in place and live in a copy
+// under .belay, which can never take a branch, and their belay.yaml says
+// "branch" whenever the checkout's did -- so keeping that refusal refused the
+// very command belay prints to carry them on. Everything resolve concluded
+// from the file's output is taken back here (outputKey), including the warning
+// about uncommitted work, which describes a branch run starting now from HEAD
+// and not this one, and the reason the plan gives for where the result goes is
+// the pin's.
 func (p *runPlan) bindOutput(ctx context.Context, manifest state.Manifest) {
 	pinned, live := manifest.Output, p.output
-	if !pinned.Branched() && !live.Branched() {
+	refused := p.takeBack(outputKey)
+	if len(refused) == 0 && !pinned.Branched() && !live.Branched() {
 		return
 	}
 	p.output = pinned
-	if pinned.Mode != live.Mode {
+	p.outputReason = pinnedOutputReason(pinned)
+	switch {
+	case len(refused) > 0 && !pinned.Branched():
+		// The file asked for a branch, which is the only output resolve
+		// refuses. A branch run is not warned: it has the branch it asked
+		// for, and bindRunWorkTree checks that it still does.
+		p.warn("%s That refuses a new run here; this run was started to edit its workspace in place, and belay "+
+			"finishes a run the way it started, so it carries on in place.", refused[0].problem)
+	case len(refused) == 0 && pinned.Mode != live.Mode:
 		p.warn("this run was started with output.mode %q, and belay.yaml now says %q. belay finishes a run the way "+
 			"it started, so this run stays on %q; the new setting applies to the next run you start.",
 			orInPlace(pinned.Mode), orInPlace(live.Mode), orInPlace(pinned.Mode))
@@ -298,6 +319,17 @@ func (p *runPlan) bindOutput(ctx context.Context, manifest state.Manifest) {
 		return
 	}
 	p.bindRunWorkTree(ctx, pinned)
+}
+
+// pinnedOutputReason says where a resumed run's result goes, and why: because
+// the run started that way, whatever belay.yaml says now.
+func pinnedOutputReason(out state.Output) string {
+	if out.Branched() {
+		return fmt.Sprintf("this run was started on its own branch, %s, and belay finishes a run the way it started, "+
+			"so it works in that branch's worktree and never edits your checkout", out.Branch)
+	}
+	return "this run was started to edit its workspace in place, and belay finishes a run the way it started, " +
+		"so it edits this workspace directly"
 }
 
 // bindRunWorkTree reopens the repository a branch run commits to and checks

@@ -928,3 +928,86 @@ func TestOpenRunWorksInTheRunsWorktree(t *testing.T) {
 		t.Errorf("the run directory moved to %q, want %q", got, layout.RunDir())
 	}
 }
+
+// A resume judges the run's pinned output, never what belay.yaml would give a
+// run starting now. resolve judges the file first, and whatever it concluded
+// about the output belongs to that hypothetical new run: a warning that
+// uncommitted work is left out of a branch run starting from HEAD, or a
+// refusal of a branch the checkout can no longer take. Neither is about the
+// run being resumed, which has its own output already, and neither may
+// survive the bind -- a warning would be false, and a refusal would stop a
+// run that is fine.
+func TestAResumeJudgesThePinNotWhatBelayYamlWouldStartNow(t *testing.T) {
+	tests := []struct {
+		name string
+		// started is belay.yaml when the run is created; then changes
+		// the repository or belay.yaml before the resume.
+		started string
+		then    func(t *testing.T, dir string)
+		// wantWarn must each be in the warnings, and wantNot none of them.
+		wantWarn, wantNot []string
+	}{
+		{
+			name:    "pinned in place, and belay.yaml now resolves a branch over uncommitted work",
+			started: "version: 1\noutput:\n  mode: in_place\n",
+			then: func(t *testing.T, dir string) {
+				writeConfig(t, dir, "version: 1\noutput:\n  mode: auto\n")
+				if err := os.WriteFile(filepath.Join(dir, "scratch.go"), []byte("package scratch\n"), 0o600); err != nil {
+					t.Fatalf("write scratch.go: %v", err)
+				}
+			},
+			wantWarn: []string{"output.mode"},
+			wantNot:  []string{"uncommitted"},
+		},
+		{
+			name:    "pinned on a branch, and the checkout can no longer take one",
+			started: "version: 1\noutput:\n  mode: branch\n",
+			then: func(t *testing.T, dir string) {
+				if err := os.WriteFile(filepath.Join(dir, ".gitmodules"), []byte("[submodule \"x\"]\n"), 0o600); err != nil {
+					t.Fatalf("write .gitmodules: %v", err)
+				}
+				gitIn(t, dir, "add", ".gitmodules")
+				gitIn(t, dir, "commit", "-qm", "add a submodule")
+			},
+			wantNot: []string{"output.mode"},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			dir := gitWorkspace(t)
+			writeConfig(t, dir, tt.started)
+			plan, err := resolve(resolveRequest{workspace: dir, logger: quietLogger(), context: t.Context()})
+			if err != nil {
+				t.Fatalf("resolve: %v", err)
+			}
+			const runID = "20260101T000000Z-c0ffee000000"
+			store, err := createRun(t.Context(), plan, runSpec{Workspace: dir, RunID: runID, Goal: "add a --json flag"})
+			if err != nil {
+				t.Fatalf("createRun: %v", err)
+			}
+			tt.then(t, dir)
+
+			resumed, err := resolve(resolveRequest{workspace: dir, logger: quietLogger(), context: t.Context()})
+			if err != nil {
+				t.Fatalf("resolve for the resume: %v", err)
+			}
+			if err := resumed.resumePreflight(t.Context(), store); err != nil {
+				t.Fatalf("resumePreflight: %v", err)
+			}
+			if len(resumed.blockers) > 0 {
+				t.Errorf("the resume was refused for what belay.yaml would give a new run: %s", blockerText(resumed))
+			}
+			joined := strings.Join(resumed.warnings, "\n")
+			for _, want := range tt.wantWarn {
+				if !strings.Contains(joined, want) {
+					t.Errorf("warnings never mention %q:\n%s", want, joined)
+				}
+			}
+			for _, not := range tt.wantNot {
+				if strings.Contains(joined, not) {
+					t.Errorf("warnings mention %q, about a run this is not:\n%s", not, joined)
+				}
+			}
+		})
+	}
+}

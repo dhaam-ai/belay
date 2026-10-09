@@ -329,6 +329,17 @@ that only `pkg/belay` carries a compatibility promise. Everything under
   graph, which has no `code`, `test`, `fix` or `review`, so forking any of
   them ended the new run as failed with `unknown node`. A fork is now always
   a single run.
+- **A fork or a queued goal can be carried on when `belay.yaml` says
+  `output.mode: branch`.** Both run in place, in a copy under `.belay`, and
+  the copy can never take a branch, so resolving it refused `branch` — and
+  that refusal outlived the run's own pin, which says in place. belay
+  refused the very command it had printed: `belay --workspace <copy> resume
+  <fork>` after a fork, and the resume `belay queue` prints for a goal
+  stopped at a limit. A resume now judges the output the run was started
+  with, as `docs/config.md` promises: what `belay.yaml` would give a new run
+  is a warning, never a refusal. The same rule stops a resume from warning
+  about uncommitted work a branch run starting now would leave out, and from
+  telling a branch run that `belay.yaml` "now says" a mode it does not.
 - **A repair's file list is checked against the disk, not taken on trust.**
   The fix step routed straight back to the tests, so a repair was the one
   change in a run that nothing verified: no claimed path was proven to be a

@@ -22,6 +22,14 @@ import (
 // internal/isolate/worktree for why the separator is not another "/").
 const branchPrefix = "belay/"
 
+// outputKey keys what resolveOutput concludes from belay.yaml rather than
+// from a run: the refusal of a branch this workspace cannot take, and the
+// warning about uncommitted work a branch run would leave out. Both are about
+// a run starting now. A resume's run started already, under the output its
+// manifest pinned, so bindOutput takes them back (runPlan.takeBack) and judges
+// the pin instead.
+const outputKey = "output"
+
 // runBranch names the branch a run delivers its result on.
 func runBranch(runID string) string { return branchPrefix + runID }
 
@@ -65,7 +73,7 @@ func (p *runPlan) resolveOutput(ctx context.Context) {
 	repo, why := p.openRepo(ctx)
 	if repo == nil {
 		if want == config.OutputBranch {
-			p.block(
+			p.blockAs(outputKey,
 				fmt.Sprintf("output.mode is \"branch\", but %s cannot take one: %s.", p.workspace, why),
 				"set output.mode to \"auto\" or \"in_place\" in belay.yaml, or point --workspace at a git repository "+
 					"with at least one commit",
@@ -153,7 +161,7 @@ func insideBelay(prefix string) bool {
 // the person asked for one, and as the reason for editing in place otherwise.
 func (p *runPlan) fallBackOrBlock(want config.OutputMode, why string) {
 	if want == config.OutputBranch {
-		p.block(
+		p.blockAs(outputKey,
 			fmt.Sprintf("output.mode is \"branch\", but %s cannot take one: %s.", p.workspace, why),
 			"set output.mode to \"auto\" or \"in_place\" in belay.yaml",
 		)
@@ -224,13 +232,13 @@ func (p *runPlan) isolatorName() config.IsolatorName {
 func (p *runPlan) warnAboutUncommittedWork(ctx context.Context, repo *git.Repo) {
 	dirty, err := repo.Status(ctx, p.workspace)
 	if err != nil {
-		p.warn("belay could not check whether %s has uncommitted changes: %v", p.workspace, err)
+		p.warnAs(outputKey, "belay could not check whether %s has uncommitted changes: %v", p.workspace, err)
 		return
 	}
 	if len(dirty) == 0 {
 		return
 	}
-	p.warn("%s has %d uncommitted change(s), starting with %s. A branch run starts from the commit %s, "+
+	p.warnAs(outputKey, "%s has %d uncommitted change(s), starting with %s. A branch run starts from the commit %s, "+
 		"so they are not part of this run and belay will not touch them.",
 		p.workspace, len(dirty), dirty[0], shortCommit(p.output.Base))
 }

@@ -237,6 +237,13 @@ func forkScript() (*graph.Registry, map[string]*scriptedNode) {
 func forkSource(t *testing.T) (ws, runID string) {
 	t.Helper()
 	ws = goWorkspace(t)
+	return ws, forkSourceIn(t, ws)
+}
+
+// forkSourceIn is forkSource in a workspace the caller made, and returns the
+// run's id.
+func forkSourceIn(t *testing.T, ws string) string {
+	t.Helper()
 	if err := os.WriteFile(filepath.Join(ws, "main.go"), []byte("package main\n"), 0o600); err != nil {
 		t.Fatalf("write main.go: %v", err)
 	}
@@ -253,7 +260,7 @@ func forkSource(t *testing.T) (ws, runID string) {
 	if out, err := d.Run(context.Background()); err != nil || out.Status != state.RunStatusCompleted {
 		t.Fatalf("recording the source run: %v, %v; want it completed", out.Status, err)
 	}
-	return ws, store.Layout().RunID()
+	return store.Layout().RunID()
 }
 
 // forksIn lists the forks made in ws.
@@ -559,6 +566,54 @@ func TestAForkResumesFromItsCopy(t *testing.T) {
 	for _, phrase := range []string{forks[0] + " — stopped at review", copyDir, "belay is editing this workspace directly"} {
 		if !strings.Contains(stdout, phrase) {
 			t.Errorf("the resume's dry run never says %q:\n%s", phrase, stdout)
+		}
+	}
+}
+
+// TestAForkResumesFromItsCopyWhateverOutputModeSays: the command a fork's
+// report writes out to carry it on is a resume of the fork in its copy, and
+// the copy holds belay.yaml as the checkout had it. With output.mode
+// "branch" there, resolving the copy refused it -- a copy under .belay is not
+// a checkout to branch -- and that refusal outlived the bind to the fork's
+// own pin, which is in place, so belay refused the very command it had just
+// printed. The pin wins: the resume is not refused, says that belay.yaml asks
+// for something this run is not doing, and says where its result goes.
+func TestAForkResumesFromItsCopyWhateverOutputModeSays(t *testing.T) {
+	ws := gitWorkspace(t)
+	writeConfig(t, ws, "version: 1\noutput:\n  mode: in_place\n")
+	id := forkSourceIn(t, ws)
+	writeConfig(t, ws, "version: 1\noutput:\n  mode: branch\n")
+
+	var made bytes.Buffer
+	u := &ui{out: &made, err: &made}
+	req := forkRequest{runID: id, node: graph.NodeTest, currentFiles: true}
+	plan, err := resolve(resolveRequest{workspace: ws, logger: newLogger(u), override: req.configure})
+	if err != nil {
+		t.Fatalf("resolve: %v", err)
+	}
+	plan.registry, _ = forkScript()
+	if err := makeFork(cmdWithContext(), u, plan, req); err != nil {
+		t.Fatalf("makeFork: %v\n%s", err, made.String())
+	}
+	forks := forksIn(t, ws)
+	if len(forks) != 1 {
+		t.Fatalf("forks = %v, want one", forks)
+	}
+	copyDir := filepath.Join(ws, ".belay", "forks", forks[0])
+	printed := "belay --workspace " + shellQuote(evalPath(t, copyDir)) + " resume " + forks[0]
+	if !strings.Contains(made.String(), printed) {
+		t.Fatalf("the fork's report never says %q, so this test is not running the command belay printed:\n%s",
+			printed, made.String())
+	}
+
+	stdout, stderr, err := runCLI(t, "--workspace", evalPath(t, copyDir), "--dry-run", "resume", forks[0])
+	t.Logf("verbatim output:\n%s%s", stdout, stderr)
+	if err != nil {
+		t.Fatalf("the resume the fork printed was refused: %v", err)
+	}
+	for _, phrase := range []string{`output.mode is "branch"`, "carries on in place", "started to edit its workspace in place"} {
+		if !strings.Contains(stdout, phrase) {
+			t.Errorf("the resume's dry run never says %q", phrase)
 		}
 	}
 }

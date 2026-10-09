@@ -908,3 +908,51 @@ func TestQueueCommandsSurviveAPathWithASpace(t *testing.T) {
 		t.Errorf("belay runs never says %q:\n%s", want, runs)
 	}
 }
+
+// TestAQueueCopyResumesWhateverOutputModeSays: for a goal stopped at a limit,
+// belay queue says to raise the limit in the copy's belay.yaml and resume the
+// goal's run in its copy. Every queued goal's run is pinned in place, and the
+// copy's belay.yaml says output.mode "branch" when the checkout's did, which
+// the copy cannot take. That refusal outlived the bind to the run's own pin,
+// so belay refused the command it had printed. The pin wins: the resume is
+// not refused, and says that belay.yaml asks for something this run is not
+// doing.
+func TestAQueueCopyResumesWhateverOutputModeSays(t *testing.T) {
+	ws := gitWorkspace(t)
+	writeConfig(t, ws, "version: 1\noutput:\n  mode: branch\nbudget:\n  max_usd: 0.01\n")
+	queueAdd(t, ws, "add tests for the parser")
+	expensive := func() *graph.Registry {
+		r := graph.NewRegistry()
+		r.MustRegister(planWriter{body: "# Plan\n\nwrite a test\n", usage: belay.Usage{USD: 0.05}}, approve.New())
+		return r
+	}
+	if _, err := startQueue(t.Context(), t, ws, expensive); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	stopped := goal(t, ws, 1)
+	if stopped.State != queue.StatePaused {
+		t.Fatalf("goal 1 = %+v, want this test's premise: paused at a limit", stopped)
+	}
+	status, _, err := runCLI(t, "queue", "status", "--workspace", ws)
+	if err != nil {
+		t.Fatalf("belay queue status: %v", err)
+	}
+	printed := "belay --workspace " + shellWord(stopped.Dir) + " resume " + stopped.RunID
+	if !strings.Contains(status, printed) {
+		t.Fatalf("belay queue status never says %q, so this test is not running the command belay printed:\n%s",
+			printed, status)
+	}
+
+	// Raise the limit where belay queue said to, and run what it printed.
+	writeConfig(t, stopped.Dir, "version: 1\noutput:\n  mode: branch\nbudget:\n  max_usd: 5\n")
+	stdout, stderr, err := runCLI(t, "--workspace", stopped.Dir, "--dry-run", "resume", stopped.RunID)
+	t.Logf("verbatim output:\n%s%s", stdout, stderr)
+	if err != nil {
+		t.Fatalf("the resume belay queue printed was refused: %v", err)
+	}
+	for _, phrase := range []string{`output.mode is "branch"`, "carries on in place"} {
+		if !strings.Contains(stdout, phrase) {
+			t.Errorf("the resume's dry run never says %q", phrase)
+		}
+	}
+}
