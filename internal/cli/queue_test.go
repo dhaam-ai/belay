@@ -1063,3 +1063,63 @@ func TestAQueuedGoalEditsItsCopyInPlaceWhateverOutputModeSays(t *testing.T) {
 		})
 	}
 }
+
+// TestOnlyNoApprovalTakesAQueuedGoalPastItsPlan is the queue's settled rule:
+// a queued goal's plan stops for a person unless that goal was added with
+// --no-approval, and belay never removes the gate by itself. graph.approval
+// false anywhere -- the user's own config.yaml, which applies to every
+// repository, or the project's belay.yaml -- took every queued goal from its
+// plan to its code unattended, while add and start blamed belay.yaml for it.
+func TestOnlyNoApprovalTakesAQueuedGoalPastItsPlan(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		write func(t *testing.T, ws, home string)
+	}{
+		{
+			name: "graph.approval false in the user's config",
+			write: func(t *testing.T, _, home string) {
+				dir := filepath.Join(home, "belay")
+				if err := os.MkdirAll(dir, 0o750); err != nil {
+					t.Fatalf("MkdirAll: %v", err)
+				}
+				if err := os.WriteFile(filepath.Join(home, filepath.FromSlash(config.UserFile)),
+					[]byte("version: 1\ngraph:\n  approval: false\n"), 0o600); err != nil {
+					t.Fatalf("write the user config: %v", err)
+				}
+			},
+		},
+		{
+			name: "graph.approval false in belay.yaml",
+			write: func(t *testing.T, ws, _ string) {
+				writeConfig(t, ws, "version: 1\ngraph:\n  approval: false\n")
+			},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ws, home := goWorkspace(t), t.TempDir()
+			t.Setenv("XDG_CONFIG_HOME", home)
+			tc.write(t, ws, home)
+
+			added := queueAdd(t, ws, "add tests for the parser")
+			if !strings.Contains(added, "belay queue approve 1") || strings.Contains(added, "without waiting") {
+				t.Errorf("belay queue add says the goal will not wait for its plan to be read:\n%s", added)
+			}
+			dry, _, err := runCLI(t, "--workspace", ws, "--dry-run", "queue", "start")
+			if err != nil {
+				t.Fatalf("belay --dry-run queue start: %v\n%s", err, dry)
+			}
+			if !strings.Contains(dry, "goal 1 stops at its plan for you") {
+				t.Errorf("the start's announcement does not say goal 1 stops at its plan:\n%s", dry)
+			}
+
+			var reached []string
+			if _, err := startQueue(t.Context(), t, ws, fakeGoals(reaches{goals: &reached})); err != nil {
+				t.Fatalf("start: %v", err)
+			}
+			if got := goal(t, ws, 1); got.State != queue.StateWaiting || len(reached) != 0 {
+				t.Errorf("goal 1 is %s and goals that reached code are %v; want it parked at its plan, and none",
+					got.State, reached)
+			}
+		})
+	}
+}

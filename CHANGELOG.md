@@ -361,6 +361,13 @@ that only `pkg/belay` carries a compatibility promise. Everything under
   fanned out, including a run that failed at its plan, before any candidate
   was made, where that command says the run has no candidate runs. The line
   now appears only when a candidate run is on disk, and names the first one.
+- **A queued goal's plan always waits for you unless you added it with
+  `--no-approval`.** `graph.approval: false` anywhere — the project's
+  `belay.yaml`, or your own `config.yaml`, which reaches every repository —
+  took every queued goal from its plan to its code unattended, and
+  `belay queue add` and `queue start` blamed `belay.yaml` for it. The queue no
+  longer reads `graph.approval`: the gate stops every goal except one added
+  with `--no-approval`.
 - **A repair's file list is checked against the disk, not taken on trust.**
   The fix step routed straight back to the tests, so a repair was the one
   change in a run that nothing verified: no claimed path was proven to be a

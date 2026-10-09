@@ -213,12 +213,9 @@ func addToQueue(cmd *cobra.Command, goal string) error {
 	default:
 		u.say("  %s ahead of it.", runsPlural(ahead, "goal is", "goals are"))
 	}
-	switch {
-	case added.NoApproval:
+	if added.NoApproval {
 		u.say("  you added it with --no-approval, so it goes from its plan to its code without waiting for you.")
-	case !approvalOn(ws):
-		u.say("  graph.approval is off in belay.yaml, so it goes from its plan to its code without waiting for you.")
-	default:
+	} else {
 		u.say("  when its plan is written, the queue parks it for you to read, and moves on.")
 		u.say("  approve it then with:  belay queue approve %d", added.ID)
 	}
@@ -228,15 +225,6 @@ func addToQueue(cmd *cobra.Command, goal string) error {
 	}
 	u.say("  start the queue with:  belay queue start")
 	return nil
-}
-
-// approvalOn reports whether the plan of a goal added without --no-approval
-// would stop for review, from the workspace's configuration as it is now. It
-// is only ever wording: a configuration belay cannot read says yes, which is
-// what the defaults say.
-func approvalOn(ws string) bool {
-	cfg, err := config.Load(config.Options{Path: rootFlags.configPath, Dir: ws})
-	return err != nil || cfg.Graph.Approval
 }
 
 // QueueListing is the documented shape of `belay queue list --json`.
@@ -845,16 +833,21 @@ func refuseUnwatchedSpend(plan *runPlan) {
 // branch run would look for a git repository from inside it, find the
 // person's own a few directories up, and branch that. It files no plan into
 // the repository, because the copy is not the repository, and a plan filed
-// into a copy nobody keeps would be lost with it. And a goal the person added
-// with --no-approval has no gate: that is the one way a queued goal skips
-// review, and the person chose it.
+// into a copy nobody keeps would be lost with it.
+//
+// And its plan stops for a person unless the goal was added with
+// --no-approval: that is the one way a queued goal skips review, and the
+// person chose it, for that goal. graph.approval is not consulted at all.
+// Turned off in a belay.yaml, or in the user's own config.yaml, which reaches
+// every repository they own, it would take every goal from its plan to its
+// code with nobody watching -- belay removing the gate on its own, which a
+// queue never does. A person at a terminal who turns it off for `belay run`
+// is there to watch the run; a queue's goals run while they are away.
 func queueOverride(noApproval bool) func(*config.Config) {
 	return func(c *config.Config) {
 		c.Output.Mode = config.OutputInPlace
 		c.Plan.Archive = false
-		if noApproval {
-			c.Graph.Approval = false
-		}
+		c.Graph.Approval = !noApproval
 	}
 }
 
@@ -866,7 +859,7 @@ func announceQueue(u *ui, plan *runPlan, ws string, store *queue.Store, toRun []
 	var stops []int
 	for i, e := range toRun {
 		ids[i] = e.ID
-		if e.State == queue.StateQueued && !e.NoApproval && plan.config.Graph.Approval {
+		if e.State == queue.StateQueued && !e.NoApproval {
 			stops = append(stops, e.ID)
 		}
 	}
@@ -888,8 +881,6 @@ func announceQueue(u *ui, plan *runPlan, ws string, store *queue.Store, toRun []
 	case len(stops) > 1:
 		u.say("  plans to approve:     goals %s stop at their plans for you; the queue parks each one and moves on",
 			goalList(stops))
-	case !plan.config.Graph.Approval:
-		u.say("  plans to approve:     none; graph.approval is off in belay.yaml")
 	default:
 		u.say("  plans to approve:     none")
 	}
