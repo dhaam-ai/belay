@@ -1,6 +1,7 @@
 package fanout
 
 import (
+	"errors"
 	"fmt"
 
 	"github.com/dhaam-ai/belay/internal/budget"
@@ -63,6 +64,13 @@ import (
 // result for the manifest that stores it.
 func Envelopes(remaining budget.Snapshot, cfg config.Budget, n int) (state.Envelope, error) {
 	usd, tokens, err := budget.Partition(remaining, cfg, n)
+	if errors.Is(err, budget.ErrNoCeiling) {
+		// Reachable only on a resume: fanout.enabled requires a ceiling when
+		// a run is created, and the pin keeps the fanout while belay.yaml
+		// may since have dropped it. The dispatcher pauses over it.
+		return state.Envelope{}, fmt.Errorf("fanout: this run divides budget.max_usd between %d candidates, "+
+			"and it is no longer set; set budget.max_usd above zero and resume: %w", n, err)
+	}
 	if err != nil {
 		return state.Envelope{}, fmt.Errorf("fanout: dividing what is left of the budget between %d candidates: %w", n, err)
 	}

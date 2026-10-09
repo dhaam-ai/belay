@@ -958,21 +958,55 @@ func TestFanoutSettlesWhenEveryCandidateIsRefused(t *testing.T) {
 	}
 }
 
-// The runner reporting that it could not carry the fanout out at all is not
-// a verdict about the run's code: ADR-0002 makes that an error, and the
-// candidates' own spend stays where it is durable, in their own journals.
-func TestFanoutReportsARunnerFailure(t *testing.T) {
-	boom := errors.New("claim cand-01: candidate run directory is not one belay created")
-	cfg := enabledConfig(3)
-	layout, _ := newLayout(t)
-	rc := newRunContext(cfg, layout, &recordingRunner{err: boom}, state.Budget{LimitUSD: 10, SpentUSD: 1})
-
-	res, err := fanout.New().Run(context.Background(), rc)
-	if !errors.Is(err, boom) {
-		t.Fatalf("Run() error = %v, want it to wrap %v", err, boom)
+// The runner failing to carry the fanout out at all, because it could not
+// read the parent run it claims against, is a machine fault, and a machine
+// fault pauses: ADR-0002 keeps a verdict for something the node understands,
+// and ending the run for an unreadable file put every candidate the run had
+// paid for out of reach for good. The fanout pauses with no Patch and the
+// fault in its note, and a resume tries again. Only the caller's own
+// cancellation stays an error, because the dispatcher decides what that is.
+func TestFanoutPausesOnAMachineFault(t *testing.T) {
+	boom := errors.New("graph: load the parent manifest before claiming candidates: input/output error")
+	tests := []struct {
+		name   string
+		runner *recordingRunner
+	}{
+		{name: "the runner could not read the parent run", runner: &recordingRunner{err: boom}},
+		{name: "the runner could not tell whether candidates are claimed", runner: &recordingRunner{claimErr: boom}},
 	}
-	if res.Patch.Candidates != nil {
-		t.Errorf("Patch.Candidates = %v, want nil when no verdict was reached", *res.Patch.Candidates)
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			layout, _ := newLayout(t)
+			rc := newRunContext(enabledConfig(3), layout, tt.runner, state.Budget{LimitUSD: 10, SpentUSD: 1})
+
+			res, err := fanout.New().Run(context.Background(), rc)
+			if err != nil {
+				t.Fatalf("Run() error = %v, want a paused Result: a machine fault is no verdict", err)
+			}
+			if res.Status != journal.StatusPaused || res.Patch.Candidates != nil {
+				t.Errorf("Result = {%v, candidates %v}, want paused with no Patch", res.Status, res.Patch.Candidates)
+			}
+			if !strings.Contains(res.Note, "input/output error") {
+				t.Errorf("Note = %q, want the fault", res.Note)
+			}
+		})
+	}
+}
+
+// A cancellation of the caller's own context is not a fault of the fanout's:
+// it is returned as the error it is, so the dispatcher pauses the run as
+// interrupted.
+func TestFanoutReturnsTheCallersCancellation(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	runs := &recordingRunner{answer: func([]graph.CandidateSpec) ([]graph.CandidateOutcome, error) {
+		cancel()
+		return nil, fmt.Errorf("graph: the candidate runs were interrupted: %w", context.Canceled)
+	}}
+	layout, _ := newLayout(t)
+	rc := newRunContext(enabledConfig(3), layout, runs, state.Budget{LimitUSD: 10, SpentUSD: 1})
+
+	if _, err := fanout.New().Run(ctx, rc); !errors.Is(err, context.Canceled) {
+		t.Fatalf("Run() error = %v, want one wrapping context.Canceled", err)
 	}
 }
 
@@ -1072,5 +1106,28 @@ func TestFanoutRecordsEachCandidatesPolicyViolations(t *testing.T) {
 	}
 	if got[1].PolicyViolations != 0 {
 		t.Errorf("cand-02 PolicyViolations = %d, want 0: its gate recorded nothing", got[1].PolicyViolations)
+	}
+}
+
+// A fanout run resumed after budget.max_usd was set to zero has no ceiling to
+// divide. That is a setting to change, not a failure: the error wraps
+// budget.ErrNoCeiling, which the dispatcher pauses the run over, and says
+// what to set, because it is the line a person reads.
+func TestFanoutWithNoCeilingSaysWhatToSet(t *testing.T) {
+	cfg := enabledConfig(2)
+	cfg.Budget.MaxUSD = 0
+	layout, _ := newLayout(t)
+	runs := &recordingRunner{claimed: true}
+	rc := newRunContext(cfg, layout, runs, state.Budget{SpentUSD: 0.10})
+
+	_, err := fanout.New().Run(context.Background(), rc)
+	if !errors.Is(err, budget.ErrNoCeiling) {
+		t.Fatalf("Run() error = %v, want one wrapping budget.ErrNoCeiling", err)
+	}
+	if !strings.Contains(err.Error(), "set budget.max_usd above zero") {
+		t.Errorf("Run() error = %q, want it to say what to set", err)
+	}
+	if runs.callCount() != 0 {
+		t.Errorf("the runner was called %d time(s) with no ceiling to divide", runs.callCount())
 	}
 }

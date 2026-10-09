@@ -104,7 +104,10 @@
 // or configuration bugs in the caller, not verdicts about the run's code.
 // A budget refusal is an error too, and the dispatcher turns that one into a
 // pause naming budget.max_usd, so raising the ceiling and resuming continues
-// the run.
+// the run; so is a ceiling that is no longer set at all (budget.ErrNoCeiling),
+// and so are candidates stopped at a limit. A runner that could not carry the
+// fanout out at all, because it could not read the parent run, is a machine
+// fault and pauses with a Result instead (see faulted).
 package fanout
 
 import (
@@ -247,7 +250,8 @@ func (n *Node) Run(ctx context.Context, rc *graph.RunContext) (graph.Result, err
 	// ceiling that was never the obstacle.
 	claimed, err := rc.CandidateRuns.Claimed(candidateIDs(count))
 	if err != nil {
-		return graph.Result{}, fmt.Errorf("fanout: could not tell whether the candidates are already claimed: %w", err)
+		return faulted(logger(rc), fmt.Errorf("could not tell whether the candidates are already claimed: %w", err),
+			count, belay.Usage{}), nil
 	}
 	var projected belay.Usage
 	if !claimed {
@@ -289,13 +293,18 @@ func (n *Node) Run(ctx context.Context, rc *graph.RunContext) (graph.Result, err
 
 	outcomes, err := rc.CandidateRuns.Run(ctx, specs)
 	if err != nil {
-		// What the candidates that ran reported spending travels with the
-		// error, as it does with every answer (see spentBy). A candidate the
-		// runner never reached reports nothing this time, so the figure can
-		// be short of the truth; the dispatcher charges only the increase on
-		// what earlier attempts recorded, so a short figure is never
-		// counted twice, and the next complete one makes up the difference.
-		return graph.Result{Usage: spentBy(outcomes)}, fmt.Errorf("fanout: running %d candidates: %w", count, err)
+		// What the candidates that ran reported spending travels with every
+		// answer (see spentBy). A candidate the runner never reached reports
+		// nothing this time, so the figure can be short of the truth; the
+		// dispatcher charges only the increase on what earlier attempts
+		// recorded, so a short figure is never counted twice, and the next
+		// complete one makes up the difference.
+		if ctx.Err() != nil {
+			// The caller's own cancellation: the dispatcher decides what
+			// that is, and pauses the run as interrupted.
+			return graph.Result{Usage: spentBy(outcomes)}, fmt.Errorf("fanout: running %d candidates: %w", count, err)
+		}
+		return faulted(log, err, count, spentBy(outcomes)), nil
 	}
 
 	placed, err := place(outcomes, specs)
@@ -518,6 +527,27 @@ func paused(log *slog.Logger, open []string, count int, spent belay.Usage) graph
 		Usage:  spent,
 		Note: fmt.Sprintf("%d of %d candidates could not be finished: %s; resuming retries only those",
 			len(open), count, strings.Join(open, "; ")),
+	}
+}
+
+// faulted reports a fanout the candidate runner could not carry out at all,
+// with no Patch: it could not read the parent run it claims against, or tell
+// whether the candidates were already claimed.
+//
+// That is a machine fault, and a machine fault pauses, as a candidate's own
+// fault does (see paused). It was once returned as an error, which the
+// dispatcher ends a run over for good, so an unreadable file put every
+// candidate the run had already paid for out of reach. Nothing about the
+// candidates was decided, so there is nothing to record, and a resume tries
+// again.
+func faulted(log *slog.Logger, fault error, count int, spent belay.Usage) graph.Result {
+	log.Warn("fanout: the candidate runs could not be carried out, so this fanout is paused",
+		"candidates", count, "error", fault.Error())
+	return graph.Result{
+		Status: journal.StatusPaused,
+		Usage:  spent,
+		Note: fmt.Sprintf("the %d candidates could not be run: %v; nothing about them was decided, and resuming tries again",
+			count, fault),
 	}
 }
 
