@@ -2,6 +2,7 @@ package join_test
 
 import (
 	"errors"
+	"reflect"
 	"slices"
 	"strings"
 	"testing"
@@ -198,7 +199,7 @@ func TestSelect(t *testing.T) {
 			if got.Strategy.Name != tt.strategy {
 				t.Errorf("Select() Strategy.Name = %q, want %q", got.Strategy.Name, tt.strategy)
 			}
-			if !got.Selected() && got.Winner != (state.Candidate{}) {
+			if !got.Selected() && !reflect.DeepEqual(got.Winner, state.Candidate{}) {
 				t.Errorf("Select() carried winner %+v with nothing passing", got.Winner)
 			}
 		})
@@ -233,7 +234,7 @@ func TestSelectIsDeterministic(t *testing.T) {
 					if err != nil {
 						t.Fatalf("Select() run %d error = %v", i, err)
 					}
-					if got.Winner != first.Winner {
+					if !reflect.DeepEqual(got.Winner, first.Winner) {
 						t.Fatalf("Select() run %d winner = %+v, want %+v (selection is not deterministic)",
 							i, got.Winner, first.Winner)
 					}
@@ -278,7 +279,7 @@ func TestSelectDoesNotMutateInput(t *testing.T) {
 	if _, err := join.Select(candidates, config.SelectFewestIssues); err != nil {
 		t.Fatalf("Select() error = %v", err)
 	}
-	if !slices.Equal(candidates, before) {
+	if !reflect.DeepEqual(candidates, before) {
 		t.Fatalf("Select() mutated its input: got %+v, want %+v", candidates, before)
 	}
 }

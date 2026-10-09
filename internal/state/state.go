@@ -505,6 +505,14 @@ type Candidate struct {
 	// ended, for the cases a reader would otherwise have to open a journal to
 	// understand — a refused workspace, a spent envelope. May be empty.
 	Note string `json:"note"`
+	// ChangedFiles is the candidate's recorded change, from its own
+	// blackboard (Code.ChangedFiles), relative to its workspace: what its
+	// write step recorded and its policy gate judged. promote commits a
+	// winner's work only when its worktree holds nothing beyond it.
+	ChangedFiles []string `json:"changed_files,omitempty"`
+	// Unreported is the part of ChangedFiles the candidate's agent did not
+	// report (Code.Unreported), which promote names in the commit.
+	Unreported []string `json:"unreported,omitempty"`
 }
 
 // Promotion is what a run's promote node put on its branch: the record a

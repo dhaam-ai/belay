@@ -369,13 +369,32 @@ The run has ended, and `belay resume` will not continue it. Change belay.yaml or
 - Then `belay resume <run-id>`. promote asks the repository what is already merged, finds your merge, and finishes
 - If you stop part way — conflicts resolved, nothing committed — resuming pauses again and says so. `git status`, `git commit`, then resume
 
-## A Run Paused Because Its Worktree Has Uncommitted Changes
+## A Run Paused Because Its Worktree Has Changes No Step Recorded
 
-**Symptom**: A branch run pauses at `promote` with a note saying the branch "has changes belay did not commit".
+**Symptom**: A branch run pauses at `promote` with a note saying the worktree "holds changes no step of this run recorded or judged", naming the files; or, for a run whose fanout winner is being merged, that the branch "has changes belay did not commit".
 
-**Cause**: Something changed files in the run's worktree that belay did not make, usually a merge finished part way by hand. belay will not sweep them into its own commit.
+**Cause**: promote commits exactly what the run's steps recorded and the policy gate judged, and nothing else. Something changed a file in the worktree after the last check: a person editing it while the run was paused, a merge finished part way by hand, or the test command writing a file your `.gitignore` does not exclude (a coverage report, a build output). belay will not sweep such a change into its own commit, because no step of the run recorded it and no gate judged it, while the run would report the files it verified.
 
-**Remedy**: `cd` to the run's worktree, `git status` to see what is uncommitted, `git commit` what belongs, then `belay resume <run-id>`.
+The same pause names a change outside the directory a run was started in (`changes outside sub, the directory this run was started in`): a run started in a subdirectory records and judges that directory only.
+
+**Diagnosis**:
+1. The note names the files and the worktree
+2. `git -C <worktree> status` shows what is uncommitted there
+
+**Remedy**:
+- Undo what does not belong to the run (`git -C <worktree> checkout -- <file>`, or delete a new file), then `belay resume <run-id>`. promote asks again and commits
+- A build output the test command writes every time belongs in your `.gitignore`, or in the repository's `.git/info/exclude`, which is not part of the tree
+- A change you want can be made on the branch after the run completes
+- A change that has to reach above the directory the run was started in (a `go.mod` at the repository's top, say) needs a run started at the top
+- When the note names a merge (a fanout winner), finish it: `git status`, `git commit` what belongs, then `belay resume <run-id>`
+
+## A Run Paused Because the Change Breaks Its Policy at `promote`
+
+**Symptom**: A guarded branch run pauses at `promote` with a note saying "the change about to be committed breaks this run's policy ... though it passed the gate".
+
+**Cause**: promote judges the change once more, against the run's pinned policy, immediately before it commits. A file the gate passed was changed afterwards, by the test command or by hand while the run was paused.
+
+**Remedy**: undo the change the note points to in the worktree, then `belay resume <run-id>`.
 
 ## `belay resume` Says the Run's Worktree Is Gone
 

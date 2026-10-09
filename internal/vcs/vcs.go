@@ -1,6 +1,6 @@
 // Package vcs names what belay needs from version control to promote a run's
-// change: commit a workspace, integrate one line of work into another, and
-// list the files two commits differ in.
+// change: commit a workspace, integrate one line of work into another, list
+// the files two commits differ in, and list what a working tree changed.
 //
 // # Types only
 //
@@ -83,6 +83,15 @@ type Repository interface {
 	// Changed returns the files that differ between the commits from and
 	// to, as paths relative to the repository's top directory.
 	Changed(ctx context.Context, from, to string) ([]string, error)
+
+	// Changes returns every file in the working tree at dir, and below it,
+	// that differs from the commit base, committed or not, as paths
+	// relative to dir: everything a commit of that tree would carry beyond
+	// base. base must be a full commit id.
+	//
+	// It is what lets promote commit exactly what the run recorded and
+	// judged, and refuse a change no step of the run accounted for.
+	Changes(ctx context.Context, dir, base string) ([]string, error)
 }
 
 // Message is a commit message, held as its parts so every Repository writes

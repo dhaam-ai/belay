@@ -97,6 +97,7 @@ import (
 	"fmt"
 	"log/slog"
 	"path"
+	"slices"
 	"sort"
 	"strings"
 
@@ -443,13 +444,17 @@ func asCandidate(o graph.CandidateOutcome) state.Candidate {
 		// count assembled anywhere else could disagree with the verdict the
 		// candidate's gate actually recorded.
 		PolicyViolations: len(o.State.Policy.Violations),
-		Ephemeral:        o.Workspace.Ephemeral,
-		Outcome:          outcomeWord(o),
-		RunDir:           o.RunDir,
-		SpentUSD:         o.Spent.USD,
-		Estimated:        o.Spent.Estimated,
-		DurationMS:       o.DurationMS,
-		Note:             o.Note,
+		// What the candidate's own write step recorded and its gate judged,
+		// so promote can commit the winner's work and nothing beyond it.
+		ChangedFiles: slices.Clone(o.State.Code.ChangedFiles),
+		Unreported:   slices.Clone(o.State.Code.Unreported),
+		Ephemeral:    o.Workspace.Ephemeral,
+		Outcome:      outcomeWord(o),
+		RunDir:       o.RunDir,
+		SpentUSD:     o.Spent.USD,
+		Estimated:    o.Spent.Estimated,
+		DurationMS:   o.DurationMS,
+		Note:         o.Note,
 	}
 }
 

@@ -351,6 +351,50 @@ func (r *fakeRepo) Changed(_ context.Context, from, to string) ([]string, error)
 	return slices.Compact(files), nil
 }
 
+// Changes implements vcs.Repository: every file the worktree at dir has
+// changed since base, committed on its branch or not, and, when the fake
+// stands in for git's `add --all` (disk), every file on disk under dir that
+// no commit holds.
+func (r *fakeRepo) Changes(_ context.Context, dir, base string) ([]string, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if err := r.failures["Changes"]; err != nil {
+		return nil, err
+	}
+	branch, ok := r.worktrees[dir]
+	if !ok {
+		return nil, fmt.Errorf("changes in %s: %w", dir, errNoWorktree)
+	}
+	before := r.reachable(base)
+	files := slices.Clone(r.dirty[dir])
+	held := map[string]bool{}
+	for id := range r.reachable(r.tips[branch]) {
+		for _, f := range r.commits[id].files {
+			held[f] = true
+			if !before[id] {
+				files = append(files, f)
+			}
+		}
+	}
+	if r.disk {
+		err := filepath.WalkDir(dir, func(path string, d fs.DirEntry, err error) error {
+			if err != nil || !d.Type().IsRegular() {
+				return err
+			}
+			rel, err := filepath.Rel(dir, path)
+			if err == nil && !held[filepath.ToSlash(rel)] {
+				files = append(files, filepath.ToSlash(rel))
+			}
+			return err
+		})
+		if err != nil {
+			return nil, err
+		}
+	}
+	slices.Sort(files)
+	return slices.Compact(files), nil
+}
+
 // Tip is the question promote asks for the commit a branch points to.
 func (r *fakeRepo) Tip(_ context.Context, dir string) (string, error) {
 	r.mu.Lock()
