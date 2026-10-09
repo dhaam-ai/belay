@@ -304,6 +304,13 @@ that only `pkg/belay` carries a compatibility promise. Everything under
 
 ### Fixed
 
+- **A policy pattern that describes a secret is no longer redacted as one.**
+  `belay run` printed "redacted secret-shaped config values" on every run
+  whose `policy.forbidden_content` held a pattern like the documented
+  `AKIA[0-9A-Z]{16}`, or whose `policy.forbidden_paths` held a long path,
+  and the manifest's record of the settings showed `REDACTED` where the rule
+  should be. The rules are kept now; a value shaped like a credential under
+  any other setting is still redacted.
 - **The golangci-lint gate waits for golangci-lint instead of failing on
   it.** golangci-lint allows one instance per machine at a time, and one
   that finds another running waits about five seconds and then gives up with

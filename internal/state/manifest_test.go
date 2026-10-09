@@ -354,6 +354,54 @@ func TestRedactSnapshot_OrdinaryValuesUntouched(t *testing.T) {
 	}
 }
 
+// A policy rule that describes a secret is not a secret. The docs' own
+// forbidden_content example, AKIA[0-9A-Z]{16}, is shaped like an AWS key id,
+// and a forbidden path can be a long run of the characters a token is made
+// of; redacting either from the snapshot hid the rule from the person
+// reading the manifest and printed a "redacted secret" warning on every run,
+// while the policy pin beside it kept the same text verbatim. Real secrets
+// everywhere else must still be redacted, including one shaped exactly like
+// the pattern.
+func TestRedactSnapshot_PolicyRulesDescribeSecretsAndAreKept(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name         string
+		key, value   string
+		wantRedacted bool
+	}{
+		{name: "a forbidden_content pattern shaped like a key id", key: "policy.forbidden_content",
+			value: "AKIA[0-9A-Z]{16} in every changed file"},
+		{name: "a forbidden_content pattern that is itself a literal key id", key: "policy.forbidden_content",
+			value: "AKIAIOSFODNN7EXAMPLE in every changed file"},
+		{name: "a forbidden path as long as a token", key: "policy.forbidden_paths",
+			value: "config/production/credentials.yaml"},
+		{name: "a required_tests rule", key: "policy.required_tests",
+			value: "internal/very/long/package/path/**/*.go requires **/*_test.go"},
+		{name: "a value shaped like a key id under any other key", key: "test.custom_cmd",
+			value: "AKIAIOSFODNN7EXAMPLE", wantRedacted: true},
+		{name: "a token-shaped value under any other key", key: "review.sonar.host_url",
+			value: "sk-abcdefghijklmnopqrstuvwxyz0123456789", wantRedacted: true},
+		{name: "a policy-looking key that names a credential", key: "policy.webhook_token",
+			value: "anything", wantRedacted: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			got, redacted := RedactSnapshot(config.Snapshot{tt.key: tt.value})
+			switch {
+			case tt.wantRedacted && got[tt.key] != redactedValue:
+				t.Errorf("RedactSnapshot kept %s = %q, want it redacted", tt.key, got[tt.key])
+			case !tt.wantRedacted && got[tt.key] != tt.value:
+				t.Errorf("RedactSnapshot(%s) = %q, want %q kept: a rule that describes a secret is not one",
+					tt.key, got[tt.key], tt.value)
+			case !tt.wantRedacted && len(redacted) != 0:
+				t.Errorf("RedactSnapshot reported %v as redacted, which is the warning every guarded run printed", redacted)
+			}
+		})
+	}
+}
+
 func TestRedactSnapshot_DoesNotMutateInput(t *testing.T) {
 	snap := config.Snapshot{"agent.token": "whatever"}
 	_, _ = RedactSnapshot(snap)
