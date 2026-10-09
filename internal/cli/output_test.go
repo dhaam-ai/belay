@@ -159,16 +159,9 @@ func TestResolveOutput(t *testing.T) {
 			cfg:       func(c *config.Config) { c.Output.Mode = config.OutputBranch },
 			wantBlock: []string{"output.mode", "branch", "git"},
 		},
-		{
-			name:      "dircopy candidates cannot be merged onto a branch",
-			workspace: gitWorkspace(t),
-			cfg: func(c *config.Config) {
-				c.Output.Mode = config.OutputBranch
-				c.Fanout.Enabled = true
-				c.Fanout.Isolator = config.IsolatorDircopy
-			},
-			wantBlock: []string{"fanout.isolator", "dircopy"},
-		},
+		// Whether the isolator suits the output is judged with the run's
+		// fanout, after both are settled, by checkFanoutIsolator:
+		// TestFanoutRefusesAnIsolatorItsOutputCannotUse.
 	}
 
 	for _, tt := range tests {

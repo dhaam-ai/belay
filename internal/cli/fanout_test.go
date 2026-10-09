@@ -716,3 +716,112 @@ func TestNarratorPrefixesCandidateLines(t *testing.T) {
 		t.Errorf("the parent's own lines carry a candidate prefix; got:\n%s", got)
 	}
 }
+
+// fanoutIsolatorBlocked counts the blockers that refuse a fanout over an
+// isolator its run's output cannot use.
+func fanoutIsolatorBlocked(p *runPlan) int {
+	n := 0
+	for _, b := range p.blockers {
+		if strings.Contains(b.problem, "fanout.isolator") {
+			n++
+		}
+	}
+	return n
+}
+
+// TestFanoutRefusesAnIsolatorItsOutputCannotUse: a candidate's workspace has
+// to match how its run delivers. A worktree candidate is a branch off the
+// run's own branch, which a run in place does not have, so every candidate
+// failed to get a workspace -- after the plan was paid for -- and the fanout
+// paused, and paused again on every resume. A directory copy has no branch to
+// merge onto a branch run's. Either is refused before anything is spent.
+//
+// Only a run that fans out makes a candidate, so only such a run is refused:
+// fanout.isolator in a run that does not fan out changes nothing, and
+// refusing every branch run over it broke repositories whose belay.yaml set
+// dircopy as the old docs advised. And the judgement is made on what the run
+// walks -- its pinned output and fanout, on a resume -- against the isolator
+// belay.yaml gives now, which is read live.
+func TestFanoutRefusesAnIsolatorItsOutputCannotUse(t *testing.T) {
+	const (
+		inPlace  = "version: 1\noutput:\n  mode: in_place\nbudget:\n  max_usd: 3.00\n"
+		onBranch = "version: 1\noutput:\n  mode: branch\nbudget:\n  max_usd: 3.00\n"
+		fansOut  = "fanout:\n  enabled: true\n  candidates: 3\n"
+		worktree = "  isolator: worktree\n"
+		dircopy  = "  isolator: dircopy\n"
+	)
+	for _, tc := range []struct {
+		name   string
+		config string
+		want   int
+	}{
+		{name: "worktree candidates in a run in place", config: inPlace + fansOut + worktree, want: 1},
+		{name: "directory copies in a branch run", config: onBranch + fansOut + dircopy, want: 1},
+		{name: "worktree candidates in a branch run", config: onBranch + fansOut + worktree, want: 0},
+		{name: "directory copies in a run in place", config: inPlace + fansOut + dircopy, want: 0},
+		{name: "directory copies set, in a branch run that does not fan out", config: onBranch + "fanout:\n" + dircopy, want: 0},
+		{name: "worktrees set, in a run in place that does not fan out", config: inPlace + "fanout:\n" + worktree, want: 0},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ws := gitWorkspace(t)
+			writeConfig(t, ws, tc.config)
+			plan, err := resolve(resolveRequest{workspace: ws, logger: quietLogger(), context: t.Context()})
+			if err != nil {
+				t.Fatalf("resolve: %v", err)
+			}
+			if got := fanoutIsolatorBlocked(plan); got != tc.want {
+				t.Errorf("refused over the isolator %d times, want %d; blockers: %s", got, tc.want, blockerText(plan))
+			}
+			if tc.want == 0 {
+				return
+			}
+			// The refusal is a blocker, so the dry run says it, before
+			// anything is spent.
+			stdout, _, err := runCLI(t, "--workspace", ws, "--dry-run", "run", "add tests")
+			if err == nil || !strings.Contains(stdout, "would refuse") || !strings.Contains(stdout, "fanout.isolator") {
+				t.Errorf("the dry run = %v, want it to refuse over fanout.isolator:\n%s", err, stdout)
+			}
+		})
+	}
+
+	for _, tc := range []struct {
+		name             string
+		created, resumed string
+		want             int
+	}{
+		{
+			name:    "a fanout run in place, resumed with worktree candidates, is refused once",
+			created: inPlace + fansOut, resumed: inPlace + fansOut + worktree, want: 1,
+		},
+		{
+			name: "a fanout run in place, resumed while belay.yaml would branch with copies, is not refused",
+			// auto resolves a branch here, which the run does not have.
+			created: inPlace + fansOut, resumed: "version: 1\nbudget:\n  max_usd: 3.00\n" + fansOut + dircopy, want: 0,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ws := gitWorkspace(t)
+			writeConfig(t, ws, tc.created)
+			plan, err := resolve(resolveRequest{workspace: ws, logger: quietLogger(), context: t.Context()})
+			if err != nil {
+				t.Fatalf("resolve: %v", err)
+			}
+			const runID = "20260101T000000Z-abcdef123456"
+			store, err := createRun(t.Context(), plan, runSpec{Workspace: ws, RunID: runID, Goal: "add tests"})
+			if err != nil {
+				t.Fatalf("createRun: %v", err)
+			}
+			writeConfig(t, ws, tc.resumed)
+			resumed, err := resolve(resolveRequest{workspace: ws, logger: quietLogger(), context: t.Context()})
+			if err != nil {
+				t.Fatalf("resolve after the file changed: %v", err)
+			}
+			if err := resumed.resumePreflight(t.Context(), store); err != nil {
+				t.Fatalf("resumePreflight: %v", err)
+			}
+			if got := fanoutIsolatorBlocked(resumed); got != tc.want {
+				t.Errorf("refused over the isolator %d times, want %d; blockers: %s", got, tc.want, blockerText(resumed))
+			}
+		})
+	}
+}

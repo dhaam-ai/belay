@@ -340,6 +340,16 @@ that only `pkg/belay` carries a compatibility promise. Everything under
   is a warning, never a refusal. The same rule stops a resume from warning
   about uncommitted work a branch run starting now would leave out, and from
   telling a branch run that `belay.yaml` "now says" a mode it does not.
+- **A fanout whose isolator cannot serve its output is refused before it
+  spends, and `fanout.isolator` no longer refuses a run that does not fan
+  out.** `fanout.isolator: worktree` in a run that edits in place passed the
+  dry run, paid for the plan, and then could not make a single candidate's
+  workspace, so the fanout paused, and paused again on every resume. It is
+  now refused up front, like `dircopy` in a branch run. That refusal, in turn,
+  was applied to every branch run, fanout or not, so a repository whose
+  `belay.yaml` set `dircopy` as earlier docs advised could not start a run at
+  all; both refusals now apply only to a run that fans out, and a resume
+  judges them against the output and fanout the run was started with.
 - **A repair's file list is checked against the disk, not taken on trust.**
   The fix step routed straight back to the tests, so a repair was the one
   change in a run that nothing verified: no claimed path was proven to be a

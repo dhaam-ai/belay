@@ -771,7 +771,12 @@ func (p *runPlan) resolveFanout() {
 // resolveOutput, resolvePolicy and resolveFanout set them for a new run from
 // belay.yaml; bindOutput, bindPolicy and bindFanout set them for a resume
 // from the chosen run's manifest, and call this again. It never refuses a
-// run: a pin this plan cannot honour is resumePreflight's to report.
+// run over a pin: a pin this plan cannot honour is resumePreflight's to
+// report. What it does re-derive on every rebuild are the two refusals that
+// judge the run's fanout against what belay.yaml gives now -- its review mode
+// (checkFanoutReview) and its isolator (checkFanoutIsolator) -- because the
+// fanout and the output they are judged with are only final once the pins
+// are bound.
 //
 // The route is set even when the registry cannot be built, so that a dry run
 // refusing to start still shows the route it would have taken.
@@ -798,6 +803,7 @@ func (p *runPlan) resolveRegistry() {
 	p.registry = registry
 	p.resolveCandidates()
 	p.checkFanoutReview()
+	p.checkFanoutIsolator()
 }
 
 // checkFanoutReview refuses a run that fans out into a quality gate its
