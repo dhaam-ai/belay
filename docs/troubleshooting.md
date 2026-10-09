@@ -34,9 +34,10 @@ This document covers common failure modes, their symptoms, and remedies.
 2. The approve step's note names the plan to read and the command that continues the run
 
 **Remedy**:
-1. Read the plan at `.belay/runs/<run-id>/artifacts/plan.md`, and edit it if you want to
+1. Read the plan with `belay plan <run-id>`, which at a terminal opens it in the plan viewer, or at `.belay/runs/<run-id>/artifacts/plan.md`, and edit it if you want to
 2. If approved, run `belay resume <run-id>` to continue; resuming is the approval
-3. If not approved, start a new run with `belay run "what you want built"`. The paused run stays as it is
+3. If you want a different plan, `belay plan --regenerate "what to change" <run-id>` has the agent write a new one and stops at it again
+4. If you want none of it, leave the run where it is and start a new one with `belay run "what you want built"`
 
 ## Test Failed; Agent Cannot Fix It
 
@@ -59,6 +60,7 @@ This document covers common failure modes, their symptoms, and remedies.
 - If the agent needs more context, start a new run with a more specific goal
 - If the loop is infinite, increase graph.give_up (default 3) to allow more fix attempts
 - If the limit is reached, break the loop by reducing the goal to a smaller, more achievable task
+- To try the repair again with a stronger model without paying for the rest of the run, fork it: `belay fork <run-id> fix --model opus`. A fork of a fix that gave up gets one more round, and belay says so before it spends anything
 
 ## Toolchain Missing
 
@@ -69,6 +71,7 @@ This document covers common failure modes, their symptoms, and remedies.
 **Diagnosis**:
 1. The error message names which toolchain is missing (e.g., "golangci-lint")
 2. Run the same command in a shell to see what the error is: `which <tool>`
+3. `belay --dry-run run` does not catch this: it names the test runner and linter it would use for the project it finds, without checking that either, or `claude`, is installed
 
 **Remedy**:
 - Install the toolchain and start a new run. The run that hit the missing toolchain has failed, and `belay resume` refuses a failed run
@@ -133,7 +136,9 @@ With `budget.on_exceed: abort` the run is paused, not ended. Raise the ceiling i
 2. The journal file is automatically healed on resume (any torn tail is discarded)
 3. If the same crash happens repeatedly, it may indicate a stuck node (increase graph.node_timeout in belay.yaml)
 
-**Note**: A step cut off part-way may already have spent money that the agent had not yet reported. The run's recorded cost leaves it out, as it does for a crash.
+**Note**: A step cut off part-way may already have spent money that the agent had not yet reported. Unless it reported its own spend, it is charged the costliest step the run recorded before it, marked as an estimate (`belay runs` shows the cost with a `~`), so a step that keeps being interrupted is still stopped by the budget ceiling. A run cut off in its first paid step has nothing to go on and is charged nothing (ADR-0007).
+
+**Leftover processes**: A belay killed with `kill -9`, or quit with a second Ctrl-C, can leave the agent or your tests running. belay records every process it starts for a step under `$XDG_STATE_HOME/belay` (or `~/.local/state/belay`), and `belay resume` stops whatever is still running from the step that was cut off, after checking each one is the process belay started. belay needs `HOME` or `XDG_STATE_HOME` set to keep those records, and refuses to start a step's processes without them.
 
 ## Fanout Does Not Follow belay.yaml on Resume
 
@@ -282,18 +287,17 @@ Ruff's scope misses the first four too. It counts a syntax error, or a finding w
 
 ## Node Timeout
 
-**Symptom**: Error message: "graph: node timeout exceeded" and run aborts.
+**Symptom**: belay says it "stopped itself", that "one step ran longer than graph.node_timeout allows", and ends with `graph: node timeout exceeded: "<step>" exceeded graph.node_timeout=15m0s`. It exits with code 3, and `belay runs` lists the run as paused.
 
 **Cause**: A single node took longer than graph.node_timeout (default 15 minutes).
 
 **Diagnosis**:
-1. Check which node timed out (look at the journal's last node_started record)
+1. `belay timeline <run-id>` shows the step that timed out as stopped, with the note that names the setting
 2. The timeout is likely due to a slow operation: test suite, code generation, sonar-scanner on a large repo
 
 **Remedy**:
-The run has ended, and `belay resume` will not continue it. Change belay.yaml, then start a new run:
-- Increase graph.node_timeout in belay.yaml
-- Or reduce the scope (fewer tests, smaller code changes, scoped SonarQube analysis)
+The run is paused, not ended. Raise `graph.node_timeout` in belay.yaml and run `belay resume <run-id>`: belay reads the limit again as it starts, runs the step that timed out again from its start, and keeps everything the run has already spent. The interrupted step is charged an estimate of what it spent (see *Interrupted or Crashed Run*).
+- Or reduce the scope (fewer tests, smaller code changes, scoped SonarQube analysis) and start a new run
 - If timeouts happen repeatedly on the same node, there may be an infinite loop or a genuine performance problem
 
 ## Invalid Result
@@ -314,7 +318,7 @@ The run has ended, and `belay resume` will not continue it. Change belay.yaml, t
 
 ## Max Steps Exceeded
 
-**Symptom**: Error message: "graph: max steps exceeded" and run aborts after 60 (or configured) node executions.
+**Symptom**: After 60 (or the configured number of) steps, belay says it "stopped itself" because "the graph kept going round without finishing", and ends with `graph: max steps exceeded: 60 node executions performed, limit is graph.max_steps=60 (raise it, or the graph is not converging)`. It exits with code 3, and `belay runs` lists the run as paused.
 
 **Cause**: The run performed too many node executions without reaching END. Usually, the fix loop is looping forever.
 
@@ -323,9 +327,8 @@ The run has ended, and `belay resume` will not continue it. Change belay.yaml, t
 2. If the pattern shows fix → test → fix → test repeating, the agent cannot make progress
 
 **Remedy**:
-The run has ended, and `belay resume` will not continue it. Change belay.yaml or the goal, then start a new run:
-- Increase graph.max_steps in belay.yaml (default 60)
-- Or reduce the goal so fewer fixes are needed
+The run is paused, not ended. Raise `graph.max_steps` in belay.yaml (default 60) and run `belay resume <run-id>`: belay reads the limit again as it starts, and the run carries on with what it has already spent still counted. Leave it and resuming stops at the same limit again, having run nothing.
+- Or reduce the goal so fewer fixes are needed, and start a new run
 - Or break the work into smaller runs (smaller goals are easier to fix)
 - If fixes are not making progress, the issue may be fundamentally hard and require manual intervention
 
@@ -353,7 +356,7 @@ The run has ended, and `belay resume` will not continue it. Change belay.yaml or
 **Cause**: belay.yaml has a syntax error or invalid value.
 
 **Diagnosis**:
-1. Run `belay --dry-run run "your goal"`. It loads and checks the configuration and reports every problem, without creating or spending anything. belay has no `config` command
+1. Run `belay --dry-run run "your goal"`. It loads and checks the configuration without creating or spending anything. belay has no `config` command. It reports every invalid value at once, but a file it cannot read as a configuration — a key that names no setting, a value of the wrong type, broken YAML — stops at that one problem, so fix it and run the dry run again
 2. Look for typos in field names, invalid enum values, or missing required fields
 
 **Remedy**:
@@ -407,10 +410,10 @@ The same pause names a change outside the directory a run was started in (`chang
 
 **Symptom**: `belay resume` refuses with `this run works in its own git worktree at ..., and that worktree is gone.`
 
-**Cause**: The directory was deleted, or the whole `.belay/runs/<run-id>` directory was removed. Everything the run committed is still on its branch; only the tree it was working in is missing.
+**Cause**: The worktree directory, `.belay/runs/<run-id>/worktree`, was deleted, or git no longer has it registered. (Removing the whole `.belay/runs/<run-id>` directory removes the run with it, and then belay answers that it has no such run.) Everything the run committed is still on its branch; only the tree it was working in is missing.
 
 **Remedy**:
-- Recreate it with the command the refusal prints: `git -C <repo> worktree add <path> belay/<run-id>`, then resume
+- Recreate it with the command the refusal prints, then resume. It is `git -C <repo> worktree add -f <path> belay/<run-id>` when git still has the deleted worktree registered (`git worktree list` marks it `prunable`), and the same without `-f` when it does not
 - Or take what you need from the branch and start a fresh run: `git log -p <base>..belay/<run-id>`
 - If the worktree is there but on another branch, put it back with `git -C <worktree> switch belay/<run-id>`
 
@@ -446,16 +449,18 @@ The same pause names a change outside the directory a run was started in (`chang
 
 **Symptom**: `git branch --list 'belay/*'` or `git worktree list` shows branches and worktrees from runs that are over.
 
-**Cause**: They are kept on purpose, and sometimes by accident. A branch is a run's result and is never deleted by belay. A worktree is removed only when its run completed: a paused or failed run's is where you finish, so it stays. A process killed between creating the branch and writing the run's manifest leaves a branch no run names.
+**Cause**: They are kept on purpose, and sometimes by accident. A branch is a run's result and is never deleted by belay. A worktree is removed only when its run completed: a paused or failed run's is where you finish, so it stays. A run that fans out on a branch also gives each candidate a branch and a worktree, `belay/<run-id>-cand-NN` at `.belay/runs/<run-id>/candidates/cand-NN`; promote removes them once the winner is merged, and keeps a candidate's branch only if it holds commits nothing else does. A process killed between creating the branch and writing the run's manifest leaves a branch no run names.
 
 **Diagnosis**:
-- `belay runs` lists the runs that exist. A `belay/<run-id>` branch whose id is not listed is an orphan
-- `git worktree list` shows the worktrees; belay's are under `.belay/runs/<run-id>/worktree`
+- `belay runs --limit 0` lists every run in the workspace; plain `belay runs` lists only the latest 20, so a branch of an older run would look like nobody's
+- A `belay/<run-id>-cand-NN` branch belongs to the run `<run-id>`, not to a run of its own
+- A `belay/<run-id>` branch whose run id `belay runs --limit 0` does not list is an orphan
+- `git worktree list` shows the worktrees; belay's are `.belay/runs/<run-id>/worktree`, and `.belay/runs/<run-id>/candidates/<candidate-id>` for a fanout's candidates
 
 **Remedy**:
-- Remove one worktree: `git worktree remove <path>`. Never `git worktree prune`, which also drops your own stale entries, such as worktrees on a disk that is not mounted
+- Remove one worktree: `git worktree remove <path>`, with `--force` if it holds changes you are throwing away. Never `git worktree prune`, which also drops your own stale entries, such as worktrees on a disk that is not mounted
 - Remove a branch once you are sure it holds nothing you want: `git log <base>..belay/<run-id>` first, then `git branch -D belay/<run-id>`
-- Remove a whole finished run: `git worktree remove .belay/runs/<run-id>/worktree`, then `rm -rf .belay/runs/<run-id>`
+- Remove a whole run: for a run on a branch that paused or failed, `git worktree remove .belay/runs/<run-id>/worktree` first; a completed run's worktree is already gone, so skip that. Then `rm -rf .belay/runs/<run-id>`, and the branch as above if you no longer want it
 
 ## The Plan Did Not Move Into the Repository
 
@@ -518,7 +523,7 @@ A run stopped between finishing and moving its plan leaves it in the run directo
 **Cause**: A fork's run lives inside its own copy of the repository, under `.belay/forks/<fork-id>`, not among the runs of the repository it was forked from.
 
 **Remedy**:
-- Point belay at the copy: `belay --workspace .belay/forks/<fork-id> resume <fork-id>`. `belay runs` in the original repository lists every fork with that command
+- Point belay at the copy: `belay --workspace .belay/forks/<fork-id> resume <fork-id>`. `belay runs` in the original repository names every fork under its table, with the command that lists the fork's run, `belay --workspace <copy> runs`
 - `rm -rf .belay/forks/<fork-id>` deletes a fork you no longer want; the run it was forked from never refers to it
 
 ## Another `belay queue start` Is Already Working Through This Queue
@@ -536,7 +541,7 @@ A run stopped between finishing and moving its plan leaves it in the run directo
 
 **Symptom**: `belay queue` lists a goal as "waiting for plan approval", and `belay queue start` passes over it.
 
-**Cause**: The goal's plan was written, and it stopped for you to read it, as every run does with `graph.approval` on. The queue parked it and moved on rather than wait for you.
+**Cause**: The goal's plan was written, and it stopped for you to read it, as every queued goal's does unless you added it with `--no-approval`. The queue does not read `graph.approval`, so turning the gate off in a `belay.yaml` does not change this. The queue parked the goal and moved on rather than wait for you.
 
 **Remedy**:
 - `belay queue` prints where the plan is. Read it, and edit it if you want to: belay reads the file again when it carries the goal on
@@ -564,11 +569,11 @@ A run stopped between finishing and moving its plan leaves it in the run directo
 - Take what you want from the copy by hand, for example with `diff -ru <file> <copy>/<file>` for each changed file. The copy has no `.git`, so it is compared, not merged
 - Delete the copy once you have what you need: `rm -rf .belay/queue/work/<run-id>`. Nothing removes copies for you
 
-## A Queued Goal's Tests Fail on Something Missing
+## A Queued Goal's or a Fork's Tests Fail on Something Missing
 
-**Symptom**: A goal fails at its tests with an error about a missing dependency, while the same tests pass in your checkout.
+**Symptom**: A queued goal, or a fork, fails at its tests with an error about a missing dependency, while the same tests pass in your checkout.
 
-**Cause**: A goal's copy is made like a fanout candidate's, without `.git`, `node_modules`, `vendor`, `.venv`, `__pycache__`, `dist`, `build`, `target` and `.belay`. Anything your tests need from those is not in the copy.
+**Cause**: A goal's copy and a fork's copy are made like an in-place fanout candidate's, without `.git`, `node_modules`, `vendor`, `.venv`, `__pycache__`, `dist`, `build`, `target` and `.belay`. Anything your tests need from those is not in the copy.
 
 **Remedy**:
 - Make the test command rebuild what it needs, for example with `test.runner: custom` and a script that installs dependencies first
