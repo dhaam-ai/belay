@@ -3,6 +3,7 @@ package cli
 import (
 	"bytes"
 	"context"
+	"fmt"
 	"log/slog"
 	"os"
 	"path/filepath"
@@ -608,6 +609,40 @@ func TestNextStepsAfterAFanout(t *testing.T) {
 				"belay timeline " + runID,
 			},
 			absent: []string{"read the plan"},
+		},
+		{
+			// graph.max_steps and graph.node_timeout are applied to each
+			// candidate's own run, not to the run as a whole, and a person
+			// told only "the graph kept going round" raises the setting
+			// thinking of the run's steps together.
+			name: "candidates stopped at graph.max_steps",
+			view: outcomeView{layout: layout, fanout: true,
+				runErr: fmt.Errorf("fanout: 1 of 3 candidates stopped at a limit: %w", graph.ErrMaxSteps),
+				outcome: graph.Outcome{
+					Status: state.RunStatusPaused, Node: graph.NodeFanout, ExitCode: graph.ExitAborted,
+				}},
+			want: []string{
+				"graph.max_steps applies to each candidate's run on its own",
+				"raise graph.max_steps in belay.yaml",
+				"the candidates that finished are kept",
+				"belay resume " + runID,
+			},
+			absent: []string{"the graph kept going round"},
+		},
+		{
+			name: "candidates stopped at graph.node_timeout",
+			view: outcomeView{layout: layout, fanout: true,
+				runErr: fmt.Errorf("fanout: 1 of 3 candidates stopped at a limit: %w", graph.ErrNodeTimeout),
+				outcome: graph.Outcome{
+					Status: state.RunStatusPaused, Node: graph.NodeFanout, ExitCode: graph.ExitAborted,
+				}},
+			want: []string{
+				"graph.node_timeout applies to each step of each candidate's run",
+				"raise graph.node_timeout in belay.yaml",
+				"the candidates that finished are kept",
+				"belay resume " + runID,
+			},
+			absent: []string{"one step ran longer than"},
 		},
 		{
 			name: "completed in place with a winner",

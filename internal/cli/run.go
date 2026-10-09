@@ -880,6 +880,17 @@ func nextSteps(view outcomeView) []string {
 	// change, and the run is paused, not ended: raising the limit and
 	// resuming continues this run, keeping everything it has already spent.
 	// Limits are re-read on the resume, which is why that works.
+	//
+	// A fanout's candidates meet the two graph limits inside their own runs,
+	// where each limit is applied to each candidate on its own (fanoutLimitSteps).
+	case errors.Is(runErr, graph.ErrMaxSteps) && outcome.Node == graph.NodeFanout:
+		return fanoutLimitSteps("a candidate kept going round without finishing, so belay stopped it.",
+			"graph.max_steps applies to each candidate's run on its own, not to the run as a whole.",
+			"graph.max_steps", resume)
+	case errors.Is(runErr, graph.ErrNodeTimeout) && outcome.Node == graph.NodeFanout:
+		return fanoutLimitSteps("one step of a candidate's run ran longer than graph.node_timeout allows.",
+			"graph.node_timeout applies to each step of each candidate's run, one at a time.",
+			"graph.node_timeout", resume)
 	case errors.Is(runErr, graph.ErrMaxSteps):
 		return []string{
 			"the graph kept going round without finishing, so belay stopped it.",
@@ -1004,6 +1015,25 @@ func fanoutPausedSteps(view outcomeView, resume string) []string {
 		"see every candidate so far with:",
 		"",
 		"    belay timeline " + view.layout.RunID(),
+	}
+}
+
+// fanoutLimitSteps is what to do about a fanout whose candidates stopped at
+// graph.max_steps or graph.node_timeout.
+//
+// The setting is named as it is for any run, but the sentence says it is
+// applied per candidate, because that changes what a person raises it to. A
+// fanout of three whose candidates each walk thirty steps has walked ninety;
+// somebody told only that "the graph kept going round" reads graph.max_steps
+// as a cap on the run's steps together and can raise it for the wrong total.
+// The candidates that finished are kept, as for any fanout pause
+// (fanoutPausedSteps), so raising the limit does not cost them again.
+func fanoutLimitSteps(what, applies, setting, resume string) []string {
+	return []string{
+		what,
+		applies,
+		"raise " + setting + " in belay.yaml, then pick this run up again; the candidates that finished are kept:",
+		"", "    " + resume,
 	}
 }
 
