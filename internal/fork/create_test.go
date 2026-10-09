@@ -386,3 +386,26 @@ func TestAForkCanBeForked(t *testing.T) {
 		t.Errorf("InheritedUSD = %v, want %v: all of it from the first source, none from the fork", second.InheritedUSD, spec.InheritedUSD)
 	}
 }
+
+// A fork's copy is taken part-way through its source run's change, so
+// nothing in it can say where that change began: neither git (the copy has
+// no .git) nor a record of the copy, which would read the source's change as
+// the starting point. The fork's manifest says so, and its gate says it in
+// every verdict, rather than judging against a starting point that is wrong.
+func TestAForkRecordsThatItCanJudgeOnlyTheAgentsReport(t *testing.T) {
+	src := newSource(t)
+	spec := prepare(t, src, graph.NodeFix, 2)
+
+	f, err := spec.Create(context.Background(), forkID, copies(t, src), forkedAt)
+	if err != nil {
+		t.Fatalf("Create() error = %v", err)
+	}
+	man, err := state.LoadManifest(f.Layout.ManifestPath())
+	if err != nil {
+		t.Fatalf("LoadManifest: %v", err)
+	}
+	want := state.Changes{From: state.ChangesReported, Why: fork.Unrecorded}
+	if man.Changes == nil || *man.Changes != want {
+		t.Errorf("fork manifest Changes = %+v, want %+v", man.Changes, want)
+	}
+}

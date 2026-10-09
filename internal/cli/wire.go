@@ -129,6 +129,12 @@ type runPlan struct {
 	// writes it into the manifest, and bindFanout replaces it on a resume
 	// with what the run's own manifest recorded.
 	fanout *state.FanoutPin
+	// changes is where this run learns what its workspace really changed,
+	// as resolveChanges settled it for a new run or bindChanges read it from
+	// a resumed run's manifest. changesRepo is the checkout an in-place git
+	// run is measured in, so createRun can record what was already changed.
+	changes     *state.Changes
+	changesRepo *git.Repo
 	// goal is what the person asked for, which a pull request's title and
 	// body are written from. startRun sets it; a resume reads it from the
 	// run's manifest.
@@ -197,6 +203,10 @@ func (p *runPlan) options(store *state.Store) graph.Options {
 		// a fingerprint of the workspace beside it, so a fork of the run can
 		// tell whether the files have changed since the visit it re-runs.
 		Fingerprint: surveyWorkspace,
+		// What each run's workspace really changed, from the pin in the
+		// manifest of the run being driven: the ground truth the write step
+		// records and the policy gate judges, instead of the agent's report.
+		Changes: p.changeSource,
 		// These three are what make a fanout run's candidates run at all.
 		// Without a candidate registry the dispatcher builds no candidate
 		// runner, RunContext.CandidateRuns is nil, and the fanout node
@@ -382,6 +392,7 @@ func resolve(req resolveRequest) (*runPlan, error) {
 	// the run's own walk holds the work or hands it to candidates.
 	p.resolvePolicy()
 	p.resolveFanout()
+	p.resolveChanges(req.ctx())
 	p.resolveRegistry()
 	p.resolveModels()
 

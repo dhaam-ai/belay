@@ -98,6 +98,17 @@ func (s *Spec) Create(ctx context.Context, runID string, iso belay.Isolator, now
 	return Fork{Layout: layout, Workspace: ws}, nil
 }
 
+// Unrecorded is why a fork's policy gate judges the files its agent reports
+// and nothing else, in the words its manifest pins and its verdicts repeat.
+//
+// A fork's copy is taken part-way through its source run's change. Neither
+// ground truth belay has works there: the copy has no .git to ask, and a
+// record of the copy would take the source's change as the starting point
+// and judge only what the forked node adds to it. A starting point that is
+// wrong is worse than none, so a fork says it has none.
+const Unrecorded = "a fork works in a copy taken part-way through its source run's change, " +
+	"so belay has no record of where that change began"
+
 // manifest is the fork's manifest: a new run under the fork's configuration,
 // carrying on from the visit's step, in place, filing no plan, held to the
 // guardrails its source was held to, and saying where it came from.
@@ -118,6 +129,8 @@ func (s *Spec) manifest(now time.Time, runID, workspace string) state.Manifest {
 	if s.Source.Policy != nil {
 		m.SetPolicy(*s.Source.Policy)
 	}
+	// For the same reason, no ground truth for what changed: see Unrecorded.
+	m.SetChanges(state.Changes{From: state.ChangesReported, Why: Unrecorded})
 	m.Origin = &state.Origin{
 		RunID: s.Source.RunID, Workspace: s.request.Source.WorkspaceDir(), Tree: s.Tree,
 		Node: s.Visit.Node, Visit: s.Visit.Ordinal, StartSeq: s.Visit.StartSeq,

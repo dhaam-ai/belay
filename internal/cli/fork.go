@@ -214,6 +214,10 @@ func makeFork(cmd *cobra.Command, u *ui, plan *runPlan, req forkRequest) error {
 	// whatever belay.yaml says now: the baseline they judge against is the
 	// source's, taken before its change began.
 	plan.bindPolicy(man)
+	// And with nothing to tell its change from where the source began: a
+	// fork's gate judges the agent's report, and says so (fork.Unrecorded).
+	plan.changes = &state.Changes{From: state.ChangesReported, Why: fork.Unrecorded}
+	plan.changesRepo = nil
 	plan.goal = man.Goal
 
 	if req.dryRun {
