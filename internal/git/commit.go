@@ -207,6 +207,92 @@ func (r *Repo) Changed(ctx context.Context, from, to string) ([]string, error) {
 	return splitNUL(res.Stdout), nil
 }
 
+// ErrInsideBelay reports a directory inside the .belay directory of the
+// working tree around it: a copy belay made, which git sees as part of the
+// repository it sits in and excludes.
+var ErrInsideBelay = errors.New("git: the directory is inside the working tree's .belay directory")
+
+// Changes returns every file in the working tree at dir, and below it, that
+// differs from the commit base, as paths relative to dir: whatever is
+// committed on top of base since, staged, edited or deleted, and every new
+// file git does not ignore. A renamed file is listed under both its names.
+// belay's own .belay directory is left out, at the top of the working tree
+// and inside dir.
+//
+// It is the ground truth a run's change is judged by, and exists because the
+// alternative is what the agent says it changed. An agent can misreport, by
+// accident or on purpose, and a policy gate that judges the report is a gate
+// the agent can walk past: it edited infra/main.tf and belay.yaml, reported
+// only src/app.py, and both edits were committed. Asking git closes that,
+// and it also answers in git's true names, so a report spelled
+// "Infra/main.tf" on a case-insensitive disk cannot dodge a glob written
+// "infra/**".
+//
+// What it lists is what Commit would record, measured against the run's
+// base rather than HEAD: an agent that commits its own work cannot take the
+// work out of the answer. A file git ignores is not listed, because a commit
+// never carries it either.
+//
+// base must be a full object id. A branch name or an abbreviation is refused
+// (ErrInvalidObjectID) rather than resolved, because a branch can have moved
+// since the run recorded it, and every file between the two would vanish
+// from the answer.
+//
+// dir is proven to be a working tree of this repository first, as every
+// call handed a working tree is (see verifyWorktree): its .git file is the
+// agent's to rewrite, and an answer read from another repository would be a
+// false "nothing changed". So is a directory inside the .belay directory of
+// the working tree around it (ErrInsideBelay), such as a copy belay made for
+// a queued goal: git finds the person's repository a few directories up and
+// excludes every file in the copy, which would also read as nothing changed;
+// a .belay at any depth counts, since a run started in a subdirectory keeps
+// its own there.
+//
+// The listings are -z output, so a name with a space or a newline in it is
+// read as the name it is.
+func (r *Repo) Changes(ctx context.Context, dir, base string) ([]string, error) {
+	if !isObjectID(base) {
+		return nil, fmt.Errorf("%w: a run's change is measured from a full commit id, got %q", ErrInvalidObjectID, base)
+	}
+	if err := r.verifyWorktree(ctx, dir); err != nil {
+		return nil, err
+	}
+	res, err := r.run(ctx, dir, "rev-parse", "--show-prefix")
+	if err != nil {
+		return nil, err
+	}
+	if insideBelay(strings.TrimSpace(res.Stdout)) {
+		return nil, fmt.Errorf("%w: %s", ErrInsideBelay, dir)
+	}
+
+	// "." scopes both listings to dir, and the two exclusions cover .belay
+	// wherever a run keeps it: at the top for a run at the top, inside dir
+	// for a run started in a subdirectory of the tree.
+	scope := []string{"--", ".", ":(exclude,top).belay", ":(exclude).belay"}
+	tracked, err := r.run(ctx, dir, append([]string{"diff", "--name-only", "-z", "--no-renames", "--relative", base}, scope...)...)
+	if err != nil {
+		return nil, err
+	}
+	untracked, err := r.run(ctx, dir, append([]string{"ls-files", "-z", "--others", "--exclude-standard"}, scope...)...)
+	if err != nil {
+		return nil, err
+	}
+	paths := append(splitNUL(tracked.Stdout), splitNUL(untracked.Stdout)...)
+	slices.Sort(paths)
+	return slices.Compact(paths), nil
+}
+
+// insideBelay reports whether prefix, a directory's path within its working
+// tree as rev-parse --show-prefix prints it, passes through a .belay
+// directory at any depth: a run started in a subdirectory keeps its .belay
+// there. Segments are compared without regard to case, because on the file
+// systems macOS uses by default .Belay is the same directory.
+func insideBelay(prefix string) bool {
+	return slices.ContainsFunc(strings.Split(prefix, "/"), func(seg string) bool {
+		return strings.EqualFold(seg, ".belay")
+	})
+}
+
 // mergeTree reports the tree merging theirs into ours would produce and the
 // files that conflict, without touching any working tree. It is how a
 // conflict becomes a verdict instead of a mess someone has to clean up.
