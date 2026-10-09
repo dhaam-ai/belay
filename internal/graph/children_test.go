@@ -2191,3 +2191,40 @@ func (p *probingFanout) Run(ctx context.Context, rc *graph.RunContext) (graph.Re
 	}
 	return Result{Next: graph.End, Status: journal.StatusOK}, nil
 }
+
+// TestACandidateStoppedAtALimitSaysWhich: a candidate run meets its envelope,
+// graph.max_steps or graph.node_timeout like any run, and pauses. The runner
+// used to report only that it was paused, which the fanout node could not
+// tell from a candidate waiting on a fault, so it said "its run is paused, not
+// ended" and exited 0. The outcome now carries the limit the candidate's own
+// dispatcher stopped it at, and the reason its journal gives.
+func TestACandidateStoppedAtALimitSaysWhich(t *testing.T) {
+	h := newRun(t, budgetCfg(5.00, 0), "stop at the envelope")
+	iso := newFakeIsolator(h.layout.CandidatesDir())
+	code := newCandidateNode(graph.NodeCode, func(context.Context, string, *graph.RunContext) (graph.Result, error) {
+		return Result{Next: graph.NodeTest, Status: journal.StatusOK, Usage: belay.Usage{USD: 1.20}}, nil
+	})
+	testNode := newCandidateNode(graph.NodeTest, finishes(0.10))
+	specs := poolSpecs(h, 1)
+	specs[0].Envelope = state.Envelope{LimitUSD: 1.00}
+
+	node := &runsCandidates{specs: specs}
+	if _, err := h.poolDispatcher(t, pool{registry: candidateRegistry(t, code, testNode), isolator: iso}, node).
+		Run(context.Background()); err != nil {
+		t.Fatalf("Run() error = %v", err)
+	}
+	o := node.outcomes[0]
+	if o.Status != state.RunStatusPaused || o.Err != nil {
+		t.Fatalf("outcome = {%v, err %v}, want a candidate paused with no fault", o.Status, o.Err)
+	}
+	var budgetErr *belay.BudgetError
+	if !errors.As(o.Stopped, &budgetErr) || !closeTo(budgetErr.LimitUSD, 1.00) {
+		t.Errorf("Stopped = %v, want the *belay.BudgetError of its $1.00 envelope", o.Stopped)
+	}
+	if !strings.Contains(o.Note, "budget ceiling reached before \"test\"") {
+		t.Errorf("Note = %q, want the reason the candidate's own journal gives", o.Note)
+	}
+	if testNode.ran("cand-01") != 0 {
+		t.Errorf("test ran %d times past the envelope", testNode.ran("cand-01"))
+	}
+}

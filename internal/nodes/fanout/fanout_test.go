@@ -3,6 +3,7 @@ package fanout_test
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"os"
@@ -20,6 +21,7 @@ import (
 	"github.com/dhaam-ai/belay/internal/state"
 	"github.com/dhaam-ai/belay/pkg/belay"
 	"github.com/google/go-cmp/cmp"
+	"github.com/google/go-cmp/cmp/cmpopts"
 )
 
 const testRunID = "20260101T000000Z-abcdef123456"
@@ -808,12 +810,116 @@ func TestFanoutPausesWhenACandidateHasNoDurableEndState(t *testing.T) {
 			if !strings.Contains(res.Note, tt.wantNote) {
 				t.Errorf("Note = %q, want it to name %q", res.Note, tt.wantNote)
 			}
-			// The parent's ledger must not learn the candidates' spend at a
-			// pause: the resume settles the whole sum, which already
-			// includes it, and recording it twice would inflate the run's
-			// bill once per interruption.
-			if (res.Usage != belay.Usage{}) {
-				t.Errorf("Usage = %+v on a pause, want zero", res.Usage)
+			// The candidates' spend is reported at a pause too, as the
+			// running total it is: a fanout paused over its candidates used
+			// to leave the parent's ledger, its manifest and `belay runs`
+			// showing the plan alone. The dispatcher charges each attempt
+			// only the increase on the one before (graph's supervises), so
+			// the total is not counted twice.
+			want := belay.Usage{InputTokens: 200, OutputTokens: 100, USD: 0.8}
+			if diff := cmp.Diff(want, res.Usage, cmpopts.EquateApprox(0, 1e-9)); diff != "" {
+				t.Errorf("Usage on a pause mismatch, want what the candidates have spent (-want +got):\n%s", diff)
+			}
+		})
+	}
+}
+
+// stoppedAt is a candidate its own run paused at one of belay's limits, with
+// the note that run's journal gives, as the dispatcher writes it.
+func stoppedAt(index int, id string, cause error, reason, setting string) graph.CandidateOutcome {
+	o := completed(index, id, 0, 0.5, 100)
+	o.Status = state.RunStatusPaused
+	o.Stopped = cause
+	o.Note = reason + "; paused, so raising " + setting + " and resuming continues this run"
+	return o
+}
+
+// A candidate run that meets a limit is paused, like any run: its envelope,
+// graph.max_steps and graph.node_timeout all apply to each candidate. The
+// fanout used to report that as "its run is paused, not ended", exit 0, as
+// if it were waiting for a person to read something, with the reason in the
+// candidate's journal and nowhere else, and resuming met the same limit for
+// ever. It is now the limit pause it is: an error the dispatcher pauses the
+// run over with exit 3, naming each candidate, why its own run stopped, and
+// the setting to raise; and the spend so far, which the parent's ledger and
+// `belay runs` report.
+func TestFanoutStopsAtTheLimitItsCandidatesStoppedAt(t *testing.T) {
+	envelope := &belay.BudgetError{SpentUSD: 0.50, LimitUSD: 0.45}
+	envelopeReason := `graph: budget ceiling reached before "write": belay: budget exceeded: spent $0.5000 of $0.4500 limit`
+	steps := fmt.Errorf("%w: 3 node executions performed, limit is graph.max_steps=3", graph.ErrMaxSteps)
+	stepsReason := "graph: max steps exceeded: 3 node executions performed, limit is graph.max_steps=3"
+	slow := fmt.Errorf(`%w: "test" exceeded graph.node_timeout=1s`, graph.ErrNodeTimeout)
+	slowReason := `graph: node timeout exceeded: "test" exceeded graph.node_timeout=1s`
+	diskFull := errors.New("write candidate-runs/cand-03: no space left on device")
+
+	tests := []struct {
+		name     string
+		outcomes []graph.CandidateOutcome
+		wantIs   []error
+		wantText []string
+	}{
+		{
+			name: "candidates at their envelopes",
+			outcomes: []graph.CandidateOutcome{
+				stoppedAt(1, "cand-01", envelope, envelopeReason, "budget.max_usd or budget.max_tokens"),
+				stoppedAt(2, "cand-02", envelope, envelopeReason, "budget.max_usd or budget.max_tokens"),
+			},
+			wantIs:   []error{belay.ErrBudgetExceeded},
+			wantText: []string{"cand-01", "cand-02", "budget.max_usd", "spent $0.5000 of $0.4500"},
+		},
+		{
+			name: "one candidate at graph.max_steps, one finished",
+			outcomes: []graph.CandidateOutcome{
+				completed(1, "cand-01", 0, 0.5, 100),
+				stoppedAt(2, "cand-02", steps, stepsReason, "graph.max_steps"),
+			},
+			wantIs:   []error{graph.ErrMaxSteps},
+			wantText: []string{"cand-02", "graph.max_steps", "3 node executions performed"},
+		},
+		{
+			name: "one at graph.node_timeout, one at its envelope, one with a fault",
+			outcomes: []graph.CandidateOutcome{
+				stoppedAt(1, "cand-01", slow, slowReason, "graph.node_timeout"),
+				stoppedAt(2, "cand-02", envelope, envelopeReason, "budget.max_usd or budget.max_tokens"),
+				{ID: "cand-03", Index: 3, Err: diskFull},
+			},
+			wantIs: []error{graph.ErrNodeTimeout, belay.ErrBudgetExceeded},
+			wantText: []string{"cand-01", "graph.node_timeout", `"test" exceeded`, "cand-02", "budget.max_usd",
+				"cand-03", "no space left on device"},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := enabledConfig(len(tt.outcomes))
+			layout, _ := newLayout(t)
+			rc := newRunContext(cfg, layout, &recordingRunner{outcomes: tt.outcomes}, state.Budget{LimitUSD: 10, SpentUSD: 1})
+
+			res, err := fanout.New().Run(context.Background(), rc)
+			if err == nil {
+				t.Fatalf("Run() = %+v, nil; want an error the dispatcher pauses the run over at a limit", res)
+			}
+			for _, want := range tt.wantIs {
+				if !errors.Is(err, want) {
+					t.Errorf("Run() error = %v, want one wrapping %v", err, want)
+				}
+			}
+			for _, want := range tt.wantText {
+				if !strings.Contains(err.Error(), want) {
+					t.Errorf("Run() error = %q, want it to say %q", err, want)
+				}
+			}
+			if strings.Contains(err.Error(), "resuming continues this run") {
+				t.Errorf("Run() error = %q repeats a candidate's own advice, which is about the candidate, not this run", err)
+			}
+			if res.Patch.Candidates != nil {
+				t.Errorf("a fanout stopped at a limit recorded candidates: %v", *res.Patch.Candidates)
+			}
+			var want float64
+			for _, o := range tt.outcomes {
+				want += o.Spent.USD
+			}
+			if diff := cmp.Diff(want, res.Usage.USD, cmpopts.EquateApprox(0, 1e-9)); diff != "" {
+				t.Errorf("Usage.USD mismatch, want what the candidates spent (-want +got):\n%s", diff)
 			}
 		})
 	}

@@ -582,7 +582,7 @@ func (d *Dispatcher) dispatch(ctx context.Context, resuming bool) (Outcome, erro
 	// so this is exactly New — which is why it is unconditional rather than
 	// a branch that could be wrong. See rebuildLedger for why the journal,
 	// and not the manifest, is what it is rebuilt from.
-	ledger := rebuildLedger(read.Records, man.Budget)
+	ledger := rebuildLedger(read.Records, man.Budget, d.supervises)
 
 	// Heal the run-level bookkeeping a crash can leave behind, before any new
 	// record is appended. start is computed above, from the records as the
@@ -712,7 +712,7 @@ func (d *Dispatcher) heal(
 		if _, err := jrnl.Append(interruptedAttempt(last.Node, last.Attempt, 0, charge, note)); err != nil {
 			return false, fmt.Errorf("graph: close interrupted %q: %w", last.Node, err)
 		}
-		ledger.Record(last.Node, charge)
+		d.charge(ledger, last.Node, charge)
 		d.logger.Warn("belay/graph: recovered an interrupted node",
 			slog.String("node", last.Node), slog.Int("crashed_attempt", last.Attempt),
 			slog.Int("next_attempt", start.Attempt), slog.Float64("charged_usd", charge.USD))
@@ -886,6 +886,53 @@ func (d *Dispatcher) estimable(node string) bool {
 	return !unpriced && !supervises
 }
 
+// supervises reports whether node is a Supervisor in this run's graph: a
+// node whose spend is the sum of the candidate runs it waits on.
+//
+// Such a node is accounted for differently in three places, and the reason
+// is the same in each: what it reports is many steps' worth of other runs'
+// spend, already bounded by their envelopes.
+//
+//   - It reports a running total on every attempt, paused or settled, so
+//     that the run's ledger, its manifest and `belay runs` say what the run
+//     has really spent at every pause, not only once the fanout settles.
+//     Each attempt is charged the increase since the attempts before it
+//     (budget.Ledger.Unrecorded), so nothing is counted twice.
+//   - It is recorded as a sum (budget.Ledger.RecordSum): it is not what one
+//     step costs, so it is no evidence for an interrupted step's estimate.
+//   - Its own record is not held against it (spentBefore): the guard before
+//     it and the budget it divides are the run's spend before the fanout,
+//     the figure its first attempt divided, so a resume divides the same
+//     ceiling the same way and can always adopt candidates already claimed.
+func (d *Dispatcher) supervises(node string) bool {
+	n, err := d.registry.Get(node)
+	if err != nil {
+		return false
+	}
+	_, ok := n.(Supervisor)
+	return ok
+}
+
+// charge records usage against node: as a sum for a supervising node, as
+// one step's cost for every other (see supervises).
+func (d *Dispatcher) charge(ledger *budget.Ledger, node string, usage belay.Usage) {
+	if d.supervises(node) {
+		ledger.RecordSum(node, usage)
+		return
+	}
+	ledger.Record(node, usage)
+}
+
+// spentBefore is the ledger node is measured against: the whole run's for
+// every node but a supervising one, and for that, the run without what the
+// node has itself recorded (see supervises).
+func (d *Dispatcher) spentBefore(ledger *budget.Ledger, node string) *budget.Ledger {
+	if d.supervises(node) {
+		return ledger.Without(node)
+	}
+	return ledger
+}
+
 // isZeroUsage reports whether u records nothing spent in any dimension.
 func isZeroUsage(u belay.Usage) bool {
 	return u.InputTokens == 0 && u.OutputTokens == 0 && u.USD == 0
@@ -1026,8 +1073,11 @@ func (d *Dispatcher) loop(
 		//
 		// The ceiling is not checked before a node that cannot spend. It
 		// would stop a run that has already bought its result from
-		// delivering it, and save nothing by doing so; see Unpriced.
-		if err := ledger.Check(d.cfg.Budget); err != nil && !unpriced {
+		// delivering it, and save nothing by doing so; see Unpriced. Nor is
+		// what a supervising node has itself recorded held against it: that
+		// is its candidates' spend, which their envelopes bound (see
+		// spentBefore).
+		if err := d.spentBefore(ledger, current).Check(d.cfg.Budget); err != nil && !unpriced {
 			cause := fmt.Errorf("graph: budget ceiling reached before %q: %w", current, err)
 			return d.pauseAtLimit(jrnl, man, ledger, current, steps,
 				d.limitNote(cause, "budget.max_usd or budget.max_tokens"), cause)
@@ -1160,7 +1210,7 @@ func (d *Dispatcher) runContext(
 		// belay's own tree for a zero Layout.
 		Workspace: layout.WorkspaceDir(),
 		RunID:     man.RunID,
-		Budget:    ledger.Snapshot(d.cfg.Budget.MaxUSD),
+		Budget:    d.spentBefore(ledger, node).Snapshot(d.cfg.Budget.MaxUSD),
 		NodeName:  node, Step: step, Attempt: attempt,
 		Logger: d.logger.With(
 			slog.String("node", node), slog.Int("step", step), slog.Int("attempt", attempt)),
@@ -1344,6 +1394,14 @@ func (d *Dispatcher) settle(
 	// reported made an interrupted paid call free, and interrupting and
 	// resuming a way to spend past the ceiling.
 	//
+	// A supervising node reports what its candidates have spent in all, on
+	// every attempt, and is charged only the part no earlier attempt was
+	// (see supervises). From here on its Usage is that increment, which is
+	// what every path below journals and records.
+	if d.supervises(node) {
+		exec.res.Usage = ledger.Unrecorded(node, exec.res.Usage)
+	}
+
 	// The timeout is checked first. It is the dispatcher's own guard, and a
 	// node that outlived it is not excused by a cancellation that arrived
 	// while it did.
@@ -1365,18 +1423,19 @@ func (d *Dispatcher) settle(
 		return d.terminal(jrnl, man, ledger, node, attempt, steps, exec.elapsed, usage,
 			journal.StatusAborted, journal.EventRunAborted, state.RunStatusAborted, ExitAborted,
 			d.note(err.Error())+charged, err, logger)
-	case errors.Is(exec.err, belay.ErrBudgetExceeded):
-		// A node that refuses because of the ceiling is reporting one of
-		// the dispatcher's own limits, not a verdict on the work: the
-		// fanout node refusing to buy N candidates it can see the budget
-		// will not cover is the case this exists for. Ending the run for
-		// that would put the money and the work already done out of reach,
-		// leaving a new run from nothing as the only way on — the mistake
-		// the dispatcher's own guards stopped making. So it pauses, with
-		// the setting to raise in its note, and a resume re-runs the node
-		// against the ceiling as it is then.
+	case len(LimitSettings(exec.err)) > 0:
+		// A node that stops on one of belay's own limits is reporting the
+		// limit, not a verdict on the work: the fanout node refusing to buy
+		// N candidates it can see the ceiling will not cover, or reporting
+		// candidates whose own runs met their envelope, graph.max_steps or
+		// graph.node_timeout, or a ceiling that is no longer set at all.
+		// Ending the run for that would put the money and the work already
+		// done out of reach, leaving a new run from nothing as the only way
+		// on — the mistake the dispatcher's own guards stopped making. So it
+		// pauses, exit 3 like every limit, with the settings to raise in its
+		// note, and a resume re-runs the node against them as they are then.
 		return d.pauseInsideNode(jrnl, man, ledger, node, attempt, steps, exec.elapsed, exec.res.Usage,
-			d.limitNote(exec.err, "budget.max_usd or budget.max_tokens"), exec.err, logger)
+			d.limitNote(exec.err, strings.Join(LimitSettings(exec.err), " and ")), exec.err, logger)
 	case exec.err != nil:
 		return d.terminal(jrnl, man, ledger, node, attempt, steps, exec.elapsed, exec.res.Usage,
 			journal.StatusFailed, journal.EventRunFailed, state.RunStatusFailed, ExitFailed,
@@ -1414,7 +1473,7 @@ func (d *Dispatcher) settle(
 		return &Outcome{ExitCode: ExitFailed, Node: node, Steps: steps, Usage: ledger.Total()},
 			fmt.Errorf("graph: apply patch from %q: %w", node, err)
 	}
-	ledger.Record(node, exec.res.Usage)
+	d.charge(ledger, node, exec.res.Usage)
 
 	// Next is the journal's resume pointer, and ResolveStart reads it
 	// verbatim — it never guesses the graph's shape. A paused node therefore
@@ -1501,7 +1560,7 @@ func (d *Dispatcher) pauseInsideNode(
 	logger.Warn("belay/graph: pausing the run so this node runs again on resume",
 		slog.String("note", note))
 
-	ledger.Record(node, usage)
+	d.charge(ledger, node, usage)
 	if _, err := jrnl.Append(interruptedAttempt(node, attempt, elapsed, usage, note)); err != nil {
 		return &Outcome{ExitCode: ExitFailed, Node: node, Steps: steps, Usage: ledger.Total()},
 			fmt.Errorf("graph: journal node_finished for %q: %w", node, err)
@@ -1529,12 +1588,55 @@ func (d *Dispatcher) pauseAtLimit(
 		ExitAborted, node, steps, note, cause)
 }
 
+// LimitSettings names the settings a person raises to get a run past err,
+// when err is one of the limits belay enforces on a run, and returns nil for
+// every other error. It is how the dispatcher tells a pause it owes a person
+// an explanation for from a failure, and the fanout node which setting to
+// name for a candidate that stopped: the same limits apply to a candidate
+// run, where the budget one is its envelope, which budget.max_usd raises.
+//
+// An error may match more than one, as a fanout whose candidates stopped at
+// different limits does, and each is named once, in a fixed order.
+func LimitSettings(err error) []string {
+	if err == nil {
+		return nil
+	}
+	var out []string
+	if errors.Is(err, belay.ErrBudgetExceeded) {
+		out = append(out, "budget.max_usd or budget.max_tokens")
+	}
+	if errors.Is(err, budget.ErrNoCeiling) {
+		out = append(out, "budget.max_usd")
+	}
+	if errors.Is(err, ErrMaxSteps) {
+		out = append(out, "graph.max_steps")
+	}
+	if errors.Is(err, ErrNodeTimeout) {
+		out = append(out, "graph.node_timeout")
+	}
+	return out
+}
+
+// limitAdvice is what limitNote appends to the reason a run paused at a
+// limit: the advice, which StoppedReason takes off again.
+const limitAdvice = "; paused, so raising "
+
+// StoppedReason is the reason in a note the dispatcher wrote when it paused a
+// run at a limit (limitNote), without the advice that follows it. The advice
+// is about that run, and a reader quoting the note for another run, as the
+// fanout node quotes a candidate's, has advice of its own to give. A note
+// without the advice is returned unchanged.
+func StoppedReason(note string) string {
+	reason, _, _ := strings.Cut(note, limitAdvice)
+	return reason
+}
+
 // limitNote is what a run paused by one of the dispatcher's own limits carries
 // into the journal and the timeline: what stopped it, and which setting to
 // raise to get past it. `belay run` writes the command out; this is what
 // anyone reading the run's own record later sees.
 func (d *Dispatcher) limitNote(cause error, setting string) string {
-	return d.note(cause.Error()) + "; paused, so raising " + setting + " and resuming continues this run"
+	return d.note(cause.Error()) + limitAdvice + setting + " and resuming continues this run"
 }
 
 // pauseInterrupted ends this dispatch of a run its caller cancelled, pausing
@@ -1567,7 +1669,7 @@ func (d *Dispatcher) terminal(
 	logger.Error("belay/graph: node ended the run",
 		slog.String("status", status.String()), slog.String("note", note))
 
-	ledger.Record(node, usage)
+	d.charge(ledger, node, usage)
 	if _, err := jrnl.Append(journal.Record{
 		Event: journal.EventNodeFinished, Node: node, Attempt: attempt,
 		DurationMS: elapsed.Milliseconds(), Status: status,
@@ -1660,16 +1762,22 @@ func journalUsage(u belay.Usage) *journal.Usage {
 // Only node_finished carries Usage (journal.Record). A record with none — a
 // journal written before usage was accounted for — contributes nothing, and
 // the floor still carries whatever that run's manifest saved.
-func rebuildLedger(records []journal.Record, saved state.Budget) *budget.Ledger {
+//
+// sums names the nodes whose records are sums of other runs' steps rather than
+// one step's cost (see Dispatcher.supervises); they are rebuilt with RecordSum
+// so that Largest stays a measure of one step. Nil names none.
+func rebuildLedger(records []journal.Record, saved state.Budget, sums func(node string) bool) *budget.Ledger {
 	var entries []budget.NodeUsage
 	for _, r := range records {
 		if r.Event != journal.EventNodeFinished || r.Usage == nil {
 			continue
 		}
-		entries = append(entries, budget.NodeUsage{Node: r.Node, Usage: belay.Usage{
+		e := budget.NodeUsage{Node: r.Node, Usage: belay.Usage{
 			InputTokens: r.Usage.InputTokens, OutputTokens: r.Usage.OutputTokens,
 			USD: r.Usage.USD, Estimated: r.Usage.Estimated,
-		}})
+		}}
+		e.Sum = sums != nil && sums(r.Node)
+		entries = append(entries, e)
 	}
 	return budget.Rebuild(entries, restoreSnapshot(saved))
 }

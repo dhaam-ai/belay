@@ -15,6 +15,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/dhaam-ai/belay/internal/budget"
 	"github.com/dhaam-ai/belay/internal/config"
 	"github.com/dhaam-ai/belay/internal/graph"
 	"github.com/dhaam-ai/belay/internal/journal"
@@ -1300,6 +1301,86 @@ func TestDispatcher_ResumeRebuildsTheLedgerFromTheJournal(t *testing.T) {
 				t.Errorf("manifest.Budget.SpentUSD = %v, want %v", got.SpentUSD, tt.wantUSD)
 			}
 		})
+	}
+}
+
+// TestDispatcher_ANodeReportingALimitPausesTheRun: the fanout node reports
+// candidates whose own runs stopped at graph.max_steps or graph.node_timeout,
+// which apply to each candidate run, and a resume that finds budget.max_usd
+// gone (budget.ErrNoCeiling) has no ceiling to divide. Each is one of belay's
+// limits, not a verdict on the work, and a node returning one used to end the
+// run failed, for good, as if it were any other error. It pauses now, exit 3
+// with the setting in its note, the way the budget refusal always did.
+func TestDispatcher_ANodeReportingALimitPausesTheRun(t *testing.T) {
+	tests := []struct {
+		name    string
+		err     error
+		setting string
+	}{
+		{
+			name:    "candidates stopped at graph.max_steps",
+			err:     fmt.Errorf("fanout: cand-01 stopped: %w", graph.ErrMaxSteps),
+			setting: "graph.max_steps",
+		},
+		{
+			name:    "candidates stopped at graph.node_timeout",
+			err:     fmt.Errorf("fanout: cand-01 stopped: %w", graph.ErrNodeTimeout),
+			setting: "graph.node_timeout",
+		},
+		{
+			name:    "a fanout resumed with no ceiling to divide",
+			err:     fmt.Errorf("fanout: dividing the budget: %w", budget.ErrNoCeiling),
+			setting: "budget.max_usd",
+		},
+		{
+			name: "candidates stopped at different limits",
+			err: fmt.Errorf("fanout: %w", errors.Join(
+				fmt.Errorf("cand-01: %w", graph.ErrMaxSteps), &belay.BudgetError{SpentUSD: 1, LimitUSD: 0.5})),
+			setting: "budget.max_usd or budget.max_tokens and graph.max_steps",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			h := newRun(t, budgetCfg(10.00, 0), "stop at a limit, and say which")
+			fanoutNode := &fakeNode{name: graph.NodeFanout, steps: []nodeStep{
+				{err: tt.err},
+				{res: Result{Next: graph.End, Status: journal.StatusOK}},
+			}}
+
+			out, err := h.entryDispatcher(t, graph.NodeFanout, fanoutNode).Run(context.Background())
+			if !errors.Is(err, tt.err) {
+				t.Fatalf("Run() error = %v, want the node's own", err)
+			}
+			if out.Status != state.RunStatusPaused || out.ExitCode != graph.ExitAborted {
+				t.Errorf("Outcome = {%v, exit %d}, want {paused, exit %d}", out.Status, out.ExitCode, graph.ExitAborted)
+			}
+			if !strings.Contains(out.Note, "raising "+tt.setting+" and resuming") {
+				t.Errorf("Outcome.Note = %q, want it to name %s as the setting to raise", out.Note, tt.setting)
+			}
+			out, err = h.entryDispatcher(t, graph.NodeFanout, fanoutNode).Resume(context.Background())
+			if err != nil || out.Status != state.RunStatusCompleted {
+				t.Fatalf("Resume(): status %v, error %v, want completed once the node gets past it", out.Status, err)
+			}
+		})
+	}
+}
+
+// TestStoppedReasonDropsTheAdviceOfTheRunThatStopped: a candidate's note ends
+// with advice about the candidate run; the fanout quotes the reason and gives
+// advice of its own.
+func TestStoppedReasonDropsTheAdviceOfTheRunThatStopped(t *testing.T) {
+	tests := []struct{ note, want string }{
+		{
+			note: `graph: budget ceiling reached before "write": belay: budget exceeded: spent $0.5000 of $0.4500 limit; ` +
+				"paused, so raising budget.max_usd or budget.max_tokens and resuming continues this run",
+			want: `graph: budget ceiling reached before "write": belay: budget exceeded: spent $0.5000 of $0.4500 limit`,
+		},
+		{note: "run completed", want: "run completed"},
+	}
+	for _, tt := range tests {
+		if got := graph.StoppedReason(tt.note); got != tt.want {
+			t.Errorf("StoppedReason(%q) = %q, want %q", tt.note, got, tt.want)
+		}
 	}
 }
 
@@ -2821,4 +2902,77 @@ func TestDispatcher_AnInterruptedAttemptDoesNotConsumeAStep(t *testing.T) {
 			t.Errorf("the re-run after a kill ran at steps %v, want [2]", got)
 		}
 	})
+}
+
+// reportingSupervisor stands in for the fanout node as the dispatcher sees
+// it: a supervising node whose every attempt reports the running total its
+// candidates have spent, and remembers the spend it was shown.
+type reportingSupervisor struct {
+	reports []Result
+	calls   int
+	seen    []float64
+}
+
+func (*reportingSupervisor) Name() string           { return graph.NodeFanout }
+func (*reportingSupervisor) SupervisesCandidates() {}
+
+func (s *reportingSupervisor) Run(_ context.Context, rc *graph.RunContext) (graph.Result, error) {
+	s.seen = append(s.seen, rc.Budget.SpentUSD)
+	r := s.reports[min(s.calls, len(s.reports)-1)]
+	s.calls++
+	return r, nil
+}
+
+// TestDispatcher_ASupervisorIsChargedItsCandidatesSpendAsItLearnsIt: the
+// fanout node used to report its candidates' spend only when it settled, so
+// a fanout paused because its candidates had stopped left the parent's
+// ledger, its manifest and `belay runs` showing the plan alone, $0.10 of a
+// $1.00 ceiling, while $1.10 had been spent. Every attempt now reports the
+// running total and the dispatcher charges each attempt the increase, so the
+// run's own record is right at every pause and nothing is counted twice.
+//
+// What it has recorded is the candidates' spend, bounded by their own
+// envelopes, so it is not held against the supervisor itself: the guard
+// before it, and the budget it is shown to divide, are the run's spend
+// before the fanout.
+func TestDispatcher_ASupervisorIsChargedItsCandidatesSpendAsItLearnsIt(t *testing.T) {
+	h := newRun(t, budgetCfg(1.00, 0), "count what the candidates spent")
+	plan := &fakeNode{name: graph.NodePlan, steps: []nodeStep{{
+		res: Result{Next: graph.NodeFanout, Status: journal.StatusOK, Usage: belay.Usage{USD: 0.10}},
+	}}}
+	fan := &reportingSupervisor{reports: []Result{
+		{Status: journal.StatusPaused, Note: "candidates stopped", Usage: belay.Usage{InputTokens: 100, USD: 1.00}},
+		{Next: graph.End, Status: journal.StatusOK, Usage: belay.Usage{InputTokens: 150, USD: 1.50}},
+	}}
+
+	out, err := h.dispatcher(t, plan, fan).Run(context.Background())
+	if err != nil || out.Status != state.RunStatusPaused {
+		t.Fatalf("Run(): status %v, error %v, want paused", out.Status, err)
+	}
+	if got := h.manifest(t).Budget.SpentUSD; !closeTo(got, 1.10) {
+		t.Errorf("manifest spend at the pause = $%.2f, want $1.10: the plan and what the candidates spent", got)
+	}
+
+	out, err = h.dispatcher(t, plan, fan).Resume(context.Background())
+	if err != nil || out.Status != state.RunStatusCompleted {
+		t.Fatalf("Resume(): status %v, error %v (note %q), want completed: the supervisor's own record is "+
+			"its candidates', not the run's spend before it", out.Status, err, out.Note)
+	}
+	if !closeTo(out.Usage.USD, 1.60) || out.Usage.InputTokens != 150 {
+		t.Errorf("Outcome.Usage = %+v, want $1.60 and 150 tokens in: the running total counted once", out.Usage)
+	}
+	var charged []float64
+	for _, r := range h.records(t) {
+		if r.Event == journal.EventNodeFinished && r.Node == graph.NodeFanout {
+			charged = append(charged, r.Usage.USD)
+		}
+	}
+	if len(charged) != 2 || !closeTo(charged[0], 1.00) || !closeTo(charged[1], 0.50) {
+		t.Errorf("the fanout attempts were charged %v, want [1.00 0.50]", charged)
+	}
+	for i, spent := range fan.seen {
+		if !closeTo(spent, 0.10) {
+			t.Errorf("attempt %d of the supervisor was shown $%.2f spent, want the $0.10 spent before it", i+1, spent)
+		}
+	}
 }

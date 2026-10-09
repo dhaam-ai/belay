@@ -282,6 +282,10 @@ type NodeUsage struct {
 	// for it — more than one invocation's worth, for a node that was
 	// retried.
 	Usage belay.Usage
+	// Sum, on an entry handed to Rebuild, says Usage is a sum of many steps
+	// rather than one step's cost, and is recorded with RecordSum so that
+	// Largest never sees it. Breakdown never sets it.
+	Sum bool
 }
 
 // Breakdown returns the ledger's per-node usage in the order each node
@@ -389,6 +393,10 @@ func Restore(snap Snapshot) *Ledger {
 func Rebuild(entries []NodeUsage, floor Snapshot) *Ledger {
 	l := New()
 	for _, e := range entries {
+		if e.Sum {
+			l.RecordSum(e.Node, e.Usage)
+			continue
+		}
 		l.Record(e.Node, e.Usage)
 	}
 	l.total.atLeast(totals{

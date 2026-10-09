@@ -80,6 +80,20 @@
 // adopted without executing anything, and only the failed provisioning is
 // tried again.
 //
+// A candidate whose own run paused at a limit is neither of those. Its
+// envelope, graph.max_steps and graph.node_timeout apply to a candidate run
+// as to any run, and resuming without raising the limit meets it again,
+// having run nothing. Run reports it as the limit it is: an error wrapping
+// each candidate's cause, which the dispatcher pauses the run over with exit
+// 3, naming each candidate, the reason its own journal gives and the setting
+// to raise (see stoppedError). It once reported "its run is paused, not
+// ended" with exit 0, as if a person had something to read, and a resume
+// went round the same limit for ever.
+//
+// Every answer, settled or not, carries what the candidates have spent so far
+// as Usage, a running total the dispatcher charges only the increase on
+// (see spentBy), so the run's own record is right at every pause.
+//
 // # Errors versus results
 //
 // Per ADR-0002 a Result reports an outcome this node understands and an
@@ -275,20 +289,27 @@ func (n *Node) Run(ctx context.Context, rc *graph.RunContext) (graph.Result, err
 
 	outcomes, err := rc.CandidateRuns.Run(ctx, specs)
 	if err != nil {
-		// No Usage travels with this error. The candidates' spend is
-		// already durable in their own journals and manifests, which is
-		// where a resume and `belay timeline` read it from; charging the
-		// parent for it here as well would count it twice, once now and
-		// once when the re-run settles the sum.
-		return graph.Result{}, fmt.Errorf("fanout: running %d candidates: %w", count, err)
+		// What the candidates that ran reported spending travels with the
+		// error, as it does with every answer (see spentBy). A candidate the
+		// runner never reached reports nothing this time, so the figure can
+		// be short of the truth; the dispatcher charges only the increase on
+		// what earlier attempts recorded, so a short figure is never
+		// counted twice, and the next complete one makes up the difference.
+		return graph.Result{Usage: spentBy(outcomes)}, fmt.Errorf("fanout: running %d candidates: %w", count, err)
 	}
 
 	placed, err := place(outcomes, specs)
 	if err != nil {
 		return graph.Result{}, err
 	}
+	// What the candidates have spent so far travels with every answer
+	// below, settled or not: see spentBy.
+	soFar := spentBy(placed)
+	if stopped := atLimit(placed); len(stopped) > 0 {
+		return graph.Result{Usage: soFar}, stoppedError(log, stopped, notDurable(placed), count)
+	}
 	if open := notDurable(placed); len(open) > 0 {
-		return paused(log, open, count), nil
+		return paused(log, open, count, soFar), nil
 	}
 	return settled(log, placed), nil
 }
@@ -351,12 +372,110 @@ func place(outcomes []graph.CandidateOutcome, specs []graph.CandidateSpec) ([]gr
 	return placed, nil
 }
 
+// spentBy is what the candidates in outcomes have spent between them, as
+// their own journals record it.
+//
+// It is a running total, and every answer Run gives carries it: settled,
+// paused over a fault, stopped at a limit, or cut short. The dispatcher
+// charges a supervising node only what no earlier attempt of it was charged
+// (graph's supervises), so the parent's ledger, its manifest and
+// `belay runs` say what the run has really spent at every pause rather than
+// only once the fanout settles, and nothing is counted twice. Estimated is
+// sticky, as everywhere else belay totals money.
+func spentBy(outcomes []graph.CandidateOutcome) belay.Usage {
+	var usage belay.Usage
+	for _, o := range outcomes {
+		usage.InputTokens += o.Spent.InputTokens
+		usage.OutputTokens += o.Spent.OutputTokens
+		usage.USD += o.Spent.USD
+		usage.Estimated = usage.Estimated || o.Spent.Estimated
+	}
+	return usage
+}
+
+// atLimit returns the candidates whose own runs paused at one of belay's
+// limits, in index order.
+func atLimit(outcomes []graph.CandidateOutcome) []graph.CandidateOutcome {
+	var stopped []graph.CandidateOutcome
+	for _, o := range outcomes {
+		if o.Err == nil && o.Stopped != nil {
+			stopped = append(stopped, o)
+		}
+	}
+	return stopped
+}
+
+// stoppedError reports a fanout some of whose candidates' runs paused at a
+// limit belay enforces on each of them: the envelope, graph.max_steps or
+// graph.node_timeout.
+//
+// It is an error, not a paused Result, and that is the decision. A paused
+// Result is how a node asks a person to look at something and resume, and
+// the dispatcher exits 0 for it; this fanout cannot go on until a setting is
+// raised, and resuming without raising it meets the same limit again, having
+// run nothing. The dispatcher pauses the run over an error wrapping one of
+// its limits (graph.LimitSettings), with exit 3 and the setting in its note,
+// exactly as it does for its own. The error wraps every candidate's cause, so
+// errors.Is finds each limit, and its text names each candidate, the reason
+// its own journal gives, and the setting that would get it further.
+//
+// Candidates with a fault of their own are named too: the resume that follows
+// raising the limit retries them as well.
+func stoppedError(log *slog.Logger, stopped []graph.CandidateOutcome, faults []string, count int) error {
+	parts := make([]string, 0, len(stopped))
+	causes := make([]error, 0, len(stopped))
+	for _, o := range stopped {
+		parts = append(parts, fmt.Sprintf("%s stopped at %s, so raise %s: %s",
+			o.ID, limitName(o.Stopped), strings.Join(graph.LimitSettings(o.Stopped), " and "),
+			graph.StoppedReason(o.Note)))
+		causes = append(causes, o.Stopped)
+	}
+	msg := fmt.Sprintf("fanout: %d of %d candidates stopped at a limit belay applies to each candidate run: %s",
+		len(stopped), count, strings.Join(parts, "; "))
+	if len(faults) > 0 {
+		msg += fmt.Sprintf("; and %d could not be finished for another reason, which resuming retries: %s",
+			len(faults), strings.Join(faults, "; "))
+	}
+	log.Warn("fanout: candidates stopped at a limit, so this fanout is not settled",
+		"stopped", len(stopped), "faults", len(faults), "candidates", count)
+	return &limitError{msg: msg, causes: causes}
+}
+
+// limitName says which limit a candidate's run stopped at, in the words a
+// person reading the parent's note needs: its envelope is not a setting of
+// its own, and budget.max_usd is what raises it.
+func limitName(err error) string {
+	switch {
+	case errors.Is(err, belay.ErrBudgetExceeded):
+		return "its envelope"
+	case errors.Is(err, graph.ErrMaxSteps):
+		return "graph.max_steps, which counts each candidate's steps"
+	case errors.Is(err, graph.ErrNodeTimeout):
+		return "graph.node_timeout, which caps each candidate's steps"
+	default:
+		return "a limit"
+	}
+}
+
+// limitError is stoppedError's error: a sentence of its own, wrapping every
+// candidate's cause.
+type limitError struct {
+	msg    string
+	causes []error
+}
+
+func (e *limitError) Error() string   { return e.msg }
+func (e *limitError) Unwrap() []error { return e.causes }
+
 // notDurable returns the candidates whose end state a resume could still
-// change, in index order, each with the reason it is not final.
+// change, in index order, each with the reason it is not final. A candidate
+// stopped at a limit is not among them: atLimit reports it.
 func notDurable(outcomes []graph.CandidateOutcome) []string {
 	var open []string
 	for _, o := range outcomes {
 		switch {
+		case o.Err == nil && o.Stopped != nil:
+			// Reported by atLimit, as the limit it is.
 		case o.Err != nil:
 			open = append(open, fmt.Sprintf("%s: %s", o.ID, o.Err))
 		case o.Provision == state.ProvisionRefused:
@@ -389,14 +508,14 @@ func durableStatus(s state.RunStatus) bool {
 // The empty Patch is the point, and it is not an omission: state.Patch
 // fields are absolute sets, so recording the candidates that did end would
 // hand join a partial fanout and let it pick a winner out of a field the run
-// has not finished paying for. Usage is zero for the reason Run's error path
-// gives — the candidates' spend is durable where they recorded it, and the
-// attempt that finally settles reports the whole sum.
-func paused(log *slog.Logger, open []string, count int) graph.Result {
+// has not finished paying for. Usage is what the candidates have spent so
+// far, the running total spentBy describes.
+func paused(log *slog.Logger, open []string, count int, spent belay.Usage) graph.Result {
 	log.Warn("fanout: some candidates have no durable end state, so this fanout is not settled",
 		"unfinished", len(open), "candidates", count, "reasons", strings.Join(open, "; "))
 	return graph.Result{
 		Status: journal.StatusPaused,
+		Usage:  spent,
 		Note: fmt.Sprintf("%d of %d candidates could not be finished: %s; resuming retries only those",
 			len(open), count, strings.Join(open, "; ")),
 	}
@@ -406,7 +525,7 @@ func paused(log *slog.Logger, open []string, count int) graph.Result {
 // fanout's bill, and a sentence describing what happened.
 func settled(log *slog.Logger, outcomes []graph.CandidateOutcome) graph.Result {
 	candidates := make([]state.Candidate, 0, len(outcomes))
-	var usage belay.Usage
+	usage := spentBy(outcomes)
 	passed := 0
 	for _, o := range outcomes {
 		c := asCandidate(o)
@@ -414,13 +533,6 @@ func settled(log *slog.Logger, outcomes []graph.CandidateOutcome) graph.Result {
 			passed++
 		}
 		candidates = append(candidates, c)
-		usage.InputTokens += o.Spent.InputTokens
-		usage.OutputTokens += o.Spent.OutputTokens
-		usage.USD += o.Spent.USD
-		// Estimated is sticky, as everywhere else belay totals money: a
-		// figure built even partly from a guess must never be shown as
-		// though it were not.
-		usage.Estimated = usage.Estimated || o.Spent.Estimated
 	}
 
 	log.Info("fanout: every candidate reached a durable end state",

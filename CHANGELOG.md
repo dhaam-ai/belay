@@ -304,6 +304,16 @@ that only `pkg/belay` carries a compatibility promise. Everything under
 
 ### Fixed
 
+- **A fanout whose candidates stop at a limit says so, and exits 3.** A
+  candidate that met its share of `budget.max_usd`, `graph.max_steps` or
+  `graph.node_timeout`, each of which applies to every candidate, left the
+  run "waiting for you" with exit 0, no reason printed and no setting named,
+  and resuming met the same limit for ever. The run now stops like any
+  other limit: it names each candidate, why its own run stopped and the
+  setting to raise, and a resume that raises nothing spends nothing. The
+  run's spend, in `belay runs` and the closing report, now includes what its
+  candidates have spent, at every pause and not only once the fanout
+  finishes: it showed $0.10 of $1.00 where $1.10 had been spent.
 - **After a crash mid-fanout, resuming collects the candidates without a
   raised ceiling.** The resume charged the killed fanout step the plan's cost
   a second time, then re-ran the launch-time cost projection against that

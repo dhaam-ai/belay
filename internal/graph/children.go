@@ -181,6 +181,17 @@ type CandidateOutcome struct {
 	// that is final. A refusal is durable and may be settled; see
 	// state.Provision.
 	Provision state.Provision
+	// Stopped is the limit of belay's own that this candidate's run paused
+	// at, as its dispatcher reported it: a *belay.BudgetError for its
+	// envelope, or an error wrapping ErrMaxSteps or ErrNodeTimeout, both of
+	// which apply to each candidate run as they do to any run. It is nil for
+	// a candidate that did not pause at one, and Note holds the reason its
+	// own journal gives.
+	//
+	// It is not a fault: resuming without raising the limit meets it again,
+	// having run nothing. The node reports it as the limit it is, so the
+	// person is told which setting to raise.
+	Stopped error
 	// Err is a fault a resume could fix — a full disk, a git lock, a
 	// panic — which is why it is a field rather than the Run error: the
 	// other candidates still have end states worth reporting, and a node
@@ -396,7 +407,7 @@ func (r *candidateRunner) costliestParentStep() (belay.Usage, error) {
 	if err != nil {
 		return belay.Usage{}, fmt.Errorf("graph: read the parent journal before claiming candidates: %w", err)
 	}
-	largest := rebuildLedger(read.Records, state.Budget{}).Largest()
+	largest := rebuildLedger(read.Records, state.Budget{}, r.parent.supervises).Largest()
 	floor := r.parent.floor
 	return belay.Usage{
 		InputTokens:  max(largest.InputTokens, floor.InputTokens),
@@ -721,7 +732,7 @@ func (r *candidateRunner) collect(c *candidateClaim, store *state.Store, out *Ca
 		return
 	}
 	out.Steps = man.Step
-	out.Spent = rebuildLedger(read.Records, man.Budget).Total()
+	out.Spent = rebuildLedger(read.Records, man.Budget, nil).Total()
 	if man.Candidate != nil {
 		out.Envelope = man.Candidate.Envelope
 		out.Provision = man.Candidate.Provision
@@ -735,6 +746,13 @@ func (r *candidateRunner) collect(c *candidateClaim, store *state.Store, out *Ca
 	}
 	out.State = st
 
+	if start.State == journal.RunStatePaused && len(LimitSettings(runErr)) > 0 {
+		// Paused by one of belay's own limits, which apply to a candidate
+		// run as to any: its envelope, graph.max_steps, graph.node_timeout.
+		// runErr is the cause its dispatcher paused it over, and Note the
+		// reason its own journal gives.
+		out.Stopped = runErr
+	}
 	if start.State == journal.RunStateRunnable {
 		// The run stopped without recording how it ended, which is the one
 		// thing this runner may not settle: something machine-shaped got in

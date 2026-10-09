@@ -5,10 +5,12 @@ package e2e
 import (
 	"bytes"
 	"context"
+	"errors"
 	"io"
 	"log/slog"
 	"os"
 	"slices"
+	"strings"
 	"sync"
 	"testing"
 
@@ -224,4 +226,60 @@ func TestFanoutKillRightAfterACandidateRunStartsConverges(t *testing.T) {
 	}
 
 	fanoutResumeConverges(t, h, control)
+}
+
+// TestFanoutCandidatesAtTheirEnvelopesStopTheRunAtTheCeiling: five
+// candidates under a $0.12 ceiling after a $0.02 plan get $0.02 each, and
+// every candidate's first step costs $0.05. Each candidate run pauses at its
+// envelope. The parent used to exit 0, "waiting for you", with no reason
+// printed and budget.max_usd never named; resuming without raising it went
+// round for ever; and its manifest, which `belay runs` reads, said $0.02 had
+// been spent when $0.27 had.
+func TestFanoutCandidatesAtTheirEnvelopesStopTheRunAtTheCeiling(t *testing.T) {
+	cfg := fanoutConfig()
+	cfg.Budget.MaxUSD = 0.12
+	h := newFanoutRunWith(t, cfg)
+
+	out, err := h.dispatcher(newFanoutWorld(), fanoutScriptedTools(), nil).Run(context.Background())
+	if out.Status != state.RunStatusPaused || out.ExitCode != graph.ExitAborted {
+		t.Fatalf("Outcome = {%v, exit %d}, want {paused, exit %d} (error %v)", out.Status, out.ExitCode, graph.ExitAborted, err)
+	}
+	if !errors.Is(err, belay.ErrBudgetExceeded) {
+		t.Fatalf("Run() error = %v, want one wrapping belay.ErrBudgetExceeded", err)
+	}
+	for _, want := range append([]string{"budget.max_usd", "its envelope", "spent $0.0500 of $0.0200"}, fanoutIDs...) {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("Run() error = %q, want it to say %q", err, want)
+		}
+	}
+	const spent = 0.02 + 5*0.05
+	if got := h.manifest(t).Budget.SpentUSD; got < spent-1e-9 || got > spent+1e-9 {
+		t.Errorf("manifest spend = $%.2f, want $%.2f: the plan and what every candidate spent", got, spent)
+	}
+
+	// Resumed without raising it: the same limit, met again, with nothing run.
+	world := newFanoutWorld()
+	out, err = h.dispatcher(world, fanoutScriptedTools(), nil).Resume(context.Background())
+	if out.ExitCode != graph.ExitAborted || !errors.Is(err, belay.ErrBudgetExceeded) {
+		t.Fatalf("an unraised resume: Outcome = {%v, exit %d}, error %v, want the same limit pause", out.Status, out.ExitCode, err)
+	}
+	for _, id := range fanoutIDs {
+		if n := world.called(id); n != 0 {
+			t.Errorf("%s's agent was called %d time(s) on a resume that raised nothing", id, n)
+		}
+	}
+	if got := h.manifest(t).Budget.SpentUSD; got < spent-1e-9 || got > spent+1e-9 {
+		t.Errorf("manifest spend after an unraised resume = $%.2f, want it unchanged at $%.2f", got, spent)
+	}
+
+	// Raised: the candidates continue from where they stopped, and the run
+	// finishes with the winner a run with room to spare would choose.
+	h.cfg.Budget.MaxUSD = 5.00
+	out, err = h.dispatcher(newFanoutWorld(), fanoutScriptedTools(), nil).Resume(context.Background())
+	if err != nil || out.Status != state.RunStatusCompleted {
+		t.Fatalf("Resume() after raising budget.max_usd: status %v, error %v (note %q), want completed", out.Status, err, out.Note)
+	}
+	if got := h.state().Winner; got != fanoutWinner {
+		t.Errorf("Winner = %q, want %q", got, fanoutWinner)
+	}
 }

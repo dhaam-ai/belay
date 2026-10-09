@@ -483,3 +483,20 @@ func TestLedger_Without(t *testing.T) {
 		t.Errorf("Without changed the ledger it was called on (-want +got):\n%s", diff)
 	}
 }
+
+// TestRebuild_ASumIsNotAStep: a resumed run's ledger must say the same about
+// one step's cost as the ledger that recorded it, or the estimate an
+// interrupted step is charged would grow to the size of a whole fanout the
+// moment the run was resumed.
+func TestRebuild_ASumIsNotAStep(t *testing.T) {
+	l := Rebuild([]NodeUsage{
+		{Node: "plan", Usage: belay.Usage{InputTokens: 100, USD: 0.40}},
+		{Node: "fanout", Usage: belay.Usage{InputTokens: 9000, USD: 3.00}, Sum: true},
+	}, Snapshot{})
+	if diff := cmp.Diff(belay.Usage{InputTokens: 100, USD: 0.40}, l.Largest(), cmpopts.EquateApprox(0, 1e-9)); diff != "" {
+		t.Errorf("Largest() mismatch (-want +got):\n%s", diff)
+	}
+	if got := l.Total(); got.InputTokens != 9100 || got.USD < 3.399999 || got.USD > 3.400001 {
+		t.Errorf("Total() = %+v, want 9100 tokens in and $3.40", got)
+	}
+}
