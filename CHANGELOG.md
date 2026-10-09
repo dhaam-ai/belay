@@ -591,6 +591,25 @@ that only `pkg/belay` carries a compatibility promise. Everything under
   empty, while every other command waits for a non-empty value, as
   no-color.org asks. It now reads it the same way as the rest of belay.
 
+### Security
+
+- **Text belay did not write can no longer drive your terminal.** A plan, a
+  goal, a note quoting an error, a file name and a directory name read off
+  disk could all carry escape sequences, and `belay plan --no-input`,
+  `belay timeline`, the narration and closing report of `belay run`,
+  `resume`, `fork` and `queue`, and the last line belay prints on failure
+  printed them as they were. A plan quoting a hostile repository could set
+  your window title, write your clipboard (OSC 52), or move the cursor up and
+  erase the line above it — even with colour off or output piped. Every
+  control character in such text is now shown as a visible stand-in (ESC as
+  ␛, a C1 control as `<9B>`), the way the plan viewer already showed it, by
+  one rule every command shares. `belay runs`, `belay queue` and the
+  timeline's file and candidate lists used to drop these characters instead,
+  which could make one name read as another; they show the stand-in too. The
+  `--json` output of `timeline`, `runs` and `queue list` keeps every string
+  exactly as recorded, and now escapes the DEL and C1 controls that
+  encoding/json left raw, so it is safe to print as well.
+
 ## v0.1.4 — 2026-09-17
 
 ### Fixed
