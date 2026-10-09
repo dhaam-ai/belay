@@ -177,9 +177,9 @@ arm constructs an agent.
 `swebench.go` turns SWE-bench records into `Task`s both arms can be handed,
 and ports SWE-bench's own rule for deciding whether a task resolved. **It
 runs nothing.** It builds no container, clones no repository, applies no
-patch and touches no network. The containers, the corpus runner and the
-live command are the next slice's work. Every claim below is cited in the
-file's doc comment, and anything that could not be confirmed is marked
+patch and touches no network; the rest of the pipeline, which does, is
+described under "SWE-bench, for real" below. Every claim below is cited in
+the file's doc comment, and anything that could not be confirmed is marked
 UNKNOWN there.
 
 - **The pin.** `SWE-bench/SWE-bench_Verified` at
@@ -230,15 +230,233 @@ rule. It **cannot** claim:
   test statuses came from the official harness's own Docker containers. Even
   then the goal text here differs from any given submission's prompt;
 - anything at all in `ModeReplay`, where no agent reads the issue;
-- that the records came from the pinned revision. A `Source` is the
-  caller's declaration, refused unless it names a full commit sha, and
-  verifying it belongs to whatever downloads the records.
+- that the records came from the pinned revision, on its own. A `Source`
+  is the caller's declaration, refused unless it names a full commit sha;
+  `Download` (below) is what verifies the records against the pin.
 
-UNKNOWN, and stated as such in `swebench.go`: the dataset's licence, and
-whether the official evaluation resets the test files an instance's
-`test_patch` touches before applying it. If it does, a regression test an
-agent writes in one of those files is discarded before grading. That would
-happen in both arms alike, so it cannot bias the delta.
+UNKNOWN, and stated as such in `swebench.go`: the dataset's licence. No
+longer unknown: the official evaluation resets the test files an
+instance's `test_patch` touches before applying it (cited in `swebench.go`),
+so the regression test the goal asks for is not part of what is scored,
+in either arm.
+
+## SWE-bench, for real
+
+Everything above about SWE-bench is offline. This is the part that runs.
+
+| File | What it does |
+| --- | --- |
+| `dataset.go` | Downloads the pinned revision's one data file and refuses it unless it is byte for byte the pinned file: size 6,304,616 and the sha256 the Hugging Face tree API lists for that revision, and not a different revision by the server's own `X-Repo-Commit`. Converts it to records with the official harness's own loader, then checks every record against the pinned schema, the count (500) and for duplicates. |
+| `container.go` | Gives each cell a workspace: `/testbed` copied out of the record's own instance image, which is the tree the official evaluation applies a patch to. A belay cell also gets a container of that image for its tests. |
+| `harness.go` | Scores every cell with `python -m swebench.harness.run_evaluation`. **Its verdict is the score.** The port in `swebench.go` re-grades the same test statuses as a cross-check; a disagreement never changes the score and is counted, loudly, in the report. |
+| `corpus.go`, `cell.go` | Runs both arms over the corpus, one cell at a time, resumably, under a total spend cap. |
+| `corpusreport.go` | Writes the only output that may be published: aggregates, nothing of any instance. |
+| `cmd/swebench` | The command. It is the one place a paid agent is constructed, and it is not in this package. |
+
+A **cell** is one task, in one arm, at one replicate. The full corpus is 500
+tasks in two arms: 1,000 cells.
+
+### What the belay arm is, and is not
+
+The belay arm is belay's real graph with two adapters in it, and every
+report names them:
+
+- **Its test step is the harness's, not belay's.** belay's shipped pytest
+  runner runs a whole suite, which is the wrong tool for django's and
+  sympy's own runners and hours of work on the rest. The harness runs only
+  the test files the run changed, with the repository's own test command,
+  inside the instance's own container. It never runs the dataset's tests:
+  those are the answer key, and the control arm gets no such help.
+- **Its quality gate is shipped belay**: the ruff adapter, judging only the
+  lines the run changed. Most SWE-bench repositories configure no ruff, and
+  belay as shipped refuses to start in such a repository; the harness runs
+  ruff anyway, with its default rules, which is what adding an empty
+  `[tool.ruff]` to `pyproject.toml` does. The report counts how many tasks
+  belay as shipped would have refused (`shipped_gate_refused`).
+
+### Resuming is the point
+
+A full run takes days, and it will be interrupted. Run the same command
+again and it continues: a cell that finished is never run, paid for or
+scored again, and a belay cell cut off mid-way resumes from belay's own
+journal, re-running only the step that was cut off. A control call cut off
+mid-flight is made again from a fresh workspace (a call cannot be resumed);
+one that had returned is kept, and never made again. Something the harness
+failed at -- Docker went away, the API key ran out of credit -- stops the
+corpus with nothing recorded for that cell, so mending it and re-running
+loses nothing.
+
+## Runbook: running SWE-bench Verified
+
+This is for whoever runs it, and assumes you have not read the code.
+
+### What you need
+
+- **An x86_64 machine.** The official instance images are built for
+  `linux/amd64`; the live command refuses any other host. Linux is best;
+  Docker Desktop on an Intel Mac works.
+- **Docker, running, with room.** At least 120GB free disk and 16GB of RAM,
+  per SWE-bench's own Docker guide. The command removes each instance image
+  once its task is scored (`-keep-images` to keep them).
+- **Python 3.10 or newer with the official harness, at exactly 5.0.2**, which
+  is what the scoring was written and tested against:
+
+  ```
+  python3 -m venv ~/swebench-venv
+  ~/swebench-venv/bin/pip install swebench==5.0.2
+  ```
+
+- **ruff**, the belay arm's lint gate: `pipx install ruff`.
+- **git**, **Go 1.26**, and this repository checked out.
+- **Claude Code**, the backend both arms drive:
+  `npm install -g @anthropic-ai/claude-code`.
+- **A dedicated API key** in `ANTHROPIC_API_KEY`, so the spend is billed per
+  call, reported per call, and nobody else's.
+- **A belay configuration for the run**, for example
+  `belay-swebench.yaml`:
+
+  ```yaml
+  version: 1
+  agent:
+    model: claude-sonnet-5
+  budget:
+    max_usd: 3
+  ```
+
+  `agent.model` is the model both arms run on. `budget.max_usd` is each
+  cell's ceiling: belay enforces it on its own runs, and the corpus reserves
+  it for every cell, belay or control, before starting it. Only this file is
+  read; no other belay configuration is merged in.
+
+The command checks all of this before downloading a byte or spending a cent,
+and says what to install when something is missing.
+
+### Step 1: the free check (costs nothing)
+
+```
+go run -tags fixrate ./test/fixrate/cmd/swebench \
+  -mode replay -pilot \
+  -config belay-swebench.yaml -python ~/swebench-venv/bin/python \
+  -out ~/belay-swebench/check
+```
+
+This runs the whole pipeline on the 50 pilot tasks with a stand-in that
+applies each task's own known-good patch and spends nothing. **Every cell
+should resolve.** One that does not is a fault in the pipeline -- an image
+that will not start, a test command that does not run in it, a harness that
+cannot grade -- and finding it now is the point. The belay arm's runs end
+"failed" here, which is expected: the stand-in writes no regression test,
+so belay's own test step never passes, but the patch it leaves is the
+known-good one and the official harness resolves it.
+
+If the belay arm stops with "the tests could not run in container ...
+(exit 127)", the instance images set up their environment differently from
+SWE-bench's older ones; pass a working `-prologue` (the default is
+`source /opt/miniconda3/bin/activate && conda activate testbed && cd /testbed`).
+
+### Step 2: the pilot (about $300)
+
+```
+go run -tags fixrate ./test/fixrate/cmd/swebench \
+  -mode live -pilot \
+  -config belay-swebench.yaml -python ~/swebench-venv/bin/python \
+  -max-usd 350 \
+  -confirm "I understand this spends real money" \
+  -out ~/belay-swebench/pilot
+```
+
+50 tasks, chosen by repository so every repository is represented (seed 1;
+`-seed` and `-pilot-size` change that), each run **twice in each arm**: 200
+cells. The second run of each arm is the A/A replicate, the run-to-run noise
+any difference between the arms must be read against. It runs on the pilot
+only.
+
+### Step 3: the full run (about $1,500)
+
+```
+go run -tags fixrate ./test/fixrate/cmd/swebench \
+  -mode live \
+  -config belay-swebench.yaml -python ~/swebench-venv/bin/python \
+  -max-usd 1500 \
+  -confirm "I understand this spends real money" \
+  -out ~/belay-swebench/full
+```
+
+All 500 tasks, each arm once: 1,000 cells, one at a time, which takes
+days.
+
+### What it costs, and what stops it
+
+The dollar figures are estimates: the $1,500 the full run was budgeted at,
+which is $1.50 a cell, and the pilot's 200 cells at the same rate. They are
+not measurements. **`-max-usd` is what enforces a limit**: before each cell
+the corpus adds what it has spent to the most the cell may spend
+(`budget.max_usd`) and starts the cell only if that fits under the cap. It
+can go over only by what one cell spends past its own ceiling. An attempt
+cut off mid-call is charged its whole ceiling, because nothing reported
+what it spent. When the cap stops the run, raise `-max-usd` and run the same
+command again.
+
+### Stopping and resuming
+
+Ctrl-C at any time, or lose the machine. Run **the same command** again,
+with the same `-out`, to continue. The command refuses to resume a corpus
+with different settings (another model, other tasks, another
+configuration), because that would quote two measurements as one.
+
+Exit status: 0 the corpus is complete; 3 it stopped part-way and running it
+again resumes it (interrupted, at the cap, or the infrastructure failed --
+the message says which); 2 it refused before spending anything; 1 anything
+else.
+
+### What the output means
+
+In the `-out` directory:
+
+- **`report.txt` and `report.json` are the result, and the only files that
+  may be published.** They hold aggregates only, because the dataset's
+  licence is unknown and nothing derived from an instance may be
+  published; a test enforces it.
+- Everything else is private: `cells/` (each cell's patch, its belay
+  journal, the control call's reply), `evaluation/` (the official harness's
+  logs), `dataset/`.
+
+`report.txt` reads top to bottom:
+
+1. **What produced the numbers.** The mode (a `replay` report measures this
+   harness, never an agent), the corpus and its pin, how the tasks were
+   chosen, how they were scored, and the belay arm's adapters.
+2. **Each arm's resolve rate**, with a 95% Wilson interval, its total spend,
+   and **its cost per resolved task**, which is the number to compare:
+   belay calls the agent several times where the control arm calls it once,
+   so it is expected to cost more in total.
+3. **The paired comparison.** Both arms ran the same tasks, so each task is
+   a pair: `belay_only` tasks are what orchestration added, `control_only`
+   what it lost, and the exact McNemar p-value says how surprising that
+   split would be if the arms were equally good. No disagreements is an
+   absence of evidence, not proof the arms are the same.
+4. **A/A** (pilot only): each arm against its own second run. If an arm
+   disagrees with itself about as often as the two arms disagree with each
+   other, the delta is noise.
+5. **Evaluation counts** per arm and replicate, and **warnings**. Read these
+   before quoting anything. Above all: a nonzero `disagreement` count means
+   the official harness and this repository's port of its grading
+   disagreed on those cells. The official verdict is the score, but each
+   disagreement is in its cell's `verdict.json` (`port.disagrees`) and must
+   be understood first. `not graded` cells are ones the harness could not
+   grade (a patch that did not apply, a timeout); they count as unresolved.
+
+### What a number from this can claim
+
+In live mode: the share of the chosen SWE-bench Verified tasks whose own
+tests went from failing to passing without breaking the ones that passed
+before, as SWE-bench's official harness judged it, for each arm; and the
+difference between belay's orchestration and the same backend called once,
+for **this** backend, **this** model and **this** configuration. It cannot
+claim that a fix is right beyond what the tests check, comparability with a
+leaderboard figure (the goal text differs from any submission's prompt, and
+the belay arm's test step is the harness's), or anything about another
+model or another corpus. ADR-0018 records the decisions behind it.
 
 ## What "driving belay" means here
 
@@ -442,6 +660,18 @@ FIXRATE_ACCEPTANCE_OUT=/tmp/fixrate-acceptance \
 cat /tmp/fixrate-acceptance/result.json
 cat /tmp/fixrate-acceptance/summary.txt
 ```
+
+For the SWE-bench corpus runner end to end in scripted mode -- both arms,
+belay's real graph, scored through the official harness's exec path with a
+stand-in for Python -- and its resume guarantees:
+
+```
+go test -tags fixrate ./test/fixrate/... -run 'TestRunCorpus' -v
+```
+
+The tests that need Docker, or the real swebench (`FIXRATE_PYTHON` naming a
+Python with `swebench==5.0.2`), skip without them and say how to install
+them.
 
 For the two arms paired over one task, with the paired report in the log:
 
