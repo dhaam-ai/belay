@@ -1020,3 +1020,46 @@ func TestAFinishedFanoutGoalSaysWhereItsChangeIs(t *testing.T) {
 		}
 	}
 }
+
+// TestAQueuedGoalEditsItsCopyInPlaceWhateverOutputModeSays guards the queue's
+// one override of output.mode. A goal's copy lives under .belay and is not a
+// checkout: resolved as belay.yaml says, output.mode "branch" there is
+// refused, so no goal of such a repository could run at all, and a belay that
+// did not refuse it would branch the person's own repository from inside the
+// copy. The queue therefore runs every goal in place, in its copy, whatever
+// belay.yaml says, pins that, and creates no branch anywhere.
+func TestAQueuedGoalEditsItsCopyInPlaceWhateverOutputModeSays(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		workspace func(*testing.T) string
+	}{
+		{name: "a directory that is not a repository", workspace: goWorkspace},
+		{name: "a git repository", workspace: gitWorkspace},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ws := tc.workspace(t)
+			writeConfig(t, ws, "version: 1\noutput:\n  mode: branch\n")
+			queueAdd(t, ws, "--no-approval", "add docs")
+			var reached []string
+			if _, err := startQueue(t.Context(), t, ws, fakeGoals(reaches{goals: &reached})); err != nil {
+				t.Fatalf("start: %v", err)
+			}
+			done := goal(t, ws, 1)
+			if done.State != queue.StateFinished || !slices.Equal(reached, []string{"add docs"}) {
+				t.Fatalf("goal 1 = %+v, reached %v; want it finished, in its copy", done, reached)
+			}
+			man, err := state.LoadManifest(runLayout(t, done).ManifestPath())
+			if err != nil {
+				t.Fatalf("goal 1's run has no manifest: %v", err)
+			}
+			if man.Output.Branched() {
+				t.Errorf("goal 1's run pinned output %+v, want in place", man.Output)
+			}
+			if _, err := os.Stat(filepath.Join(ws, ".git")); err == nil {
+				if branches := gitIn(t, ws, "branch", "--list", "belay/*"); branches != "" {
+					t.Errorf("the queue created branches in the person's repository: %s", branches)
+				}
+			}
+		})
+	}
+}
