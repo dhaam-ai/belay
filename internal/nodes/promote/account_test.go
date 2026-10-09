@@ -103,7 +103,7 @@ func TestPromoteNamesTheFilesTheAgentDidNotReportInTheCommit(t *testing.T) {
 		t.Fatalf("Status = %s, want %s (note %q)", res.Status, journal.StatusOK, res.Note)
 	}
 	msg := f.repo.messageOf(f.repo.tipOf(runBranch))
-	if !strings.Contains(msg.Body, "src/helper.go") || !strings.Contains(msg.Body, "without reporting them") {
+	if !strings.Contains(msg.Body, "src/helper.go") || !strings.Contains(msg.Body, "the agent did not report") {
 		t.Errorf("the commit body %q never names src/helper.go as a file the agent did not report", msg.Body)
 	}
 }

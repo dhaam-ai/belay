@@ -312,8 +312,10 @@ type Code struct {
 	// workspace can say what really changed (Manifest.Changes), everything
 	// the workspace says changed as well, as the write node verified it.
 	ChangedFiles []string `json:"changed_files"`
-	// Unreported is the part of ChangedFiles the agent changed and never
-	// reported, as the write node found it, sorted. It is judged like every
+	// Unreported is the part of ChangedFiles that changed during the run
+	// without the agent reporting it, as the write node found it, sorted:
+	// the agent's own unreported edits, and anything else that changed the
+	// workspace, such as a person editing a paused run's files. It is judged like every
 	// other changed file; it is kept apart so that a run cannot hide an
 	// edit by leaving it out of its report, and so that every place the run
 	// is shown can say which files those were.

@@ -652,15 +652,16 @@ func unfinished(rc *graph.RunContext, err error) (graph.Result, bool) {
 
 // workMessage is the message of a commit that records work: the run's own
 // change, or, given a candidate, that candidate's. unreported are the files
-// in it the agent changed and did not report; the body names them, because
+// in it that changed without the agent reporting them, whoever changed them
+// (a person editing a paused run's worktree is one way); the body names them, because
 // the commit is what a pull request's reader sees, and they should not have
 // to open the run's journal to learn which files the agent left out of its
 // account.
 func workMessage(rc *graph.RunContext, candidate string, unreported []string) vcs.Message {
 	subject, body := describe(rc.Goal, rc.RunID)
 	if len(unreported) > 0 {
-		body = strings.TrimSpace(body + "\n\nThe agent changed these files without reporting them; belay " +
-			"recorded and judged them with the rest: " + strings.Join(unreported, ", ") + ".")
+		body = strings.TrimSpace(body + "\n\nThese files changed during the run and the agent did not report " +
+			"them; belay recorded and judged them with the rest: " + strings.Join(unreported, ", ") + ".")
 	}
 	return vcs.Message{Subject: subject, Body: body, Trailers: trailers(rc.RunID, candidate)}
 }
