@@ -1,12 +1,5 @@
 # Belay Configuration
 
-<!--
-Insertion markers. Each "slice:NAME" comment below marks where the work in
-flight for that slice adds its text: insert directly above the marker and
-leave the marker in place, so changes built in parallel land on different
-lines. Delete a marker once its slice has merged.
--->
-
 Belay is configured by a `belay.yaml` file in the repository it works on. This document describes every field and its effects.
 
 ## File Location
@@ -128,8 +121,6 @@ what the next step costs, and nothing already recorded. Spend is attributed to
 the model that actually ran the step, so `belay timeline` and the budget
 ledger show the cheap node cheap.
 
-<!-- slice:routing -->
-
 ## `graph`
 
 Limits on the graph of steps a run moves through.
@@ -208,8 +199,6 @@ A few settings work differently for queued goals, and these are all of them:
   and never files its plan into the repository, whatever `plan.archive` says:
   the copy is not the repository, and a plan filed into it would be lost with
   it.
-
-<!-- slice:queue -->
 
 ## `test`
 
@@ -441,8 +430,6 @@ Uncommitted changes in your checkout are not part of a branch run: the run start
 
 The mode is recorded in the run's `manifest.json` when the run starts. `belay resume` finishes a run the way it started, whatever `belay.yaml` says by then, and warns when the two disagree.
 
-<!-- slice:output -->
-
 ## `plan`
 
 What becomes of a run's plan once the run is over.
@@ -467,8 +454,6 @@ belay reads this setting when a run starts and records the answer in the run's m
 **Default**: `"docs/plans"`
 
 Where finished plans go, relative to the workspace (`--workspace`), not to the directory belay was started from. Missing directories are created. It must stay inside the workspace: an absolute path, a `..`, and a path under `.belay` or `.git` are refused when the configuration loads, and a symbolic link that leads out of the workspace is refused when the plan is moved. belay never replaces a file that is already there; if one is, the plan stays in the run directory and belay says why. It is checked even when `plan.archive` is `false`.
-
-<!-- slice:plan -->
 
 ## `policy`
 
@@ -605,7 +590,6 @@ policy:
 
 Only the changed files are read, never the whole repository: this is a check on what the run did, not an audit of what was already there. A changed file with a line longer than 1 MiB — a minified bundle, a generated blob — stops the gate with an error rather than being reported as clean, because "belay could not look" must never be recorded as "belay looked and it was fine". Exclude such a file with the rule's `paths`, or name it in `policy.forbidden_paths`.
 
-
 ## Environment Variables
 
 The following environment variables are used by belay and are never read from `belay.yaml`:
@@ -626,8 +610,6 @@ export ANTHROPIC_API_KEY="sk-ant-..."
 export CLAUDE_CODE_OAUTH_TOKEN="<token from claude setup-token>"
 belay run "fix the bug"
 ```
-
-<!-- slice:backend -->
 
 ### `SONAR_TOKEN` and `SONAR_HOST_URL` (SonarQube)
 

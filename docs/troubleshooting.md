@@ -1,12 +1,5 @@
 # Troubleshooting
 
-<!--
-Insertion markers. Each "slice:NAME" comment below marks where the work in
-flight for that slice adds its text: insert directly above the marker and
-leave the marker in place, so changes built in parallel land on different
-lines. Delete a marker once its slice has merged.
--->
-
 This document covers common failure modes, their symptoms, and remedies.
 
 ## The Agent Edited Nothing
@@ -438,8 +431,6 @@ The run has ended, and `belay resume` will not continue it. Change belay.yaml or
 - Remove a branch once you are sure it holds nothing you want: `git log <base>..belay/<run-id>` first, then `git branch -D belay/<run-id>`
 - Remove a whole finished run: `git worktree remove .belay/runs/<run-id>/worktree`, then `rm -rf .belay/runs/<run-id>`
 
-<!-- slice:output -->
-
 ## The Plan Did Not Move Into the Repository
 
 **Symptom**: A run finished, but its plan is still at `.belay/runs/<run-id>/artifacts/plan.md` and there is nothing in `docs/plans/`. belay said so on stderr, starting "the plan stays in the run directory".
@@ -474,8 +465,6 @@ A run stopped between finishing and moving its plan leaves it in the run directo
 - Or commit that one file with `git add -f .belay/cassette.json`
 - A `.belay/.gitignore` you wrote yourself is never replaced, so you can also write your own rules there
 
-<!-- slice:plan -->
-
 ## belay fork Says Your Files Have Changed Since the Step Ran
 
 **Symptom**: `belay fork <run-id> <node>` refuses, saying the files in your workspace "have changed since <node> #N ran", that belay "recorded no fingerprint" of them, or that they "were fingerprinted by a different belay".
@@ -505,8 +494,6 @@ A run stopped between finishing and moving its plan leaves it in the run directo
 **Remedy**:
 - Point belay at the copy: `belay --workspace .belay/forks/<fork-id> resume <fork-id>`. `belay runs` in the original repository lists every fork with that command
 - `rm -rf .belay/forks/<fork-id>` deletes a fork you no longer want; the run it was forked from never refers to it
-
-<!-- slice:fork -->
 
 ## Another `belay queue start` Is Already Working Through This Queue
 
@@ -580,8 +567,6 @@ A run stopped between finishing and moving its plan leaves it in the run directo
 - Move the file aside (`mv .belay/queue/queue.ndjson .belay/queue/queue.ndjson.broken`) and add the goals you still want again. The runs the old queue made are untouched, in `.belay/queue/work/`
 - Look at the line the error names first: it says which goal and which change
 
-<!-- slice:queue -->
-
 ## A Run Stopped on a Policy Rule
 
 **Symptom**: A run ended at the `policy` step, with a note naming a rule such as `policy:forbidden_path` or `policy:max_changed_files`.
@@ -608,5 +593,3 @@ A run stopped between finishing and moving its plan leaves it in the run directo
 - Start a fresh run; it picks the policy up.
 - The reverse holds too: a run started **with** a policy keeps it even if you delete the rules before resuming, and belay warns about that as well.
 
-
-<!-- slice:backend -->
