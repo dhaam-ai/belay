@@ -247,7 +247,7 @@ The quality gate the review step applies to the run's change.
 **Valid values**: `"lint"`, `"sonar"`, `"ai"`
 
 The review strategy:
-- `"lint"`: Run local linters (golangci-lint, eslint, etc.). Fast, zero setup, no cost. In a git repository, golangci-lint counts only findings on lines that differ from `HEAD`, so findings committed before the run don't fail it. Where git can't tell, every finding counts. ESLint and Ruff always count every finding. For the limits, see [Troubleshooting](troubleshooting.md#quality-gate-fails-on-code-the-run-did-not-touch).
+- `"lint"`: Run local linters (golangci-lint, eslint, etc.). Fast, zero setup, no cost. In a git repository, golangci-lint and Ruff count only findings on lines that differ from `HEAD`, so findings committed before the run don't fail it. Where git can't tell, every finding counts. ESLint always counts every finding. For the limits, see [Troubleshooting](troubleshooting.md#quality-gate-fails-on-code-the-run-did-not-touch).
 - `"sonar"`: Query SonarQube server for code quality. Requires infrastructure setup.
 - `"ai"`: Ask SonarQube for its verdict through the Sonar MCP server (see `review.ai`). The loader accepts it, but `belay run` refuses it for now: this reviewer is not yet wired into the command.
 

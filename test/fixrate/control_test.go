@@ -3,6 +3,7 @@
 package fixrate
 
 import (
+	"encoding/json"
 	"errors"
 	"os"
 	"path/filepath"
@@ -303,5 +304,33 @@ func TestArm_Provenance_IsUnambiguous(t *testing.T) {
 	}
 	if got := Arm("bogus").provenance(); !strings.Contains(got, "cannot be vouched for") {
 		t.Errorf(`Arm("bogus").provenance() = %q, want it to refuse to vouch for the number`, got)
+	}
+}
+
+// TestAllowance_RoundTripsThroughJSON: a corpus keeps a control cell's
+// allowance on disk and reads it back on resume, so what MarshalJSON writes
+// -- a human-readable duration -- must read back as the same Allowance.
+func TestAllowance_RoundTripsThroughJSON(t *testing.T) {
+	t.Parallel()
+
+	for _, want := range []Allowance{
+		controlAllowance(config.Default()),
+		{MaxTurns: 30, Timeout: 0, AgentCalls: 1},
+	} {
+		data, err := json.Marshal(want)
+		if err != nil {
+			t.Fatalf("Marshal(%+v): %v", want, err)
+		}
+		var got Allowance
+		if err := json.Unmarshal(data, &got); err != nil {
+			t.Fatalf("Unmarshal(%s): %v", data, err)
+		}
+		if got != want {
+			t.Errorf("round trip of %+v through %s = %+v", want, data, got)
+		}
+	}
+	var bad Allowance
+	if err := json.Unmarshal([]byte(`{"max_turns":1,"timeout":"soon","agent_calls":1}`), &bad); err == nil {
+		t.Errorf("Unmarshal of an unreadable timeout = %+v, nil error; want an error", bad)
 	}
 }

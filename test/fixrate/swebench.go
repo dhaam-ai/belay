@@ -16,8 +16,9 @@ import (
 // into Tasks both measurement arms can be handed, and ports SWE-bench's
 // own rule for deciding whether a task was resolved. It runs nothing. It
 // builds no container, clones no repository, applies no patch and touches
-// no network; containers, the corpus runner and the live command are the
-// next slice's work (6c). Everything below that is a claim about
+// no network; the containers are container.go's, the corpus runner is
+// corpus.go's, the scoring authority is harness.go's, and the live command
+// is cmd/swebench. Everything below that is a claim about
 // SWE-bench is cited to a primary source, and everything that could not
 // be confirmed is marked UNKNOWN rather than filled in.
 //
@@ -134,15 +135,22 @@ import (
 // --dataset_name, --predictions_path, --max_workers and --run_id, over
 // predictions whose records carry instance_id, model_name_or_path and
 // model_patch (same guide). Producing the status map Resolved consumes is
-// therefore a container job, and it is 6c's.
+// therefore a container job: harness.go runs it, and makes its verdict the
+// score, with Resolved as the cross-check.
 //
-// UNKNOWN: whether the official evaluation resets the test files touched
-// by an instance's test_patch to base_commit before applying it. If it
-// does, a regression test the goal asks an agent to write in one of those
-// files is discarded before grading -- in both arms alike, so it cannot
-// bias the delta, but it does mean the regression test is not part of what
-// is graded. The module that builds the evaluation script could not be
-// located to confirm it.
+// The official evaluation resets the test files an instance's test_patch
+// touches before applying it. At v3.0.17 the eval script was generated in
+// code, and did exactly that: `git checkout {base_commit} {test_files}`,
+// then the test patch, then the tests, then the reset again
+// (swebench/harness/test_spec/python.py, make_eval_script_list_py, at
+// 3f01bd622c0a22c00406139f69a234ef08225f22). At 5.0.2 the script is the
+// record's own eval_script field, which this repository does not read; the
+// 5.0.2 harness's record_test_exit_code says of those scripts that they
+// "end with a git checkout that resets the test files". So a regression
+// test an agent writes in a file the test_patch touches is discarded
+// before grading, and one written elsewhere stays but is not graded:
+// either way the regression test is not part of what is scored, in both
+// arms alike, so it cannot bias the delta.
 //
 // # Licence
 //
@@ -180,10 +188,10 @@ import (
 //   - anything at all in scripted mode. A ModeReplay agent does not read an
 //     issue; a number from it over these tasks measures belay's plumbing,
 //     exactly as Mode.provenance says;
-//   - that the records came from the pinned revision. Source is the
-//     caller's declaration, and this adapter cannot verify offline which
-//     revision a record came from. Verifying it belongs to whatever
-//     downloads the records (6c).
+//   - that the records came from the pinned revision, on its own. Source
+//     is the caller's declaration, and this adapter cannot verify offline
+//     which revision a record came from. dataset.go's Download is what
+//     verifies it, against the pinned file's sha256.
 
 // SWEBenchDataset and SWEBenchRevision are the dataset and the exact
 // revision this roadmap pins the SWE-bench corpus to. See this file's
@@ -435,6 +443,9 @@ type Task struct {
 	// EvalType is the grading rule Resolved applies. Instance.Task always
 	// writes it explicitly, so a task never relies on a default.
 	EvalType string `json:"eval_type"`
+	// Image is the official instance image the record names. Both arms'
+	// workspace is taken from it, and the official evaluation runs in it.
+	Image string `json:"image,omitempty"`
 }
 
 // Task converts i into a Task labelled with src, refusing an invalid
@@ -463,6 +474,7 @@ func (i Instance) Task(src Source) (Task, error) {
 		Version:    i.Version,
 		Difficulty: i.Difficulty,
 		EvalType:   evalType,
+		Image:      i.Image,
 	}, nil
 }
 
@@ -486,8 +498,8 @@ func (i Instance) Task(src Source) (Task, error) {
 // The problem statement is third-party text from a public issue tracker,
 // inserted verbatim and fenced, and it reaches an agent with write access.
 // That is inherent to the benchmark. Neither arm's tool set includes a
-// shell (see controlTools), and containment of the workspace itself is the
-// container work in 6c.
+// shell (see controlTools); the only code that runs in a workspace is the
+// belay arm's tests, inside the instance's own container (container.go).
 const sweBenchGoalTemplate = `Resolve the issue below in this repository.
 
 <issue>

@@ -321,6 +321,10 @@ func TestInstance_Task(t *testing.T) {
 		t.Errorf("Difficulty = %q, want %q", got.Difficulty, inst.Difficulty)
 	case got.EvalType != "pass_and_fail":
 		t.Errorf("EvalType = %q, want %q", got.EvalType, "pass_and_fail")
+	// The record names the official instance image, which is where both
+	// arms' workspace and the official evaluation come from.
+	case got.Image != inst.Image:
+		t.Errorf("Image = %q, want the record's %q", got.Image, inst.Image)
 	case !slices.Equal(got.FailToPass, inst.FailToPass):
 		t.Errorf("FailToPass = %v, want %v", got.FailToPass, inst.FailToPass)
 	case !slices.Equal(got.PassToPass, inst.PassToPass):

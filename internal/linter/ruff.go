@@ -5,6 +5,7 @@ package linter
 import (
 	"context"
 	"encoding/json"
+	"log/slog"
 	"strings"
 
 	"github.com/dhaam-ai/belay/internal/detect"
@@ -20,6 +21,10 @@ const ruffName = "ruff"
 // node_modules/.bin: the repository pins the version its rules were written
 // against.
 var ruffLocalBins = []string{".venv/bin/ruff", "venv/bin/ruff"}
+
+// ruffScopeProbe is the file the scope check asks git's ignore rules about,
+// standing in for a Python file the run adds. See base.unscopable.
+const ruffScopeProbe = "belay-scope-check.py"
 
 // ruffEnv names the parent variables ruff needs beyond exec.BaseEnvNames.
 // ruff never imports the code it checks, so it needs almost nothing: an
@@ -71,6 +76,13 @@ type ruffRule struct {
 var ruffSeverities = []ruffRule{
 	// Blocker: the file was never analysed.
 	{"E9", belay.SeverityBlocker, "a syntax or I/O error (E902, E999): ruff could not parse the file, so nothing in it was checked"},
+	// ruff 0.8 removed E999 (changelogs/0.8.x.md, "Removed Rules"). Its json
+	// renderer now prints secondary_code_or_id(), and a parse failure has no
+	// rule code, only the diagnostic id "invalid-syntax"
+	// (crates/ruff_db/src/diagnostic/mod.rs, DiagnosticId::InvalidSyntax).
+	// Without this row that id matched nothing and took the Minor default,
+	// so a change that left a file unparsable passed the gate.
+	{"INVALID-SYNTAX", belay.SeverityBlocker, "a syntax error as ruff 0.8 and later report it: ruff could not parse the file, so nothing in it was checked"},
 
 	// Critical: near-certain runtime failure, or an opted-into security
 	// rule set.
@@ -166,12 +178,55 @@ func (r *Ruff) Detect(dir string) bool {
 
 // Lint implements belay.Linter.
 //
+// It runs ruff over dir and, where git allows, counts only the findings on
+// lines that differ from HEAD, which is where a run's uncommitted edits are.
 // Findings are a successful call: ruff documents exit 1 as "violations were
 // found", which returns a GateFail report and a nil error. Exit 2, "ruff
 // terminates abnormally due to invalid configuration, invalid CLI options, or
 // an internal error", leaves stdout empty and surfaces as a GateError report
 // and an *OutputError.
+//
+// # Why only changed lines
+//
+// For the reason GolangCI.Lint gives: the gate decides whether a run's
+// change can leave the fix loop, and findings that were already committed say
+// nothing about that change. Counting them fails every run in a repository
+// with existing debt, whatever the run did, and sends the fix node to repair
+// code the run never touched. Most Python repositories have such debt under
+// ruff's rules, because most never adopted ruff.
+//
+// ruff has no flag for this, unlike golangci-lint's --new-from-rev, so belay
+// asks git itself (base.changes): the lines a zero-context diff against HEAD
+// adds, plus every line of a file the run created and git does not ignore.
+// Where git cannot say -- no repository, no commit yet, git missing, an
+// ignored directory, a git command that fails or overflows its capture --
+// every finding counts, Lint logs why, and the report's Summary says so,
+// exactly as GolangCI.Lint does.
+//
+// A finding with no line, and one saying ruff could not read or parse a
+// file, count anywhere in a file the change touched and nowhere else; see
+// changeSet.counts for why that differs from golangci-lint.
+//
+// QualityReport.Raw stays ruff's own document, so it lists every finding
+// ruff printed, including those outside the change. Issues, Counts and Gate
+// are the change's.
+//
+// # What scoping by line does not see
+//
+// The same blind spots as GolangCI.Lint's: a finding the change causes on a
+// line it did not touch, such as an undefined name where a function the
+// change removed is still called; a change inside a nested repository; a
+// commit made during the run. A renamed file counts in full, as a deletion
+// and an addition, which can only make the gate count more.
 func (r *Ruff) Lint(ctx context.Context, dir string) (belay.QualityReport, error) {
+	set, reason := r.changes(ctx, dir, ruffScopeProbe)
+	inScope := reason == ""
+	if !inScope && ctx.Err() == nil {
+		r.logger.LogAttrs(ctx, slog.LevelWarn, "belay/linter: cannot scope ruff to the run's change; every finding counts",
+			slog.String("dir", dir),
+			slog.String("reason", reason))
+	}
+
 	cmd := exec.Command{
 		Path: localTool(dir, ruffName, ruffLocalBins...),
 		// "." is ruff's own default path argument, passed explicitly.
@@ -181,7 +236,18 @@ func (r *Ruff) Lint(ctx context.Context, dir string) (belay.QualityReport, error
 		Timeout:   r.timeout,
 		MaxOutput: DefaultMaxOutput,
 	}
-	return r.lint(ctx, ruffName, ruffName, cmd, ruffParser(dir))
+	parse := ruffParser(dir)
+	if inScope {
+		parse = scoped(parse, set)
+	}
+	report, err := r.lint(ctx, ruffName, ruffName, cmd, parse)
+	if err == nil && !inScope {
+		// As in GolangCI.Lint: the summary reaches state.json, the report
+		// artifact and the fix prompt, where it explains findings the run
+		// did not cause.
+		report.Summary += "; not scoped to the run's change, so findings committed before it count too"
+	}
+	return report, err
 }
 
 // ruffDiagnostic is one element of the array ruff's json output emits.

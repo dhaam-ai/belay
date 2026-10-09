@@ -93,6 +93,19 @@
 // content is committed: every fixture under testdata/swebench is
 // synthetic, and a test refuses one that is not.
 //
+// # SWE-bench, for real
+//
+// The rest of the SWE-bench pipeline runs: dataset.go downloads the pinned
+// revision and refuses anything that is not it; container.go gives each
+// cell a workspace from the record's own instance image; harness.go scores
+// every cell with SWE-bench's official harness, whose verdict is the score,
+// with swebench.go's port as the cross-check; corpus.go runs both arms over
+// the corpus one cell at a time, resumably, under a total spend cap; and
+// corpusreport.go writes the only output that may leave the machine, which
+// holds aggregates and nothing of any instance. cmd/swebench is the command
+// that wires them to a live backend -- the one place a paid agent can be
+// constructed, outside this package -- and the free gold-patch check.
+//
 // # Build tag
 //
 // This package is gated behind the "fixrate" build tag. Its default mode

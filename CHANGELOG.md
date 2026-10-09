@@ -301,6 +301,20 @@ that only `pkg/belay` carries a compatibility promise. Everything under
   exit code is unchanged: an invocation belay stopped this way still exits 3,
   so scripts can tell it from a run that paused for you to read the plan.
   `belay runs` lists such a run as waiting and `belay resume` accepts it.
+- **ruff judges only the lines a run changed, the way golangci-lint already
+  does.** The lint gate on a Python project counted every ruff finding in the
+  repository, so a repository with existing debt failed every run whatever
+  the run did, and the fix step was sent to repair code the run never
+  touched. belay now asks git which lines differ from HEAD, adds every line of
+  a file the run created, and counts only the findings on them. A syntax
+  error, or a finding with no line, counts anywhere in a file the run
+  touched, because a parser reports where it gave up rather than where the
+  edit was; one in a file the run left alone does not, because Python
+  repositories commit files that do not parse on purpose, as test data.
+  Where git cannot say what changed — no repository, no commit yet, an
+  ignored directory — every finding counts, belay logs why, and the review
+  summary says so. A renamed file counts in full. ESLint still counts every
+  finding.
 
 ### Fixed
 
@@ -586,6 +600,19 @@ that only `pkg/belay` carries a compatibility promise. Everything under
   still running from the step that was interrupted. It checks each process's
   start time first, so a process id that has since been given to something
   else is never signalled.
+
+- **A finding's path is relative to the workspace even when the workspace is
+  reached through a symbolic link.** ruff reports a file by its resolved path,
+  so in a workspace under macOS's `/var`, which is a link to `/private/var`,
+  every finding was shown with its whole absolute path, and the review step
+  could not tell the file was part of the workspace. The two paths are now
+  also compared resolved.
+
+- **A Python change that leaves a file unparsable fails the lint gate.**
+  ruff 0.8 stopped reporting a syntax error as `E999` and reports it as
+  `invalid-syntax`, which belay's severity table did not know, so it took the
+  default, minor, and passed the gate at `review.fail_on: major`. It is a
+  blocker now, as `E999` always was.
 
 ## v0.1.4 — 2026-09-17
 

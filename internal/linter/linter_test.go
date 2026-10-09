@@ -698,6 +698,46 @@ func TestRelPath(t *testing.T) {
 	}
 }
 
+// TestRelPathThroughASymlink covers a directory reached through a symbolic
+// link. A linter that canonicalizes the paths it reports -- ruff does -- names
+// /private/var/... for a file in /var/..., macOS's own temporary directory.
+// Leaving such a path absolute is worse than untidy once findings are scoped
+// to a run's change: the path no longer matches the change's, and a finding
+// the run made would not be recognised as the run's.
+func TestRelPathThroughASymlink(t *testing.T) {
+	t.Parallel()
+
+	target := t.TempDir()
+	link := filepath.Join(t.TempDir(), "link")
+	if err := os.Symlink(target, link); err != nil {
+		t.Fatalf("symlink: %v", err)
+	}
+	if err := os.MkdirAll(filepath.Join(target, "src"), 0o750); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(target, "src", "a.py"), []byte("x = 1\n"), 0o600); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+
+	tests := []struct {
+		name string
+		dir  string
+		path string
+	}{
+		{name: "the directory is the link and the path is resolved", dir: link, path: filepath.Join(target, "src", "a.py")},
+		{name: "the directory is resolved and the path is through the link", dir: target, path: filepath.Join(link, "src", "a.py")},
+		{name: "both are through the link", dir: link, path: filepath.Join(link, "src", "a.py")},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			if got, want := relPath(tc.dir, tc.path), filepath.Join("src", "a.py"); got != want {
+				t.Errorf("relPath(%q, %q) = %q, want %q", tc.dir, tc.path, got, want)
+			}
+		})
+	}
+}
+
 func TestRanToCompletion(t *testing.T) {
 	t.Parallel()
 

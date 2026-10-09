@@ -22,7 +22,8 @@ func TestRuffSeverityTable(t *testing.T) {
 
 	want := map[string]belay.Severity{
 		// Blocker: the file was never analysed.
-		"E9": belay.SeverityBlocker,
+		"E9":             belay.SeverityBlocker,
+		"INVALID-SYNTAX": belay.SeverityBlocker,
 
 		// Critical: near-certain runtime failure, or opted-into security.
 		"F82": belay.SeverityCritical,
@@ -99,6 +100,9 @@ func TestRuffCodeMatching(t *testing.T) {
 	}{
 		// Longest prefix wins over the shorter family row.
 		{name: "E999 is a syntax error, not a style nit", code: "E999", want: belay.SeverityBlocker},
+		// ruff 0.8 removed E999; a syntax error now arrives under the
+		// diagnostic's own id, which is not a rule code at all.
+		{name: "invalid-syntax is ruff's syntax error since 0.8", code: "invalid-syntax", want: belay.SeverityBlocker},
 		{name: "E902 is an I/O error", code: "E902", want: belay.SeverityBlocker},
 		{name: "E501 is line length", code: "E501", want: belay.SeverityMinor},
 		{name: "E731 is a style rule", code: "E731", want: belay.SeverityMinor},
@@ -291,13 +295,16 @@ func TestRuffParseOptionalFields(t *testing.T) {
 func TestRuffLintFindingsAreNotAnError(t *testing.T) {
 	t.Parallel()
 
-	// ruff documents exit 1 as "violations were found".
-	linter := NewRuff(
-		WithRunner(findingsRunner(readFixture(t, "ruff-issues.json"), 1)),
-		WithLogger(quietLogger()),
-	)
+	// ruff documents exit 1 as "violations were found". Every file the
+	// fixture names is new to the repository, so every finding is on a
+	// line the run changed and counts toward the gate.
+	runner := findingsRunner(readFixture(t, "ruff-issues.json"), 1)
+	runner.git = map[string]scripted{"ls-files": {
+		stdout: untracked("app/broken.py", "app/service.py", "app/config.py", "tests/test_service.py"),
+	}}
+	linter := NewRuff(WithRunner(runner), WithLogger(quietLogger()))
 
-	got, err := linter.Lint(t.Context(), t.TempDir())
+	got, err := linter.Lint(t.Context(), "/repo")
 	if err != nil {
 		t.Fatalf("Lint returned an error for a run that found issues: %v", err)
 	}
@@ -401,7 +408,7 @@ func TestRuffLintGateThresholds(t *testing.T) {
 	t.Parallel()
 
 	// One S105 hardcoded-password finding, which the table places at
-	// critical.
+	// critical, in a file the run created, so it counts toward the gate.
 	stdout := `[{"code":"S105","filename":"/repo/app/config.py","location":{"row":21,"column":12},` +
 		`"message":"Possible hardcoded password assigned to: \"token\"","severity":"error"}]`
 
@@ -419,12 +426,10 @@ func TestRuffLintGateThresholds(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			linter := NewRuff(
-				WithRunner(findingsRunner(stdout, 1)),
-				WithLogger(quietLogger()),
-				WithFailOn(tc.failOn),
-			)
-			got, err := linter.Lint(t.Context(), t.TempDir())
+			runner := findingsRunner(stdout, 1)
+			runner.git = map[string]scripted{"ls-files": {stdout: untracked("app/config.py")}}
+			linter := NewRuff(WithRunner(runner), WithLogger(quietLogger()), WithFailOn(tc.failOn))
+			got, err := linter.Lint(t.Context(), "/repo")
 			if err != nil {
 				t.Fatalf("Lint: %v", err)
 			}
