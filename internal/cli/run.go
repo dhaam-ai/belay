@@ -760,6 +760,16 @@ func reportOutcome(u *ui, view outcomeView) error {
 	u.say("%s", outcomeHeadline(outcome, runErr))
 	u.say("  where:  %s", whereText(outcome.Node))
 	u.say("  cost:   %s", u.emph(spendText(outcome)))
+	// A run stopped at its fanout says which candidates could not be
+	// finished, and why, only in the fanout's note, and the next steps send
+	// the person to it. So that note is printed whether or not belay is
+	// verbose, and above the next steps that point at it. Every other note
+	// is belay talking to its operator and stays behind --verbose.
+	note := strings.TrimSpace(outcome.Note)
+	upfront := note != "" && stoppedAtFanout(view)
+	if upfront {
+		u.say("  note:   %s", note)
+	}
 	// The label sits on the first line only: repeating "next:" down a
 	// paragraph turns one instruction into four, which is exactly the
 	// reading a person then has to undo.
@@ -773,7 +783,7 @@ func reportOutcome(u *ui, view outcomeView) error {
 			u.say("          %s", line)
 		}
 	}
-	if note := strings.TrimSpace(outcome.Note); note != "" && u.verbose {
+	if note != "" && u.verbose && !upfront {
 		u.say("  note:   %s", note)
 	}
 
@@ -781,6 +791,16 @@ func reportOutcome(u *ui, view outcomeView) error {
 		return nil
 	}
 	return &ExitError{Code: outcome.ExitCode, Err: runErr}
+}
+
+// stoppedAtFanout reports whether a run is paused at its fanout for a reason
+// the fanout's note explains: candidates that could not be finished, or that
+// met a limit belay applies to each of them. A Ctrl-C there is not one; its
+// note says only that the step was interrupted, and the next steps say what
+// to do.
+func stoppedAtFanout(view outcomeView) bool {
+	return view.outcome.Node == graph.NodeFanout && view.outcome.Status == state.RunStatusPaused &&
+		!errors.Is(view.runErr, graph.ErrInterrupted)
 }
 
 // outcomeHeadline states, in one sentence, how this invocation ended.

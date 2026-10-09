@@ -705,6 +705,78 @@ func TestNextStepsAfterAFanout(t *testing.T) {
 	}
 }
 
+// TestAFanoutStopShowsItsNoteWithoutVerbose: a run stopped at its fanout
+// says which candidates could not be finished, and why, only in the fanout's
+// note -- and the next steps send the person to it ("the note above says
+// which"). The note printed only with --verbose, and after the next steps,
+// so the person was sent to a line that was not there. It is printed for a
+// fanout stop whether or not belay is verbose, above the next steps; any
+// other run's note is still printed only with --verbose, after them.
+func TestAFanoutStopShowsItsNoteWithoutVerbose(t *testing.T) {
+	const runID = "20260101T000000Z-c0ffee000000"
+	layout, err := state.NewLayout("/repos/app", runID)
+	if err != nil {
+		t.Fatalf("NewLayout: %v", err)
+	}
+	const (
+		fault = "fanout: 1 of 3 candidates could not be finished: cand-02: no space left on device"
+		limit = "fanout: 1 of 3 candidates stopped at a limit belay applies to each candidate run: cand-01 " +
+			"stopped at graph.max_steps, which counts each candidate's steps, so raise graph.max_steps"
+	)
+	for _, tc := range []struct {
+		name     string
+		view     outcomeView
+		wantNote bool
+	}{
+		{
+			name: "paused at the fanout by a fault",
+			view: outcomeView{layout: layout, fanout: true, outcome: graph.Outcome{
+				Status: state.RunStatusPaused, Node: graph.NodeFanout, Note: fault,
+			}},
+			wantNote: true,
+		},
+		{
+			name: "stopped at the fanout by a limit its candidates met",
+			view: outcomeView{layout: layout, fanout: true,
+				runErr: fmt.Errorf("fanout: %w", graph.ErrMaxSteps),
+				outcome: graph.Outcome{
+					Status: state.RunStatusPaused, Node: graph.NodeFanout, Note: limit, ExitCode: graph.ExitAborted,
+				}},
+			wantNote: true,
+		},
+		{
+			name: "paused at the approve gate, not verbose",
+			view: outcomeView{layout: layout, outcome: graph.Outcome{
+				Status: state.RunStatusPaused, Node: graph.NodeApprove, Note: "waiting for approval",
+			}},
+			wantNote: false,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var out bytes.Buffer
+			u := &ui{out: &out, err: &out}
+			_ = reportOutcome(u, tc.view) //nolint:errcheck // the exit code is not what this test is about
+			got := out.String()
+			note := strings.Index(got, "  note:   ")
+			if !tc.wantNote {
+				if note >= 0 {
+					t.Errorf("the note is printed without --verbose for a run that did not stop at its fanout:\n%s", got)
+				}
+				return
+			}
+			if note < 0 || !strings.Contains(got, tc.view.outcome.Note) {
+				t.Fatalf("the fanout's note is not printed without --verbose:\n%s", got)
+			}
+			if next := strings.Index(got, "  next:   "); next < note {
+				t.Errorf("the note is printed after the next steps, which send the person to it as above them:\n%s", got)
+			}
+			if n := strings.Count(got, "  note:   "); n != 1 {
+				t.Errorf("the note is printed %d times, want once:\n%s", n, got)
+			}
+		})
+	}
+}
+
 // TestWinnerOfReadsTheBlackboardAfterTheDispatch: next steps name the
 // winner's workspace, which only the blackboard records, as join's Patch put
 // it there. A run that does not fan out, or has no winner, gets the zero
