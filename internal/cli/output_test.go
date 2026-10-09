@@ -1011,7 +1011,7 @@ func runPrinted(t *testing.T, command string) {
 	t.Helper()
 	ctx, cancel := context.WithTimeout(t.Context(), time.Minute)
 	defer cancel()
-	cmd := exec.CommandContext(ctx, "sh", "-c", command)
+	cmd := exec.CommandContext(ctx, "sh", "-c", command) //nolint:gosec // running what belay printed, as pasted, is the test
 	cmd.Env = append(os.Environ(), "GIT_CONFIG_GLOBAL=/dev/null", "GIT_CONFIG_SYSTEM=/dev/null", "GIT_TERMINAL_PROMPT=0")
 	if out, err := cmd.CombinedOutput(); err != nil {
 		t.Fatalf("the command belay printed failed: %v\n$ %s\n%s", err, command, out)
@@ -1068,8 +1068,10 @@ func TestTheCommandThatRemakesAMissingWorktreeWorks(t *testing.T) {
 			if start < 0 {
 				t.Fatalf("the refusal prints no git command to make the worktree again:\n%s", fix)
 			}
-			command := fix[start+1:]
-			command = command[:strings.Index(command, "`")]
+			command, _, closed := strings.Cut(fix[start+1:], "`")
+			if !closed {
+				t.Fatalf("the refusal's git command is never closed:\n%s", fix)
+			}
 			if got := strings.Contains(command, " add -f "); got != tc.force {
 				t.Errorf("the printed command %q uses -f = %v, want %v", command, got, tc.force)
 			}
