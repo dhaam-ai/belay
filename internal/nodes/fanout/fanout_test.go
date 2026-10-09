@@ -46,6 +46,15 @@ type recordingRunner struct {
 	answer   func(specs []graph.CandidateSpec) ([]graph.CandidateOutcome, error)
 	outcomes []graph.CandidateOutcome
 	err      error
+
+	// claimed is what Claimed answers: whether a previous attempt of the
+	// fanout already claimed these candidates. claimErr is its error.
+	claimed  bool
+	claimErr error
+}
+
+func (r *recordingRunner) Claimed(ids []string) (bool, error) {
+	return r.claimed && len(ids) > 0, r.claimErr
 }
 
 var _ graph.CandidateRunner = (*recordingRunner)(nil)
@@ -442,6 +451,45 @@ func TestRunBudgetPreCheckRefusesBeforeAnyCandidateRuns(t *testing.T) {
 				t.Errorf("Run() returned a candidate patch on a budget refusal: %v", *res.Patch.Candidates)
 			}
 		})
+	}
+}
+
+// The launch projection decides whether to start N candidates. Once a
+// previous attempt has claimed them, their envelopes are reserved and
+// persisted, and nothing about the projection can take back money a
+// candidate already holds: refusing to adopt them saves nothing, and leaves
+// work the run has paid for uncollectable until someone raises a ceiling.
+// So an attempt that finds its candidates claimed adopts them without it.
+func TestFanoutAdoptsClaimedCandidatesWithoutTheLaunchProjection(t *testing.T) {
+	// $4 spent, three candidates projected at $4 each: $16 against $10,
+	// which the projection refuses at launch.
+	cfg := enabledConfig(3)
+	layout, _ := newLayout(t)
+	runs := &recordingRunner{claimed: true, outcomes: []graph.CandidateOutcome{
+		completed(1, "cand-01", 0, 0.5, 100),
+		completed(2, "cand-02", 1, 0.5, 200),
+		completed(3, "cand-03", 2, 0.5, 300),
+	}}
+	rc := newRunContext(cfg, layout, runs, state.Budget{LimitUSD: 10, SpentUSD: 4})
+
+	res, err := fanout.New().Run(context.Background(), rc)
+	if err != nil {
+		t.Fatalf("Run() error = %v, want the claimed candidates adopted", err)
+	}
+	if runs.callCount() != 1 {
+		t.Fatalf("the candidate runner was called %d time(s), want 1", runs.callCount())
+	}
+	if res.Status != journal.StatusOK || res.Next != graph.NodeJoin {
+		t.Errorf("Result = {%v, %q}, want a settled route to join", res.Status, res.Next)
+	}
+
+	// Not claimed: the same figures are refused before anything runs.
+	fresh := &recordingRunner{}
+	if _, err := fanout.New().Run(context.Background(), newRunContext(cfg, layout, fresh, state.Budget{LimitUSD: 10, SpentUSD: 4})); !errors.Is(err, belay.ErrBudgetExceeded) {
+		t.Fatalf("an unclaimed fanout: Run() error = %v, want the projection's refusal", err)
+	}
+	if fresh.callCount() != 0 {
+		t.Errorf("the runner was called %d time(s) for a fanout the projection refused", fresh.callCount())
 	}
 }
 

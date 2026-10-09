@@ -88,6 +88,18 @@ var (
 // one the run has already paid for.
 type CandidateRunner interface {
 	Run(ctx context.Context, specs []CandidateSpec) ([]CandidateOutcome, error)
+
+	// Claimed reports whether any of the candidates ids names has already
+	// been claimed by an earlier attempt of this run's fanout, which is to
+	// say whether asking for them now would adopt rather than launch.
+	//
+	// It reads and never writes. A node needs it because what it may check
+	// before asking differs between the two: the cost projection that
+	// decides whether to start N candidates means nothing once they hold
+	// envelopes already reserved, and refusing to adopt them saves no money
+	// and strands work the run has paid for. An error means the runner
+	// could not tell, which is a fault a resume could fix.
+	Claimed(ids []string) (bool, error)
 }
 
 // CandidateSpec is one candidate as the fanout node decided it: everything
@@ -346,6 +358,27 @@ func (r *candidateRunner) Run(ctx context.Context, specs []CandidateSpec) ([]Can
 		return outcomes, fmt.Errorf("graph: the candidate runs were interrupted: %w", err)
 	}
 	return outcomes, nil
+}
+
+// Claimed implements CandidateRunner. A candidate is claimed once its run
+// directory holds a manifest, which a claim writes last: a directory with
+// none is a torn claim that the next Run clears and makes again, so it does
+// not count.
+func (r *candidateRunner) Claimed(ids []string) (bool, error) {
+	for _, id := range ids {
+		layout, err := state.NewCandidateRunLayout(r.parent.store.Layout(), id)
+		if err != nil {
+			return false, fmt.Errorf("graph: candidate %q: %w", id, err)
+		}
+		_, err = os.Stat(layout.ManifestPath())
+		switch {
+		case err == nil:
+			return true, nil
+		case !errors.Is(err, fs.ErrNotExist):
+			return false, fmt.Errorf("graph: inspect the manifest of candidate %q: %w", id, err)
+		}
+	}
+	return false, nil
 }
 
 // costliestParentStep is the most any one step of the parent run has cost,

@@ -304,6 +304,13 @@ that only `pkg/belay` carries a compatibility promise. Everything under
 
 ### Fixed
 
+- **After a crash mid-fanout, resuming collects the candidates without a
+  raised ceiling.** The resume charged the killed fanout step the plan's cost
+  a second time, then re-ran the launch-time cost projection against that
+  inflated spend and refused to continue ("projected at $2.0000 each on top
+  of $2.0000 already spent") until `budget.max_usd` was raised, which also
+  raised the candidates' envelopes. Candidates already claimed are now
+  adopted without the projection, at the envelopes they were given.
 - **A crash inside `join`, `promote` or the fanout itself is no longer billed
   as the run's costliest step.** Resuming after a kill charges the step that
   died an estimate of what its agent may have spent, but these steps call no

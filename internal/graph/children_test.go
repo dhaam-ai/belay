@@ -46,6 +46,8 @@ func (f *fakeCandidateRunner) Run(_ context.Context, specs []graph.CandidateSpec
 	return f.outcomes, f.err
 }
 
+func (f *fakeCandidateRunner) Claimed([]string) (bool, error) { return f.asked != nil, nil }
+
 // miniFanout is the shape of the node this seam exists for, reduced to the
 // three things it does with the runner: refuse when there is none, ask for
 // the specs it decided on, and record what comes back by index.
@@ -2125,4 +2127,67 @@ func TestACandidateCutShortInItsFirstPaidStepIsChargedItsParentsCostliestStep(t 
 	if n := code.ran("cand-01"); n != 3 {
 		t.Errorf("the candidate's first step started %d times, want 3 before its envelope stopped it", n)
 	}
+}
+
+// TestClaimedSaysWhetherAFanoutWouldAdopt: the fanout node asks before it
+// projects what N candidates will cost, because the projection is about
+// launching and means nothing once the candidates hold envelopes. A torn
+// claim, a directory with no manifest, is not a claim: the next Run clears
+// it and claims afresh.
+func TestClaimedSaysWhetherAFanoutWouldAdopt(t *testing.T) {
+	h := newRun(t, budgetCfg(5.00, 0), "adopt or launch")
+	iso := newFakeIsolator(h.layout.CandidatesDir())
+	code := newCandidateNode(graph.NodeCode, finishes(0.10))
+	specs := poolSpecs(h, 2)
+	ids := []string{"cand-01", "cand-02"}
+
+	var before, torn, after bool
+	probe := &probingFanout{specs: specs, ids: ids, before: &before, torn: &torn, after: &after,
+		tear: func() {
+			if err := os.MkdirAll(candidateLayout(t, h, "cand-01").RunDir(), 0o750); err != nil {
+				t.Fatalf("make a torn claim: %v", err)
+			}
+		}}
+	if _, err := h.poolDispatcher(t, pool{registry: candidateRegistry(t, code), isolator: iso}, probe).Run(context.Background()); err != nil {
+		t.Fatalf("Run() error = %v", err)
+	}
+	if before {
+		t.Error("Claimed() = true before anything was claimed")
+	}
+	if torn {
+		t.Error("Claimed() = true for a run directory with no manifest, which is a torn claim")
+	}
+	if !after {
+		t.Error("Claimed() = false after the candidates were claimed")
+	}
+}
+
+// probingFanout asks Claimed before anything exists, after a torn claim is
+// left behind, and after the runner has claimed and run every candidate.
+type probingFanout struct {
+	specs               []graph.CandidateSpec
+	ids                 []string
+	before, torn, after *bool
+	tear                func()
+}
+
+func (*probingFanout) Name() string          { return graph.NodeFanout }
+func (*probingFanout) SupervisesCandidates() {}
+
+func (p *probingFanout) Run(ctx context.Context, rc *graph.RunContext) (graph.Result, error) {
+	var err error
+	if *p.before, err = rc.CandidateRuns.Claimed(p.ids); err != nil {
+		return graph.Result{}, err
+	}
+	p.tear()
+	if *p.torn, err = rc.CandidateRuns.Claimed(p.ids); err != nil {
+		return graph.Result{}, err
+	}
+	if _, err := rc.CandidateRuns.Run(ctx, p.specs); err != nil {
+		return graph.Result{}, err
+	}
+	if *p.after, err = rc.CandidateRuns.Claimed(p.ids); err != nil {
+		return graph.Result{}, err
+	}
+	return Result{Next: graph.End, Status: journal.StatusOK}, nil
 }

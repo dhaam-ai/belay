@@ -273,6 +273,51 @@ func TestFanoutCrashWithThreeOfFiveInFlightConverges(t *testing.T) {
 	}
 }
 
+// TestFanoutKillMidFanoutConvergesWithoutRaisingTheCeiling: a plan that cost
+// $1.00, two candidates under a $3.50 ceiling, and a SIGKILL while both are in
+// their first step. The resume must collect both under the ceiling the run
+// started with. It used to refuse: heal charged the killed fanout attempt the
+// run's costliest step (the plan, again), and the launch projection then ran
+// against that inflated spend, "projected at $2.0000 each on top of $2.0000
+// already spent", for candidates that were already claimed and held their
+// envelopes. Raising the ceiling to get past it also raised those envelopes.
+func TestFanoutKillMidFanoutConvergesWithoutRaisingTheCeiling(t *testing.T) {
+	h := newFanoutRunWith(t, fanoutTightConfig())
+	parked := []string{"cand-01", "cand-02"}
+	fanoutKillWithCandidatesInFlight(t, h, nil, parked, fanoutTightEnv+"=1")
+
+	envelopes := map[string]state.Envelope{}
+	for _, id := range parked {
+		m, err := state.LoadManifest(h.candidateLayout(id).ManifestPath())
+		if err != nil {
+			t.Fatalf("%s: LoadManifest() error = %v", id, err)
+		}
+		envelopes[id] = m.Candidate.Envelope
+	}
+
+	out, err := h.dispatcher(newFanoutWorld(), fanoutScriptedTools(), nil).Resume(context.Background())
+	if err != nil || out.Status != state.RunStatusCompleted {
+		t.Fatalf("Resume() under the same ceiling: status %v, error %v (note %q), want completed", out.Status, err, out.Note)
+	}
+	if got := h.state().Winner; got != "cand-02" {
+		t.Errorf("Winner = %q, want cand-02, the one with fewer issues", got)
+	}
+	for _, id := range parked {
+		m, err := state.LoadManifest(h.candidateLayout(id).ManifestPath())
+		if err != nil {
+			t.Fatalf("%s: LoadManifest() error = %v", id, err)
+		}
+		if m.Candidate.Envelope != envelopes[id] {
+			t.Errorf("%s: envelope %+v after the resume, want the %+v it was claimed with", id, m.Candidate.Envelope, envelopes[id])
+		}
+	}
+	for _, r := range fanoutRecords(t, h.layout.JournalPath()) {
+		if r.Interrupted() && r.Node == graph.NodeFanout && r.Usage != nil && r.Usage.USD != 0 {
+			t.Errorf("the killed fanout attempt was charged $%.2f; its spend is its candidates'", r.Usage.USD)
+		}
+	}
+}
+
 // TestFanoutCrashChildProcess is not a test on its own. It is the process
 // TestFanoutCrashWithThreeOfFiveInFlightConverges starts and then kills:
 // with fanoutChildEnv set, it runs that test's fanout with three candidates
@@ -284,6 +329,9 @@ func TestFanoutCrashChildProcess(t *testing.T) {
 	}
 	h := openFanoutRun(t, ws)
 	world := newFanoutWorld()
+	if os.Getenv(fanoutTightEnv) != "" {
+		h.cfg, world.planUSD = fanoutTightConfig(), fanoutTightPlanUSD
+	}
 	world.park = map[string]bool{}
 	for _, id := range strings.Split(os.Getenv(fanoutChildEnv+"_PARK"), ",") {
 		world.park[id] = true
@@ -299,7 +347,7 @@ func TestFanoutCrashChildProcess(t *testing.T) {
 // fanoutKillWithCandidatesInFlight runs h's fanout in a child process, waits
 // until every candidate in finished has completed its run and every one in
 // parked is open in its code node, and then kills the child with SIGKILL.
-func fanoutKillWithCandidatesInFlight(t *testing.T, h *fanoutHarness, finished, parked []string) {
+func fanoutKillWithCandidatesInFlight(t *testing.T, h *fanoutHarness, finished, parked []string, env ...string) {
 	t.Helper()
 	exe, err := os.Executable()
 	if err != nil {
@@ -311,6 +359,7 @@ func fanoutKillWithCandidatesInFlight(t *testing.T, h *fanoutHarness, finished, 
 	child.Env = append(os.Environ(),
 		fanoutChildEnv+"="+h.workspace,
 		fanoutChildEnv+"_PARK="+strings.Join(parked, ","))
+	child.Env = append(child.Env, env...)
 	child.Stdout, child.Stderr = &stderr, &stderr
 	if err := child.Start(); err != nil {
 		t.Fatalf("start the child: %v", err)

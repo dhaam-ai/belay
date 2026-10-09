@@ -60,7 +60,9 @@
 // and its justification, and Envelopes for the reservation that bounds the
 // fanout once it is under way. Discovering the overrun after four of five
 // candidates have already been paid for is exactly the failure the ceiling
-// exists to prevent, so the check happens while refusing is still free.
+// exists to prevent, so the check happens while refusing is still free. It is
+// a check on launching, and an attempt that finds its candidates already
+// claimed adopts them without it (see Run).
 //
 // # A Result only when every candidate has a durable end state
 //
@@ -223,9 +225,21 @@ func (n *Node) Run(ctx context.Context, rc *graph.RunContext) (graph.Result, err
 		return graph.Result{}, err
 	}
 
-	projected, err := affordable(rc, count, spent)
+	// The projection decides whether to launch N candidates, so it is asked
+	// only of a fanout that has not launched any. Once an earlier attempt
+	// has claimed them, each holds an envelope that is reserved, persisted
+	// and never lowered, so refusing to adopt them takes no money back: it
+	// only strands work the run has already paid for until someone raises a
+	// ceiling that was never the obstacle.
+	claimed, err := rc.CandidateRuns.Claimed(candidateIDs(count))
 	if err != nil {
-		return graph.Result{}, err
+		return graph.Result{}, fmt.Errorf("fanout: could not tell whether the candidates are already claimed: %w", err)
+	}
+	var projected belay.Usage
+	if !claimed {
+		if projected, err = affordable(rc, count, spent); err != nil {
+			return graph.Result{}, err
+		}
 	}
 
 	// The whole remaining ceiling is divided here, once, before a single
@@ -250,6 +264,7 @@ func (n *Node) Run(ctx context.Context, rc *graph.RunContext) (graph.Result, err
 	log := logger(rc)
 	log.Info("fanout: budget pre-check passed, running candidates",
 		"candidates", count,
+		"adopting", claimed,
 		"src", src,
 		"spent_usd", spent.USD,
 		"projected_usd_per_candidate", projected.USD,
@@ -493,6 +508,15 @@ func tally(candidates []state.Candidate) string {
 // of that argument — adopt-or-create on resume, and promote's bare
 // Belay-Candidate trailer.
 func candidateID(index int) string { return fmt.Sprintf("cand-%02d", index) }
+
+// candidateIDs names the first count candidates, in index order.
+func candidateIDs(count int) []string {
+	ids := make([]string, 0, count)
+	for i := 1; i <= count; i++ {
+		ids = append(ids, candidateID(i))
+	}
+	return ids
+}
 
 // readPlan returns the bytes of the approved plan, which every candidate run
 // starts from.
