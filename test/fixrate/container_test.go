@@ -390,3 +390,27 @@ func TestRealDocker_ContainerRunner(t *testing.T) {
 		t.Errorf("Test() = %+v, want a passing run of tests/test_core.py inside the container", report)
 	}
 }
+
+// TestContainerProvisioner_RemoveImage frees a scored task's instance image,
+// and treats an image already gone as freed.
+func TestContainerProvisioner_RemoveImage(t *testing.T) {
+	t.Parallel()
+
+	docker, base := newFakeDocker(t, map[string]string{"widget/core.py": pyRepoCore})
+	p := &ContainerProvisioner{Docker: "docker", RunID: "pilot", run: docker.run}
+	task := containerTask("example/widget", base)
+	if err := p.RemoveImage(t.Context(), task); err != nil {
+		t.Fatalf("RemoveImage() error = %v", err)
+	}
+	images := docker.commands("image")
+	if len(images) != 1 || strings.Join(images[0], " ") != "docker image rm "+task.Image {
+		t.Errorf("docker image commands = %v, want one `docker image rm %s`", images, task.Image)
+	}
+
+	gone := &ContainerProvisioner{Docker: "docker", RunID: "pilot", run: func(context.Context, string, ...string) (string, string, int, error) {
+		return "", "Error response from daemon: No such image: " + task.Image, 1, nil
+	}}
+	if err := gone.RemoveImage(t.Context(), task); err != nil {
+		t.Errorf("RemoveImage() of an image already gone = %v, want nil", err)
+	}
+}

@@ -107,6 +107,7 @@ type flags struct {
 	runID          string
 	harnessTimeout time.Duration
 	prologue       string
+	keepImages     bool
 }
 
 // refusal is an invocation refused before anything was spent.
@@ -222,6 +223,7 @@ func parseFlags(args []string, stderr io.Writer) (flags, error) {
 	fs.StringVar(&f.runID, "run-id", "", "the evaluation's run id; defaults to belay-swebench-pilot or belay-swebench-full")
 	fs.DurationVar(&f.harnessTimeout, "harness-timeout", 30*time.Minute, "how long the official harness may run one instance's tests")
 	fs.StringVar(&f.prologue, "prologue", fixrate.DefaultContainerPrologue, "shell that sets up an instance container's environment")
+	fs.BoolVar(&f.keepImages, "keep-images", false, "keep each instance image once its task is scored, instead of removing it")
 	if err := fs.Parse(args); err != nil {
 		return flags{}, refuse("%v", err)
 	}
@@ -389,6 +391,11 @@ func plan(ctx context.Context, f flags, mode fixrate.Mode, cfg config.Config, en
 		label += "; every arm driven by a stand-in that applies the instance's gold patch"
 		agentFor = func(c fixrate.Cell) belay.AgentBackend { return goldAgent(patches[c.Task.ID]) }
 	}
+	prov := &fixrate.ContainerProvisioner{Docker: f.docker, RunID: runID, Prologue: f.prologue}
+	afterTask := prov.RemoveImage
+	if f.keepImages {
+		afterTask = nil
+	}
 	return fixrate.CorpusOptions{
 		Mode:          mode,
 		Confirm:       f.confirm,
@@ -401,7 +408,8 @@ func plan(ctx context.Context, f flags, mode fixrate.Mode, cfg config.Config, en
 		Replicates:    replicates,
 		Config:        cfg,
 		AgentFor:      agentFor,
-		Provisioner:   &fixrate.ContainerProvisioner{Docker: f.docker, RunID: runID, Prologue: f.prologue},
+		Provisioner:   prov,
+		AfterTask:     afterTask,
 		Evaluator: fixrate.Harness{
 			Python: py, Dataset: records.Path, Dir: filepath.Join(out, "evaluation"), RunID: runID, Timeout: f.harnessTimeout,
 		},

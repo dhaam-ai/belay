@@ -478,3 +478,18 @@ func lastLinesRaw(s string, n int) string {
 	}
 	return strings.Join(lines, "\n")
 }
+
+// RemoveImage removes a task's instance image, for CorpusOptions.AfterTask:
+// a full corpus touches 500 images of gigabytes each, and once a task's cells
+// are scored nothing needs its image again. An image already gone is freed.
+func (p *ContainerProvisioner) RemoveImage(ctx context.Context, task Task) error {
+	out, errOut, exit, err := p.commander()(ctx, p.docker(), "image", "rm", task.Image)
+	switch {
+	case err != nil:
+		return fmt.Errorf("fixrate: docker image rm: %w", err)
+	case exit != 0 && !strings.Contains(errOut+out, "No such image"):
+		return fmt.Errorf("fixrate: docker image rm %s exited %d: %s", task.Image, exit, lastLines(errOut+out, 3))
+	default:
+		return nil
+	}
+}
