@@ -304,6 +304,10 @@ that only `pkg/belay` carries a compatibility promise. Everything under
 
 ### Fixed
 
+- **`fanout.select: fastest` no longer depends on how a run was
+  interrupted.** A candidate's time counted a step a Ctrl-C cut short but not
+  one a crash cut short, so the same work could win or lose depending on
+  which stopped it. Only the steps that finished count now.
 - **A paused fanout no longer fails for good on a resume it cannot carry
   out yet.** Resumed after `budget.max_usd` was set to 0, a run that fans out
   ended failed, with every candidate it had paid for out of reach; so did one

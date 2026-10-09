@@ -166,10 +166,13 @@ type CandidateOutcome struct {
 	Envelope state.Envelope
 	// Steps is how many node executions the candidate run performed.
 	Steps int
-	// DurationMS sums the candidate's own node durations, which is what
-	// the fastest strategy compares. Summing node records rather than
-	// taking wall-clock time excludes the downtime between a crash and the
-	// resume that healed it, which no candidate should be blamed for.
+	// DurationMS sums the durations of the candidate's own settled node
+	// executions, which is what the fastest strategy compares. Summing node
+	// records rather than taking wall-clock time excludes the downtime
+	// between a crash and the resume that healed it, which no candidate
+	// should be blamed for. An attempt cut short is left out however it was
+	// cut: a Ctrl-C closes one with the time it ran and a kill with none,
+	// and counting either made the winner depend on which it was.
 	DurationMS int64
 	// Workspace is the tree the candidate worked in, as the isolator
 	// described it, so promote and cleanup know what they may destroy.
@@ -718,7 +721,12 @@ func (r *candidateRunner) collect(c *candidateClaim, store *state.Store, out *Ca
 	out.Status = runStatusFor(start.State)
 
 	for _, rec := range read.Records {
-		if rec.Event == journal.EventNodeFinished {
+		// Settled attempts only. One a Ctrl-C or a timeout cut short is
+		// closed with the time it ran and one a kill cut short with none,
+		// so counting them made the fastest candidate depend on how the run
+		// was interrupted; and an attempt cut short produced nothing the
+		// candidate kept, its re-run being the work that did.
+		if rec.Event == journal.EventNodeFinished && !rec.Interrupted() {
 			out.DurationMS += rec.DurationMS
 		}
 		if note, ended := runMarkerNote(rec); ended {

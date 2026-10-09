@@ -2228,3 +2228,52 @@ func TestACandidateStoppedAtALimitSaysWhich(t *testing.T) {
 		t.Errorf("test ran %d times past the envelope", testNode.ran("cand-01"))
 	}
 }
+
+// TestACandidatesDurationDoesNotDependOnHowItWasInterrupted: `fastest`
+// compares candidates by their summed node durations. An attempt a Ctrl-C or
+// a timeout cut short is closed with the time it ran, and one a kill cut
+// short is closed by heal with none, so the winner depended on how the run
+// had been interrupted rather than on how fast each candidate did its work.
+// Only the attempts that settled are counted now: an attempt cut short
+// produced nothing the candidate kept, and its re-run is the work that did.
+func TestACandidatesDurationDoesNotDependOnHowItWasInterrupted(t *testing.T) {
+	h := newRun(t, budgetCfg(5.00, 0), "time the work, not the interruptions")
+	iso := newFakeIsolator(h.layout.CandidatesDir())
+	history := func(cutShortMS int64) []journal.Record {
+		return []journal.Record{
+			{Event: journal.EventRunStarted},
+			{Event: journal.EventNodeStarted, Node: graph.NodeCode, Attempt: 1},
+			{
+				Event: journal.EventNodeFinished, Node: graph.NodeCode, Attempt: 1, DurationMS: cutShortMS,
+				Status: journal.StatusAborted, Next: graph.NodeCode, Usage: &journal.Usage{},
+			},
+			{Event: journal.EventRunPaused},
+			{Event: journal.EventRunResumed},
+			{Event: journal.EventNodeStarted, Node: graph.NodeCode, Attempt: 2},
+			{
+				Event: journal.EventNodeFinished, Node: graph.NodeCode, Attempt: 2, DurationMS: 100,
+				Status: journal.StatusOK, Next: graph.End, Usage: &journal.Usage{},
+			},
+			{Event: journal.EventRunCompleted, Note: "run completed"},
+		}
+	}
+	// cand-01 was stopped by a Ctrl-C 400ms into its first attempt; cand-02
+	// by a kill at the same moment, which heal closes with no duration.
+	seedCandidate(t, h, iso, seeded{id: "cand-01", index: 1, provision: state.ProvisionOK,
+		envelope: oneEnvelope, status: state.RunStatusCompleted, step: 1, records: history(400)})
+	seedCandidate(t, h, iso, seeded{id: "cand-02", index: 2, provision: state.ProvisionOK,
+		envelope: oneEnvelope, status: state.RunStatusCompleted, step: 1, records: history(0)})
+
+	node := &runsCandidates{specs: poolSpecs(h, 2)}
+	code := newCandidateNode(graph.NodeCode, finishes(0.10))
+	if _, err := h.poolDispatcher(t, pool{registry: candidateRegistry(t, code), isolator: iso}, node).
+		Run(context.Background()); err != nil {
+		t.Fatalf("Run() error = %v", err)
+	}
+	for _, o := range node.outcomes {
+		if o.DurationMS != 100 {
+			t.Errorf("%s DurationMS = %d, want 100: the attempt that did the work, however the other was cut short",
+				o.ID, o.DurationMS)
+		}
+	}
+}
