@@ -347,14 +347,17 @@ that only `pkg/belay` carries a compatibility promise. Everything under
   fanout, so a kill inside promote's merge reported $2.10 against $1.10
   spent, and a kill mid-fanout charged the plan again. They are now charged
   nothing; a candidate's own steps are still charged as before.
-- **A step stopped by Ctrl-C or `graph.node_timeout` is charged for, so
-  interrupting and resuming can no longer spend past `budget.max_usd`.** The
-  agent CLI prints its bill only when it finishes, so a call belay stopped
-  reported nothing and was recorded as free: four Ctrl-C and resume cycles of
-  a fanout started ten $0.40 calls and reported $0.90, and a step that kept
+- **A step stopped by Ctrl-C or `graph.node_timeout` is charged for, so the
+  budget ceiling stops a step that keeps being interrupted.** The agent CLI
+  prints its bill only when it finishes, so a call belay stopped reported
+  nothing and was recorded as free: four Ctrl-C and resume cycles of a
+  fanout started ten $0.40 calls and reported $0.90, and a step that kept
   timing out was never stopped by the ceiling. Such a step is now charged
-  what a kill at the same moment is charged — the costliest step the run has
-  paid for, marked as an estimate — unless it reported its own spend.
+  what a kill at the same moment is charged — the costliest step the run (or
+  a candidate's parent) has paid for, marked as an estimate — unless it
+  reported its own spend. When the interrupted step costs more than any step
+  before it, each interruption still under-counts by the difference, so the
+  ceiling stops it later than its real cost would; ADR-0007 states the bound.
 - **A Ctrl-C just after a candidate's workspace is made no longer loses that
   candidate.** A candidate whose run had been interrupted, or killed, before
   its first step resumed at "plan", a step a candidate does not have, and
