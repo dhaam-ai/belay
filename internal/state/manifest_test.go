@@ -372,12 +372,14 @@ func TestRedactSnapshot_PolicyRulesDescribeSecretsAndAreKept(t *testing.T) {
 	}{
 		{name: "a forbidden_content pattern shaped like a key id", key: "policy.forbidden_content",
 			value: "AKIA[0-9A-Z]{16} in every changed file"},
+		// #nosec G101 -- AWS's published example key id, the secret shape this row is about.
 		{name: "a forbidden_content pattern that is itself a literal key id", key: "policy.forbidden_content",
 			value: "AKIAIOSFODNN7EXAMPLE in every changed file"},
 		{name: "a forbidden path as long as a token", key: "policy.forbidden_paths",
 			value: "config/production/credentials.yaml"},
 		{name: "a required_tests rule", key: "policy.required_tests",
 			value: "internal/very/long/package/path/**/*.go requires **/*_test.go"},
+		// #nosec G101 -- AWS's published example key id, the secret shape this row is about.
 		{name: "a value shaped like a key id under any other key", key: "test.custom_cmd",
 			value: "AKIAIOSFODNN7EXAMPLE", wantRedacted: true},
 		{name: "a token-shaped value under any other key", key: "review.sonar.host_url",

@@ -62,7 +62,7 @@ func TestChangedFindsEveryDifferenceFromTheRecord(t *testing.T) {
 		t.Fatal(err)
 	}
 	write(t, dir, "brand/new.txt", "new\n")
-	if err := os.Chmod(filepath.Join(dir, "same.txt"), 0o700); err != nil {
+	if err := os.Chmod(filepath.Join(dir, "same.txt"), 0o400); err != nil {
 		t.Fatal(err)
 	}
 	if err := os.Symlink("../outside", filepath.Join(dir, "link")); err != nil {
