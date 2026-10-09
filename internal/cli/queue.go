@@ -8,6 +8,7 @@ import (
 	"io"
 	"io/fs"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -309,6 +310,7 @@ func listQueue(cmd *cobra.Command) error {
 	if err != nil {
 		return failed(err)
 	}
+	q = observed(q)
 	goals := queueGoals(q)
 	if queueFlags.json {
 		return writeQueueJSON(u.out, QueueListing{Workspace: ws, Goals: goals})
@@ -413,6 +415,7 @@ func showQueueStatus(cmd *cobra.Command) error {
 	if err != nil {
 		return failed(err)
 	}
+	q = observed(q)
 	goals := queueGoals(q)
 	pid, active, err := store.WorkerActive()
 	if err != nil {
@@ -598,6 +601,57 @@ func winnerWorkspace(e queue.Entry) (string, bool) {
 	return fmt.Sprintf("in the workspace of %s, the candidate that won: %s", winner.ID, dirOrUnrecorded(winner.Dir)), true
 }
 
+// endedRunGoalState is how a goal stands once its run has ended, by the
+// run's status: what goalOutcome settles the same run as.
+var endedRunGoalState = map[state.RunStatus]queue.State{
+	state.RunStatusCompleted: queue.StateFinished,
+	state.RunStatusFailed:    queue.StateFailed,
+	state.RunStatusAborted:   queue.StateStopped,
+}
+
+// observed returns q as a person should read it: each goal whose run has
+// ended since the queue recorded it is shown as its run now stands.
+//
+// The queue's record is written by belay queue start and by nothing else, but
+// a goal's run is an ordinary run in an ordinary workspace, and belay queue
+// itself tells a person to carry one on by hand: `belay --workspace <copy>
+// resume <run-id>` for a goal stopped at a limit. Once that run finished, the
+// record still said "paused at a limit", and the report offered the resume,
+// which answered that the run is already finished. So the reports read the
+// run: one that has ended -- completed, failed or stopped for good -- is shown
+// that way, whatever the record says, with a note saying it went on outside
+// the queue. A run still paused or in progress is left as recorded, because
+// the record knows what the run cannot say: that a goal was approved, or is in
+// a worker's hands.
+//
+// It is for display, and writes nothing: status, list and belay runs only
+// read, and what queue start runs next is decided from the record, which
+// never runs a goal that has ended again either way.
+func observed(q queue.Queue) queue.Queue {
+	entries := slices.Clone(q.Entries)
+	for i, e := range entries {
+		switch e.State {
+		case queue.StateQueued, queue.StateRemoved, queue.StateFinished, queue.StateFailed, queue.StateStopped:
+			continue
+		}
+		man, ok := goalManifest(e)
+		if !ok {
+			continue
+		}
+		now, ended := endedRunGoalState[man.Status]
+		if !ended {
+			continue
+		}
+		entries[i].Note = "its run went on outside the queue after it was " + queueStateWords[e.State.String()]
+		entries[i].State = now
+		if man.UpdatedAt.After(e.UpdatedAt) {
+			entries[i].UpdatedAt = man.UpdatedAt
+		}
+	}
+	q.Entries = entries
+	return q
+}
+
 // runnable lists the goals a start would run, in the order it runs them: the
 // goal in hand, then the approved ones, then the queued ones (queue.Next).
 func runnable(q queue.Queue) []queue.Entry {
@@ -750,7 +804,7 @@ func startTheQueue(cmd *cobra.Command) error {
 	toRun := runnable(q)
 	if len(toRun) == 0 {
 		u.say("There is nothing in the queue in %s that belay can run.", ws)
-		sayQueueNextSteps(u, q, false, 0)
+		sayQueueNextSteps(u, observed(q), false, 0)
 		return nil
 	}
 
@@ -1149,6 +1203,7 @@ func workQueue(ctx context.Context, u *ui, w *queue.Worker) error {
 	}
 
 	q, readErr := w.Store.Read()
+	q = observed(q)
 	u.say("")
 	switch {
 	case err != nil:
@@ -1198,6 +1253,7 @@ func sayQueueRuns(u *ui, workspace string) {
 	if err != nil {
 		return
 	}
+	q = observed(q)
 	var lines []string
 	for _, e := range q.Entries {
 		if _, ok := goalManifest(e); !ok {

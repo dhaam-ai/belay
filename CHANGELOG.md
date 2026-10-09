@@ -388,6 +388,14 @@ that only `pkg/belay` carries a compatibility promise. Everything under
   said none of it. `belay run`, `belay resume`, `belay fork` and each queued
   goal now print them on stderr, after the announcement and before anything
   is spent.
+- **`belay queue` shows a goal carried on by hand as its run now stands.**
+  For a goal stopped at a limit, the queue says to raise the limit and run
+  `belay --workspace <copy> resume <run-id>` yourself. After that run
+  finished, `belay queue`, `queue status` and `queue list` still said
+  "paused at a limit" and offered the same resume, which then answered that
+  the run is already finished. The reports now read each goal's run, and show
+  one that has finished, failed or stopped since the queue recorded it that
+  way.
 - **A repair's file list is checked against the disk, not taken on trust.**
   The fix step routed straight back to the tests, so a repair was the one
   change in a run that nothing verified: no claimed path was proven to be a
