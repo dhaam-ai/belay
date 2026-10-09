@@ -1,7 +1,7 @@
 # ADR-0014: Per-node model routing, and the policy gate
 
 ## Status
-Accepted, amended 2026-10-09 (policy layers combine; see "Policy layers combine to the most restrictive rule set")
+Accepted, amended 2026-10-09 (the gate judges what the workspace says changed, and promote commits exactly that; policy layers combine to the most restrictive rule set)
 
 ## Context
 
@@ -53,6 +53,25 @@ The per-field rule is right for a setting that says what a person wants: the pro
 
 So the layers combine to the most restrictive result: `forbidden_paths`, `required_tests` and `forbidden_content` are joined, each rule once, in the order first declared; `max_changed_files` and `max_changed_lines` take the smallest non-zero value any layer sets, so a later `0` cannot lift a ceiling; and `no_new_dependencies` holds if any layer sets it. A layer can add rules and tighten ceilings; no layer can loosen or remove what a lower one declared, including `--config`. The combined set is what is pinned, and `belay run --dry-run` prints every rule in it, so nobody has to read it out of two files. `config.Policy.tighten` is where it happens, applied as each document is merged.
 
+### The gate judges what the workspace says changed, not what the agent reports
+
+Amended 2026-10-09, after the final security review. As first built, the gate judged `state.Code.ChangedFiles`, which was the agent's own report of what it changed. The reviewer had an agent edit `infra/main.tf` and rewrite `belay.yaml` to `policy: {}` while reporting only `src/app.py`, under `forbidden_paths: ["infra/**", "belay.yaml"]`: the gate said "no policy violations ... 1 file checked", and the run's branch carried the backdoor and the gutted configuration. A report spelled `Infra/main.tf` dodged `infra/**` too. A guardrail a misreporting agent can walk past is not a guardrail, so the mechanism was changed, not only the documentation.
+
+**Ground truth comes from the workspace.** Each run pins, when it is created, where it learns what its workspace changed (`state.Manifest.Changes`), and every node is handed the answer through `graph.RunContext.Changes`:
+
+- A run on a branch, and a branch run's worktree candidates: git, everything that differs from the run's base commit (`git.Repo.Changes`): committed since (an agent can commit its own work), staged, edited, deleted, both names of a rename, and every new file git does not ignore, read through `-z` listings, excluding `.belay`.
+- A run in place in a git checkout: the same, from the commit `HEAD` was on at creation, less the files the person had already changed by then. Those are recorded when the run is created (a partial `filerecord.Record`), and one counts only if the run changes it again, so a person's uncommitted work is not charged to the run.
+- Every workspace git cannot answer for — a directory that is not a repository, a queued goal's copy under `.belay`, an in-place run's directory-copy candidates — a record of its files taken when the workspace is handed to the run (`internal/filerecord`): kind, mode and SHA-256 per file, with inode and ctime so a later check reads only what the kernel says was touched. The record is in the run directory; a candidate's is taken when its copy is made, before its agent runs.
+- A fork: nothing. Its copy is taken part-way through its source run's change, so neither git nor a record of the copy knows where that change began, and a wrong starting point is worse than none. The fork's gate judges the agent's report and says so in every verdict; so does `belay fork --dry-run`.
+
+The write node records the union of the report and the workspace's answer (this is ADR-0012's follow-up, done), keeping the files the agent left out in `state.Code.Unreported`; the gate judges that together with the answer asked again, names every unreported file in its verdict, and treats a workspace that cannot answer as no verdict at all, never as a reason to fall back to the report: an agent could break the answer on purpose, by rewriting the `.git` file in its workspace. A run with no record says in every verdict that "policy judges the files the agent reports", and why.
+
+**Case.** Paths are judged in the file system's own names, which closes the mis-cased report outright. Whether a glob should also match without regard to case was decided by the disk: on a disk that folds case, `Infra/evil.tf` and `infra/evil.tf` are one file, so a rule about one is a rule about the other, including for a new path whose directory did not exist before; on a disk that does not fold case they are two files, and a rule about one says nothing about the other. So the run records which kind of disk it is on when it is created (`state.PolicyPin.FoldCase`, by asking the disk about the run directory under another spelling), and the rules fold case exactly when it does. Always folding would make a Linux run forbid a file the rule does not name; never folding leaves a hole on the disk most belay users have.
+
+**Promote commits exactly what was judged.** A commit carries everything git says the tree changed, and between the gate and promote the test step runs code the agent wrote and the review step runs linters, and a paused run's worktree is open to a person. So promote, before it writes the plan and commits, compares the tree with what the run's steps recorded (the winner's, for a fanout) and pauses, naming the files, on anything else; and in a guarded run it judges the change about to be committed against the policy once more. Pausing was chosen over committing the file and naming it, because by then it is on the branch a pull request proposes, and nothing is lost by stopping: nothing has been committed, and `belay resume` asks again. Files the agent changed without reporting were recorded and judged, so they ship, and the commit body names them.
+
+`dircopy.SurveyTree` was weighed for the no-git case and not used. It records size and modification time, not content, which an agent that writes same-length bytes and runs `touch -r` defeats; it skips `vendor`, `build`, `dist` and the other names a copy leaves out, so an edit under `vendor/` would be invisible to a rule that forbids it; and it keeps an aggregate digest, not a per-file list. The file record keeps the per-file list, compares content, and leaves out nothing but `.belay` and `.git`.
+
 ### Two classes of violation, decided by the rule
 
 A violation either ends the run or is handed to the fix loop, and which one is a property of the rule, never of how severe it looks.
@@ -102,7 +121,7 @@ Best-of-N must not be the way around a guardrail. Without this, the route past a
 ## Consequences
 
 ### Positive
-- **A run can be left alone.** The rules a repository writes down are the rules the run is held to, whatever its tests say and whatever the agent reports about its own work.
+- **A run can be left alone.** The rules a repository writes down are the rules the run is held to, whatever its tests say and whatever the agent reports about its own work: the gate judges what the workspace says changed, names every file the agent left out of its report, and a branch run commits exactly what was judged.
 - **A guardrail cannot silently do nothing.** An unusable rule is refused when the configuration loads; a rule belay cannot evaluate at gate time is no verdict rather than a pass; and a gate with no edge into it is impossible, because the node and the edge are one wiring option.
 - **A run is judged against the rules it started with**, so the verdict is reproducible and a resume cannot change it. `belay run --dry-run` prints every rule and says which ones end a run.
 - **The same `budget.max_usd` buys a longer run**, because the expensive model is on the steps that need it.
@@ -116,12 +135,19 @@ Best-of-N must not be the way around a guardrail. Without this, the route past a
 - **`pyproject.toml` dependencies are not read.** A TOML parser and PEP 621's several spellings of a dependency are more than this slice could do correctly, and a parser that got it half right would report dependencies a project does not have or miss ones it does. The documented workaround is to name the file in `forbidden_paths`, which stops the change belay cannot judge rather than waving it through.
 - **A guarded run requires a capability.** `policy.gate` means an older belay refuses to resume it, which is the point, but it is one more run a v0.1.x binary cannot pick up. An unguarded run requires nothing.
 - **One more step per repair.** `fix → write → policy → test` counts two extra steps against `graph.max_steps`, which is 60 by default against a `give_up` of 3.
+- **Recording a workspace with no git reads every file in it once**, when the run starts (and once per candidate copy), and a check reads every file the kernel says was touched. A tree with a large `node_modules` pays for it.
+- **A workspace with no git has no ignore rules**, so a file the test command writes into it (a `__pycache__`, a coverage report) counts as changed on the next pass of the fix loop and can trip `max_changed_files`. The honest alternative was not to skip directories by name, which would let an edit hide under `vendor/`.
+- **In a git checkout, a file `.gitignore` excludes is not part of the change.** A commit would not carry it either, but an in-place run leaves it in the checkout. An edit to a `.gitignore` is judged.
+- **promote pauses on any change no step recorded**, including a build output the test command writes into a branch run's worktree that `.gitignore` does not exclude, until it is removed or ignored. A run started in a subdirectory records and judges only that directory, so an agent change above it (a `go.mod` at the top) pauses promote too; such a change needs a run started at the repository's top.
+- **A fork has no ground truth**, and its gate says so.
+- **Nothing the agent writes outside the workspace is judged**, `.belay` included: belay does not sandbox the agent (see the README's Known Limitations).
 - **The policy section merges differently from every other section.** A person who has learnt that a later file wins will be surprised that a project `belay.yaml` cannot loosen their own rules. The documentation says so where the layers are described and at the policy section, and the dry run shows the combined rules.
 - **Two more categories of setting to keep straight.** Limits are live, routing is live, shape is pinned. Each new setting has to be placed in one of the three, and the answer is not obvious from the setting alone.
 - **Adding the section changed every configuration digest**, so a run started before this reports drift on resume. That is true of any added section, and the drift is a warning.
 
 ### Follow-ups
-- Take the change set from `git diff` against the run's base commit in branch mode, so the gate judges what the repository says changed rather than what the agent reported. ADR-0012 already owes this for `write`; the gate inherits it for free.
+- Unicode normalisation: on macOS a name can be stored decomposed and written in a pattern composed. The case folding above does not normalise; a pattern with an accented character may not match its decomposed twin.
+- Judge a change outside a subdirectory run's own directory instead of pausing promote over it, which needs rules that can name a path above the workspace.
 - Count a deleted file's lines toward `max_changed_lines`. It contributes none today, because the lines it held are the one thing no longer there to count, and a baseline rich enough to know them would mean surveying the whole tree at run creation.
 - Read `pyproject.toml` properly, and drop the `forbidden_paths` workaround from the documentation when it lands.
 - Consider a `policy.required_tests` rule that maps a source file to *its* test rather than to any test. Today any changed file matching `require` satisfies the rule, because a wrong answer about which test covers which file would either block correct changes or wave through untested ones.
@@ -129,6 +155,14 @@ Best-of-N must not be the way around a guardrail. Without this, the route past a
 ## Alternatives Considered
 
 **Pin routing too, for consistency.** Rejected: it changes no node and no edge, and a pinned `agent.models` over a live `agent.model` gives a person two settings that behave differently for no reason they could infer.
+
+**Judge the agent's report and document the limitation.** What the gate did first. Rejected on the review's evidence: a guardrail a misreporting agent walks past fails at the one moment it exists for.
+
+**A size-and-mtime survey for workspaces with no git.** Cheap, and already computed before every node for forks. Rejected: same-length bytes and a restored mtime defeat it, and its skip list hides `vendor/` and `build/`. See the decision above.
+
+**Commit an unaccounted file and name it.** Rejected as the less safe of the two: it puts an unjudged file on the branch a pull request proposes. Pausing costs a `belay resume`.
+
+**A file record for in-place git runs too, instead of git.** It would cover files `.gitignore` hides. Rejected for now: with no ignore rules, every build output becomes part of the change, and the person's uncommitted work is already handled by the partial record.
 
 **Merge policy per field, like every other setting.** The original slice 4 decision, reversed on 2026-10-09: it let the file an agent can edit replace the person's own guardrails without a word, which is the silently-weaker outcome this feature exists to prevent.
 

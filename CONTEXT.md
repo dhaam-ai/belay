@@ -121,6 +121,14 @@ _Avoid_: guardrail (in code), rule set, constraint
 One way a change breaks a policy.
 _Avoid_: policy error, breach
 
+**Change**:
+What a run did to its workspace, as the workspace itself records it — what git
+says differs from the run's starting commit, or what differs from a record of
+the workspace's files taken when the run began — whatever its agent reports.
+The policy gate judges it, and a branch run commits exactly it. A file in it
+the agent did not report is an unreported change.
+_Avoid_: diff (the artifact), patch (a blackboard update), change set (fine in prose)
+
 ## Best-of-N
 
 **Fanout**:

@@ -92,7 +92,7 @@ belay configures no author and no committer, so git uses whatever the person's o
 - **`gh` is a third-party dependency for `--pr`.** It is checked for before the run starts rather than after it has finished and spent its budget, and everything works without it.
 
 ### Follow-ups
-- Take the write node's `ChangedFiles` from `git diff` in branch mode, rather than from what the agent reported.
+- ~~Take the write node's `ChangedFiles` from `git diff` in branch mode, rather than from what the agent reported.~~ Done 2026-10-09: the write node records the agent's report together with what git says changed since the run's base, and the policy gate judges that; promote commits only what was recorded. See ADR-0014.
 - Consider moving `Tip` and `Carries` onto `vcs.Repository` now that `internal/git` has both; `promote` consumes them through an unexported optional interface, which was a way of not breaking the `internal/git` lane mid-flight rather than a decision about the contract.
 - Fanout is still on no route belay walks: nothing routes into it, and no candidate is executed (ADR-0019 is reserved for that). `join → promote` is wired and proven at node level and against real git; `review → promote` is live in every branch-mode run.
 

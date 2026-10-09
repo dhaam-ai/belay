@@ -459,7 +459,21 @@ Where finished plans go, relative to the workspace (`--workspace`), not to the d
 
 ## `policy`
 
-Guardrails a run's change must obey, whatever its tests say. A change that passes every test can still edit the deployment pipeline, pull in a dependency nobody vetted, grow by four thousand lines, or leave a credential in a source file. These rules are what makes it safe to point belay at a repository and walk away.
+Guardrails a run's change must obey, whatever its tests say. A change that passes every test can still edit the deployment pipeline, pull in a dependency nobody vetted, grow by four thousand lines, or leave a credential in a source file. These rules are how you write down what an unattended run's change may not do.
+
+**What the gate judges.** Every file the workspace says the run changed, whether or not the agent reported it. The agent's own list of what it changed is a claim, and an agent that leaves an edit out of it, by mistake or on purpose, does not take the edit out of the gate's view; every such file is judged like the rest and named in the gate's verdict ("2 the agent did not report (belay.yaml, infra/main.tf), judged all the same"), in `belay timeline`, and in the commit. Paths are judged in the file system's own names, so a report spelled `Infra/main.tf` cannot dodge `infra/**`. Where the workspace's answer comes from depends on the run:
+
+| The run | What the gate judges |
+|---|---|
+| On a branch (`output.mode: branch`, or `auto` in a git repository) | Every file git says differs from the commit the run's branch started at: committed since, staged, edited, deleted, renamed (both names), and every new file git does not ignore |
+| In place, in a git checkout | The same, measured from the commit `HEAD` was on when the run started, apart from the files you had already changed by then: belay records those when the run starts, and judges one only if the run changes it again |
+| In place, with no git (including a queued goal, which works in a copy belay makes without `.git`) | Every file that differs from a record of the workspace's files belay takes when the run starts, comparing their contents |
+| A fanout candidate | As its run: a candidate of a branch run is a git worktree, measured from the run's base commit; a candidate of an in-place run is a directory copy, recorded when the copy is made |
+| A fork (`belay fork`) | Only the files the agent reports. A fork's copy is taken part-way through its source run's change, so nothing in it can say where that change began; the gate says so in every verdict, and `belay fork --dry-run` says so first |
+
+A branch run then commits exactly what was recorded and judged. Just before it commits, belay compares the run's worktree with what its steps recorded, and pauses, naming the files, if anything else changed there since: a file the test command wrote, an edit made by hand while the run was paused. It judges the change once more against the policy too, so a file the gate passed and something rewrote afterwards cannot ship. Both pauses are described in docs/troubleshooting.md.
+
+**What it does not protect against.** belay does not sandbox the agent. Claude Code and your test command run as you, and nothing stops them writing outside the workspace, into another repository, your home directory, or belay's own `.belay` directory; the gate judges the workspace and sees none of that. In a git checkout, a file your `.gitignore` excludes is not part of the change (a commit would not carry it either, but an in-place run leaves it in your checkout); an edit to a `.gitignore` is part of it and is judged. In a workspace with no git there are no ignore rules, so a file the test command writes into the tree, such as a `__pycache__` or a coverage report, counts as changed on the next pass of the fix loop. If you need the agent confined, run belay in a container or a VM that holds only the repository.
 
 Every rule is off by default, and a repository that declares no policy runs exactly as it did before this section existed: belay adds no step to the graph and reads no extra file.
 
@@ -513,6 +527,8 @@ A pattern is slash-separated, relative to the workspace, and anchored at its roo
 `*` and `?` and a character class such as `[0-9]` match inside one path segment. `**` is the only thing that crosses a `/`, and stands for zero or more whole segments. Unlike `.gitignore`, a pattern with no slash is **not** matched at every depth: write `**/secrets.yaml` for that. One rule that always reads the same way is worth two extra characters.
 
 A pattern belay cannot match — an empty one, an absolute one, one containing `..`, or one gluing `**` to other characters such as `src**/x` — is refused when the configuration loads. A rule that silently matches nothing is worse than no rule, because somebody is relying on it.
+
+Case is matched the way the run's disk names files. On a disk that treats `Infra` and `infra` as one directory, as macOS does by default, every pattern matches without regard to case, because there the two spellings are one file; belay records which kind of disk the run is on when it starts. On a disk that tells them apart, matching is exact.
 
 ### `policy.max_changed_files`
 
@@ -591,7 +607,7 @@ policy:
       reason: "a lint suppression; fix the finding instead"
 ```
 
-Only the changed files are read, never the whole repository: this is a check on what the run did, not an audit of what was already there. A changed file with a line longer than 1 MiB — a minified bundle, a generated blob — stops the gate with an error rather than being reported as clean, because "belay could not look" must never be recorded as "belay looked and it was fine". Exclude such a file with the rule's `paths`, or name it in `policy.forbidden_paths`.
+Only the changed files are read, never the whole repository: this is a check on what the run did, not an audit of what was already there. The changed files are the ones the workspace says changed, as described under [`policy`](#policy), not only the ones the agent reported. A changed file with a line longer than 1 MiB — a minified bundle, a generated blob — stops the gate with an error rather than being reported as clean, because "belay could not look" must never be recorded as "belay looked and it was fine". Exclude such a file with the rule's `paths`, or name it in `policy.forbidden_paths`.
 
 ## Environment Variables
 
