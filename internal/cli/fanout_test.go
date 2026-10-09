@@ -13,6 +13,7 @@ import (
 
 	"github.com/dhaam-ai/belay/internal/agent/replay"
 	"github.com/dhaam-ai/belay/internal/graph"
+	"github.com/dhaam-ai/belay/internal/journal"
 	"github.com/dhaam-ai/belay/internal/state"
 	"github.com/dhaam-ai/belay/pkg/belay"
 	"github.com/dhaam-ai/belay/pkg/belay/belaytest"
@@ -617,7 +618,7 @@ func TestNextStepsAfterAFanout(t *testing.T) {
 		},
 		{
 			name: "failed with no winner",
-			view: outcomeView{layout: layout, fanout: true, outcome: graph.Outcome{
+			view: outcomeView{layout: layout, fanout: true, candidate: "cand-01", outcome: graph.Outcome{
 				Status: state.RunStatusFailed, Node: graph.NodeJoin,
 				Note: "no winner: all 3 candidates failed their tests",
 			}},
@@ -625,6 +626,25 @@ func TestNextStepsAfterAFanout(t *testing.T) {
 				"belay timeline " + runID,
 				"belay timeline " + runID + " --candidate cand-01",
 			},
+		},
+		{
+			// The plan failed, so no candidate was ever made, and
+			// `belay timeline --candidate cand-01` would say the run has
+			// no candidate runs.
+			name: "failed before any candidate existed",
+			view: outcomeView{layout: layout, fanout: true, outcome: graph.Outcome{
+				Status: state.RunStatusFailed, Node: graph.NodePlan,
+			}},
+			want:   []string{"belay timeline " + runID},
+			absent: []string{"--candidate", "candidate's own run"},
+		},
+		{
+			name: "failed with only a later candidate's run made",
+			view: outcomeView{layout: layout, fanout: true, candidate: "cand-03", outcome: graph.Outcome{
+				Status: state.RunStatusFailed, Node: graph.NodeFanout,
+			}},
+			want:   []string{"belay timeline " + runID + " --candidate cand-03"},
+			absent: []string{"cand-01"},
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -821,6 +841,92 @@ func TestFanoutRefusesAnIsolatorItsOutputCannotUse(t *testing.T) {
 			}
 			if got := fanoutIsolatorBlocked(resumed); got != tc.want {
 				t.Errorf("refused over the isolator %d times, want %d; blockers: %s", got, tc.want, blockerText(resumed))
+			}
+		})
+	}
+}
+
+// TestFirstCandidateRunIsOneThatExists: the candidate a report offers to open
+// is one `belay timeline --candidate` can open -- a candidate run directory
+// on disk -- and the first of them by id. A run with none, such as one that
+// failed before its fanout made any, is offered nothing.
+func TestFirstCandidateRunIsOneThatExists(t *testing.T) {
+	layout, err := state.NewLayout(t.TempDir(), "20260101T000000Z-c0ffee000000")
+	if err != nil {
+		t.Fatalf("NewLayout: %v", err)
+	}
+	if got := firstCandidateRun(layout, true); got != "" {
+		t.Errorf("firstCandidateRun with no candidate runs = %q, want none", got)
+	}
+	for _, id := range []string{"cand-03", "cand-02"} {
+		if err := os.MkdirAll(filepath.Join(layout.CandidateRunsDir(), id), 0o750); err != nil {
+			t.Fatalf("MkdirAll: %v", err)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(layout.CandidateRunsDir(), "cand-01"), nil, 0o600); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+	if got := firstCandidateRun(layout, true); got != "cand-02" {
+		t.Errorf("firstCandidateRun = %q, want cand-02, the first candidate run directory", got)
+	}
+	if got := firstCandidateRun(layout, false); got != "" {
+		t.Errorf("firstCandidateRun of a run that does not fan out = %q, want none", got)
+	}
+}
+
+// failsAtPlan stands in for a plan step whose failure ends the run.
+type failsAtPlan struct{}
+
+func (failsAtPlan) Name() string { return graph.NodePlan }
+
+func (failsAtPlan) Run(context.Context, *graph.RunContext) (graph.Result, error) {
+	return graph.Result{Status: journal.StatusFailed, Note: "the agent could not write a plan"}, nil
+}
+
+// TestADispatchFindsTheCandidateRunItCanName: what the report offers to open
+// is read from disk once the dispatch has returned, as the winner is. A
+// fanout run that failed at its plan has no candidate run to offer; one that
+// has made a candidate run offers that one.
+func TestADispatchFindsTheCandidateRunItCanName(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		made []string
+		want string
+	}{
+		{name: "no candidate run was made", want: ""},
+		{name: "a candidate run was made", made: []string{"cand-02"}, want: "cand-02"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ws := goWorkspace(t)
+			writeConfig(t, ws, fanoutConfig)
+			plan, err := resolve(resolveRequest{workspace: ws, logger: quietLogger()})
+			if err != nil {
+				t.Fatalf("resolve: %v", err)
+			}
+			store, err := createRun(t.Context(), plan, runSpec{
+				Workspace: ws, RunID: "20260101T000000Z-abcdef123456", Goal: "add tests",
+			})
+			if err != nil {
+				t.Fatalf("createRun: %v", err)
+			}
+			for _, id := range tc.made {
+				if err := os.MkdirAll(filepath.Join(store.Layout().CandidateRunsDir(), id), 0o750); err != nil {
+					t.Fatalf("MkdirAll: %v", err)
+				}
+			}
+			registry := graph.NewRegistry()
+			registry.MustRegister(failsAtPlan{})
+			plan.registry = registry
+
+			view, err := dispatchOnce(t.Context(), plan, store, false)
+			if err != nil {
+				t.Fatalf("dispatchOnce: %v", err)
+			}
+			if view.outcome.Status != state.RunStatusFailed || !view.fanout {
+				t.Fatalf("outcome %v, fanout %v; want this test's premise, a failed fanout run", view.outcome.Status, view.fanout)
+			}
+			if view.candidate != tc.want {
+				t.Errorf("view.candidate = %q, want %q", view.candidate, tc.want)
 			}
 		})
 	}

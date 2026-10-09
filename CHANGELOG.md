@@ -356,6 +356,11 @@ that only `pkg/belay` carries a compatibility promise. Everything under
   belay does not merge a run that edits in place. The queue said the goal
   "finished in its copy" and to take what you want from there, which found
   nothing. It now names the winner and its workspace.
+- **A failed fanout run names a candidate only when one exists.** Its last
+  lines offered `belay timeline <run> --candidate cand-01` whenever the run
+  fanned out, including a run that failed at its plan, before any candidate
+  was made, where that command says the run has no candidate runs. The line
+  now appears only when a candidate run is on disk, and names the first one.
 - **A repair's file list is checked against the disk, not taken on trust.**
   The fix step routed straight back to the tests, so a repair was the one
   change in a run that nothing verified: no claimed path was proven to be a
