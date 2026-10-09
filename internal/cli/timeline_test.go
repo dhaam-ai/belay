@@ -671,9 +671,9 @@ func TestTimelineRenderListsTheFilesTheRunChanged(t *testing.T) {
 			want:  timelineGolden,
 		},
 		{
-			name:  "a control character in a path is dropped",
+			name:  "a control character in a path is shown as a stand-in",
 			files: []string{"evil\x1b[2Jname.go"},
-			want:  timelineGolden + "\nFiles changed:\n  evil[2Jname.go\n",
+			want:  timelineGolden + "\nFiles changed:\n  evil␛[2Jname.go\n",
 		},
 	}
 	for _, tt := range tests {

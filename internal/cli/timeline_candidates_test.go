@@ -562,13 +562,14 @@ func TestTimelineRenderShowsCandidateLanes(t *testing.T) {
 	}
 }
 
-// TestTimelineCandidateLanesDropControlCharacters keeps a candidate
-// directory from rewriting the terminal it is printed to. A candidate id is a
-// directory name read off disk, and state's segment validation refuses path
-// separators and NUL but says nothing about escape sequences, so the renderer
-// is the only thing standing between a hostile directory name and the
-// reader's screen.
-func TestTimelineCandidateLanesDropControlCharacters(t *testing.T) {
+// TestTimelineCandidateLanesShowControlCharactersAsStandIns keeps a
+// candidate directory from rewriting the terminal it is printed to. A
+// candidate id is a directory name read off disk, and state's segment
+// validation refuses path separators and NUL but says nothing about escape
+// sequences, so the renderer is the only thing standing between a hostile
+// directory name and the reader's screen. The ESC is shown as ␛ rather than
+// dropped, as everywhere belay prints text it did not write (ADR-0015).
+func TestTimelineCandidateLanesShowControlCharactersAsStandIns(t *testing.T) {
 	t.Parallel()
 
 	tl := BuildTimeline(timelineDemoSelection(), timelineDemoManifest(),
@@ -584,7 +585,7 @@ func TestTimelineCandidateLanesDropControlCharacters(t *testing.T) {
 	if strings.Contains(got, "\x1b") {
 		t.Errorf("the rendered timeline carries an escape sequence:\n%q", got)
 	}
-	for _, want := range []string{"cand[2J-01", "refused[2J here", "1 candidate spent"} {
+	for _, want := range []string{"cand␛[2J-01", "refused␛[2J here", "cand␛[2J-01 won", "1 candidate spent"} {
 		if !strings.Contains(got, want) {
 			t.Errorf("rendered timeline is missing %q:\n%s", want, got)
 		}

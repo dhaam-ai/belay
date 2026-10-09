@@ -2,10 +2,12 @@ package cli
 
 import (
 	"bytes"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"strings"
 	"testing"
+	"time"
 	"unicode"
 	"unicode/utf8"
 
@@ -165,5 +167,82 @@ func TestTheLastWordIsPrintable(t *testing.T) {
 		if !strings.Contains(out.String(), hostileShown) && !strings.Contains(out.String(), `\x1b`) {
 			t.Errorf("the last word does not show what was there: %q", out.String())
 		}
+	}
+}
+
+// hostileTimeline is a timeline in which every field read from a run's files
+// carries hostile: the goal from its manifest, node names, notes and the
+// next node from its journal, the files from its blackboard, and the
+// candidates' ids and notes from their directories and their runs. In an
+// in-place run the agent can write every one of those files.
+func hostileTimeline() Timeline {
+	tl := BuildTimeline(timelineDemoSelection(), timelineDemoManifest(),
+		timelineResult(timelineFixLoopRun(), false))
+	tl.Goal = hostileGoal
+	tl.Run.Candidate, tl.Run.ParentRunID = "cand"+hostile, "run"+hostile
+	for i := range tl.Entries {
+		tl.Entries[i].Note = hostileNote
+		tl.Entries[i].Next = "next" + hostile
+	}
+	tl.Entries[0].Node = "plan" + hostile
+	tl.Loops = append(tl.Loops, TimelineLoop{Node: "loop" + hostile, Executions: 2})
+	tl.Status, tl.Next = "unfinished", "next"+hostile
+	tl.Interrupted, tl.InterruptedNode = true, "node"+hostile
+	tl.ChangedFiles = []string{hostileFile}
+	tl.Candidates = []TimelineCandidate{{
+		ID: "cand" + hostile, Index: 1, Outcome: TimelineCandidateFailed, Settled: true,
+		SpentUSD: 0.1, Duration: time.Second, Note: hostileNote,
+	}}
+	tl.Winner = "cand" + hostile
+	return tl
+}
+
+// TestTimelineShowsWhatItReadAsStandIns is the review's evidence for
+// `belay timeline`: the goal and every node's note were printed as they
+// were, while the file names and candidates had their control characters
+// dropped -- safe, but a name with a byte silently missing can read as a
+// different file.
+func TestTimelineShowsWhatItReadAsStandIns(t *testing.T) {
+	t.Parallel()
+	got := timelineRender(t, hostileTimeline(), false)
+	assertTerminalSafe(t, "the timeline", got)
+	for _, want := range []string{
+		"goal    add a helper" + hostileShown + "\n",
+		"policy: x" + hostileShown + "y.txt has a line",
+		"plan" + hostileShown,
+		"  x" + hostileShown + "y.txt\n",
+		"cand" + hostileShown,
+	} {
+		if !strings.Contains(got, want) {
+			t.Errorf("the timeline does not show %q:\n%s", want, got)
+		}
+	}
+
+	colored := timelineRender(t, hostileTimeline(), true)
+	if rest := regexpSGR.ReplaceAllString(colored, ""); strings.ContainsRune(rest, 0x1b) {
+		t.Errorf("with colour on, the timeline carries an escape that is not its own colour:\n%q", colored)
+	}
+}
+
+// TestTimelineJSONIsExactAndPrintable: a script reading --json gets every
+// field exactly as the run's files hold it, and the document is still safe
+// to print, because the controls encoding/json leaves raw are escaped.
+func TestTimelineJSONIsExactAndPrintable(t *testing.T) {
+	t.Parallel()
+	var buf bytes.Buffer
+	if err := RenderTimelineJSON(&buf, hostileTimeline()); err != nil {
+		t.Fatalf("RenderTimelineJSON: %v", err)
+	}
+	assertTerminalSafe(t, "timeline --json", buf.String())
+
+	var doc timelineJSONDoc
+	if err := json.Unmarshal(buf.Bytes(), &doc); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if doc.Goal != hostileGoal || doc.Entries[0].Note != hostileNote || doc.ChangedFiles[0] != hostileFile {
+		t.Errorf("--json changed what the run recorded: goal %q, note %q, file %q", doc.Goal, doc.Entries[0].Note, doc.ChangedFiles[0])
+	}
+	if len(doc.Candidates) != 1 || doc.Candidates[0].ID != "cand"+hostile || doc.Candidates[0].Note != hostileNote {
+		t.Errorf("--json changed a candidate: %+v", doc.Candidates)
 	}
 }

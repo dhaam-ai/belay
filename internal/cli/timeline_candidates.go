@@ -561,7 +561,7 @@ func timelineMeasureCandidates(lanes []TimelineCandidate) timelineCandidateColum
 		issues: len("issues"), duration: len("duration"), cost: len("cost"),
 	}
 	for _, l := range lanes {
-		c.id = max(c.id, utf8.RuneCountInString(timelineDropControl(l.ID)))
+		c.id = max(c.id, utf8.RuneCountInString(l.ID))
 		c.outcome = max(c.outcome, utf8.RuneCountInString(string(l.Outcome)))
 		c.tests = max(c.tests, utf8.RuneCountInString(timelineCandidateTests(l)))
 		c.issues = max(c.issues, utf8.RuneCountInString(timelineCandidateIssues(l)))
@@ -645,10 +645,9 @@ func (s timelineStyle) candidateOutcome(o TimelineCandidateOutcome, text string)
 // table — which is what keeps every run anybody has today printing exactly
 // what it printed before this section existed.
 //
-// The ids and notes are passed through timelineDropControl. A lane's id is a
-// directory name read off disk, and state's segment validation blocks path
-// separators and NUL but not escape sequences, so a directory could otherwise
-// rewrite the terminal it is printed to.
+// A lane's id is a directory name read off disk, and state's segment
+// validation blocks path separators and NUL but not escape sequences, so the
+// ids and notes are drawn as RenderTimeline's printable copy has them.
 func timelineWriteCandidates(b *strings.Builder, s timelineStyle, tl Timeline) {
 	if len(tl.Candidates) == 0 {
 		return
@@ -667,7 +666,7 @@ func timelineWriteCandidates(b *strings.Builder, s timelineStyle, tl Timeline) {
 
 	for _, l := range tl.Candidates {
 		row := fmt.Sprintf("  %s  %s  %s  %s  %s  %s",
-			timelinePadRight(timelineDropControl(l.ID), c.id),
+			timelinePadRight(l.ID, c.id),
 			s.candidateOutcome(l.Outcome, timelinePadRight(string(l.Outcome), c.outcome)),
 			timelinePadRight(timelineCandidateTests(l), c.tests),
 			timelinePadLeft(timelineCandidateIssues(l), c.issues),
@@ -679,7 +678,7 @@ func timelineWriteCandidates(b *strings.Builder, s timelineStyle, tl Timeline) {
 		}
 		b.WriteString(row + "\n")
 
-		for _, line := range timelineWrap(timelineDropControl(l.Note), gutter, timelineWrapWidth) {
+		for _, line := range timelineWrap(l.Note, gutter, timelineWrapWidth) {
 			fmt.Fprintf(b, "%s\n", s.paint(timelineDim, line))
 		}
 	}
@@ -714,7 +713,7 @@ func timelineCandidateFooter(tl Timeline) string {
 	if timelineLanesSettled(tl.Candidates) {
 		outcome := "no candidate won"
 		if tl.Winner != "" {
-			outcome = timelineDropControl(tl.Winner) + " won"
+			outcome = tl.Winner + " won"
 		}
 		subject, _ := timelineCandidateSubject(tl.Candidates)
 		return fmt.Sprintf("%s spent %s in total; %s", subject, amount, outcome)
@@ -800,24 +799,25 @@ type timelineJSONCandidate struct {
 //
 // It is always an array, never null, so a consumer can iterate it without a
 // nil check — the convention every other collection in the document follows.
-// The ids and notes are passed through timelineDropControl for the reason
-// timelineWriteCandidates gives: they may end up in a terminal either way.
+// The ids and notes are what the candidate's files hold, exactly, like every
+// other string in the document; RenderTimelineJSON escapes what could drive
+// a terminal.
 func timelineCandidatesToJSON(lanes []TimelineCandidate) []timelineJSONCandidate {
 	out := make([]timelineJSONCandidate, 0, len(lanes))
 	for _, l := range lanes {
 		out = append(out, timelineJSONCandidate{
-			ID:             timelineDropControl(l.ID),
+			ID:             l.ID,
 			Index:          l.Index,
 			Outcome:        l.Outcome,
 			Winner:         l.Winner,
-			RunID:          timelineDropControl(l.RunID),
-			RunDir:         timelineDropControl(l.RunDir),
-			WorkspaceDir:   timelineDropControl(l.WorkspaceDir),
+			RunID:          l.RunID,
+			RunDir:         l.RunDir,
+			WorkspaceDir:   l.WorkspaceDir,
 			Settled:        l.Settled,
 			TestPassed:     l.TestPassed,
 			IssueCount:     l.IssueCount,
 			Provision:      string(l.Provision),
-			ProvisionNote:  timelineDropControl(l.ProvisionNote),
+			ProvisionNote:  l.ProvisionNote,
 			EnvelopeUSD:    l.Envelope.LimitUSD,
 			EnvelopeTokens: l.Envelope.LimitTokens,
 			SpentUSD:       l.SpentUSD,
@@ -825,7 +825,7 @@ func timelineCandidatesToJSON(lanes []TimelineCandidate) []timelineJSONCandidate
 			DurationMS:     l.Duration.Milliseconds(),
 			Nodes:          l.Nodes,
 			Interrupted:    l.Interrupted,
-			Note:           timelineDropControl(l.Note),
+			Note:           l.Note,
 		})
 	}
 	return out
