@@ -25,8 +25,6 @@ brew install belay
 belay version
 ```
 
-Requires the tap to be published; until then use one of the options below.
-
 ### Go 1.26+
 
 ```bash
@@ -133,7 +131,8 @@ with `belay timeline`.
 
 belay uses whatever Claude Code login you already have, and the same model
 selection: `agent.model` in `belay.yaml` is passed straight through as
-`--model`.
+`--model`, and `agent.models` can give the plan, code and fix steps a model
+each.
 
 ## Five-Minute Quickstart
 
@@ -145,12 +144,15 @@ belay works on any Go, Node, or Python project with tests. It will auto-detect y
 cd /path/to/your/project
 ```
 
-In a git repository, belay works on its own branch — `belay/<run-id>`, in its
-own worktree — and commits once after the quality gate passes. Your checkout
-is never edited, so uncommitted work in it is safe; it is also not part of the
-run, which starts from the commit you are on. Outside a git repository belay
-edits the workspace directly. It says which it is doing before it spends
-anything, and `belay --dry-run run` says it without creating anything.
+In a git repository that has at least one commit, belay works on its own
+branch — `belay/<run-id>`, in its own worktree — and commits once after the
+quality gate passes. Your checkout is never edited, so uncommitted work in it
+is safe; it is also not part of the run, which starts from the commit you are
+on. A branch also needs git 2.38 or newer and a repository without
+submodules. Otherwise — outside a git repository, before its first commit,
+with submodules or an older git — belay edits the workspace directly. It says
+which it is doing, and why, before it spends anything, and
+`belay --dry-run run` says it without creating anything.
 
 ### 2. Create a belay.yaml
 
@@ -163,14 +165,14 @@ agent:
   model: "sonnet"
 graph:
   approval: true          # Pause after planning so you can review
-  give_up: 3              # Retry failing tests up to 3 times
-  max_steps: 50           # Stop after 50 total node executions
+  give_up: 3              # Repair failing tests or a failing gate up to 3 times
+  max_steps: 50           # Pause after 50 steps in all
 review:
   mode: "lint"            # Use local linters (golangci-lint, eslint, ruff)
   fail_on: "major"        # Fail if linter finds major issues or worse
 budget:
-  max_usd: 5.0            # Spend at most $5, then stop
-  on_exceed: "abort"      # Abort if budget is hit
+  max_usd: 5.0            # Once $5 is spent, pause before the next step
+  on_exceed: "abort"      # Stop at the ceiling rather than warn and carry on
 ```
 
 ### 3. Set a credential
@@ -197,13 +199,18 @@ belay run --dry-run "add a --json flag to the CLI output"
 ```
 
 This shows:
-- The goal you entered
+- The goal you entered, and the kind of project belay found
+- Where the result would go: a branch, or your workspace edited in place
 - The most it could spend, and what reaching that ceiling does
-- The configuration files it read, the agent it will call, and the tests and linter it found
+- The model each step would use, at its list rate
+- The configuration files it read, the agent it will call, and the test runner and quality gate it picked for that project
 - Which credentials are set, without their values
 - The route through the graph, and when belay gives up
-- Where it would record the run
+- Where it would record the run, and where the plan would go
 - **But does not create anything or spend money.**
+
+It does not check that `claude`, your test toolchain or the linter is
+installed: a missing one fails the run at the step that needs it.
 
 Example output:
 
@@ -257,17 +264,25 @@ Nothing was created and nothing was spent. Run the same command without --dry-ru
 belay run "add a --json flag to the CLI output"
 ```
 
-belay writes a plan to `.belay/runs/<run-id>/artifacts/plan.md`, prints where it is, and stops, waiting for your approval. Read it.
+belay writes a plan to `.belay/runs/<run-id>/artifacts/plan.md` and stops,
+waiting for your approval. At a terminal it opens the plan in a full-screen
+viewer: scroll it, edit, add, delete and reorder its steps, undo, save, press
+`c` to approve it and carry on, `r` to ask the agent for a different plan, `?`
+for every key, or `q` to leave with the run still waiting. Anywhere else —
+input or output that is not a terminal, `CI` set (to anything but `0` or
+`false`), `TERM` unset or `dumb`, or `--no-input` given — belay prints where
+the plan is and exits, and the run waits for `belay resume`.
 
 ```bash
-# Look at the plan:
+# Look at the plan (at a terminal this opens the viewer; --no-input prints it):
 belay plan
 
 # If you like it, continue:
 belay resume
 ```
 
-If something goes wrong, you can edit the plan before resuming, and belay will use your edited version.
+If something goes wrong, you can edit the plan file before resuming, and belay
+will use your edited version.
 
 If it is not what you wanted at all, have the agent write another one instead
 of editing this one yourself:
@@ -281,15 +296,28 @@ your words in the prompt, and stops at the plan again so you can read it. That
 is a step of the run like any other: it is journaled, it counts against the
 budget, and `belay resume` picks it up if it is interrupted.
 
+belay colours its output only when it writes to a terminal. `--no-color`, or a
+non-empty `NO_COLOR` in the environment, turns colour off there too.
+
+Add `--pr` to `belay run` and, when a run on a branch finishes, belay pushes
+the branch and opens a draft pull request through `gh`, GitHub's own command
+line. It checks before the run starts that it could: a run that edits in
+place, a missing `gh` or a repository with no remote is refused up front. A
+pull request that cannot be opened at the end never fails the run; belay
+prints the two commands that finish the job by hand.
+
 ### 6. Watch the run unfold
 
 ```bash
-# List all runs:
+# List the workspace's runs, newest first (the latest 20; --limit 0 lists them all):
 belay runs
 
 # See how one unfolded, step by step:
 belay timeline <run-id>
 ```
+
+`belay runs --json`, `belay timeline --json` and `belay queue list --json`
+print the same as JSON, for scripts.
 
 Example timeline output:
 
@@ -358,10 +386,10 @@ Everything belay records about a run lives in `.belay/runs/<run-id>`:
 - `state.json` — what the steps have produced so far, which every step reads: the plan, the files changed, the latest test and review results, how many repairs were made
 - `journal.ndjson` — an append-only record of every step's start and finish, from which `belay resume` works out where to pick up
 - `snapshots/` — a copy of what each step was given, taken before it ran, so a step run again after a crash or a Ctrl-C starts from the same place
-- `artifacts/` — the plan the agent generated (`artifacts/plan.md`), the agent's summary of the code it wrote, the diff each write step recorded, and the test and quality-gate reports
+- `artifacts/` — the plan the agent generated (`artifacts/plan.md`), the agent's summary of the code it wrote, the diff each write step recorded, and the test, quality-gate and, in a run with a policy, policy-gate reports
 - `nodes/` — for each step that called the agent, the prompt it sent and the reply it got
 
-If you stopped the run with Ctrl-C, or it crashed mid-execution, your work is safe on disk. `belay resume` picks it up where it left off: the step that was interrupted runs again, and the steps that finished do not. A run that belay stopped on its own, at the budget ceiling, `graph.max_steps` or `graph.node_timeout`, is waiting too: raise that setting in belay.yaml and `belay resume` carries on with what the run has already spent still counted, rather than spending it again from the beginning.
+If you stopped the run with Ctrl-C, or it crashed mid-execution, your work is safe on disk. `belay resume` picks it up where it left off: the step that was interrupted runs again, and the steps that finished do not. A belay that was killed may leave the agent or your tests running; belay records every process it starts for a step under `$XDG_STATE_HOME/belay` (or `~/.local/state/belay`), outside the run directory, and `belay resume` stops what is still running from the interrupted step. belay needs `HOME` or `XDG_STATE_HOME` set to keep those records, and starts no process without them. A run that belay stopped on its own, at the budget ceiling, `graph.max_steps` or `graph.node_timeout`, is waiting too: raise that setting in belay.yaml and `belay resume` carries on with what the run has already spent still counted, rather than spending it again from the beginning.
 
 When a run finishes, its plan moves out of that directory and into your
 repository, as `docs/plans/<run-id>-<slug>.md`: it is the record of why the
@@ -372,8 +400,13 @@ as a new file for you to commit or delete. `belay plan <run-id>` shows it
 wherever it is, and `plan.archive` in belay.yaml turns it off.
 
 Nothing else in `.belay` is meant to be committed, and belay says so to git:
-the first run in a repository writes `.belay/.gitignore`. If you want to
-delete a run, `rm -rf .belay/runs/<run-id>` is safe.
+the first run in a repository writes `.belay/.gitignore`. To delete a run that
+edited your workspace in place, `rm -rf .belay/runs/<run-id>`. A run on a
+branch that paused or failed also has a git worktree in that directory:
+remove it first with `git worktree remove .belay/runs/<run-id>/worktree` (add
+`--force` to throw away what is uncommitted in it), or git keeps a stale entry
+for it. A completed branch run's worktree is already gone. Either way the
+branch `belay/<run-id>` stays until you delete it with `git branch -D`.
 
 ### 8. Try one step again, without paying for the rest
 
@@ -390,11 +423,20 @@ belay fork <run-id> test --visit 2
 ```
 
 belay makes a new run in a copy of your repository, under
-`.belay/forks/<fork-id>`, runs the one step and pauses; the run you forked is
-only ever read. If your files have changed since that step ran, belay stops
-and says so, and `--current-files` re-runs it on them as they are now. When
-it pauses it tells you how to see what the step did and how to carry the
-fork on, which is an ordinary resume pointed at the copy:
+`.belay/forks/<fork-id>`, runs the one step and pauses before the next one
+(or finishes, when that step was the last); the run you forked is only ever
+read. If your files have changed since that step ran, belay stops and says
+so, and `--current-files` re-runs it on them as they are now. Forking a fix
+step that gave up gives it one more round: as it stood, it had used every
+round `graph.give_up` allows and would give up again without calling the
+agent, so the fork runs with one more, and says so with the other
+differences before it spends anything.
+
+The copy is made like a queued goal's: it leaves out `.git`, `node_modules`,
+`vendor`, `.venv`, `__pycache__`, `dist`, `build`, `target` and `.belay`, so a
+test that needs one of those fails in the fork until the test command makes
+it. When the fork pauses, belay tells you how to see what the step did and
+how to carry the fork on, which is an ordinary resume pointed at the copy:
 
 ```bash
 belay --workspace .belay/forks/<fork-id> resume <fork-id>
@@ -416,13 +458,14 @@ belay queue          # what happened, what it cost, and what to do next
 Each goal gets a run of its own, in a copy of your workspace made when belay
 reaches the goal, under `.belay/queue/work/`. Your checkout is never edited:
 a finished goal's change is in its copy, and you take what you want from it by
-hand.
+hand. `belay queue list` lists the goals, and with `--json` prints each one's
+state, run, copy and spend for a script.
 
-A goal's plan still stops for you to read it, as every run's does. The queue
-parks that goal and moves on to the next, and `belay queue approve <goal>`
-releases it for the next `belay queue start`. Only a goal you add with
-`--no-approval` goes from its plan to its code without you; belay never makes
-that choice for you.
+A goal's plan stops for you to read it. The queue parks that goal and moves
+on to the next, and `belay queue approve <goal>` releases it for the next
+`belay queue start`. Only a goal you add with `--no-approval` goes from its
+plan to its code without you; the queue does not read `graph.approval`, so
+turning the gate off in a `belay.yaml` never takes a queued goal past it.
 
 Every goal is held to `budget.max_usd` on its own, and `belay queue start`
 says how many goals it will run and the most they can spend together before it
