@@ -298,35 +298,39 @@ run     20260905T142530Z-1f2e3d4c5b6a
 goal    add a --json flag to the CLI output
 status  finished
 
-   #  node       outcome   duration    cost
-   1  plan       finished     12.3s  $0.040  █████
+   #  node        outcome   duration    cost
+   1  plan        finished     12.3s  $0.040  █████
       plan archived to artifacts/plan.md (1843 bytes); next approve
-   2  approve    paused        0.0s  $0.000  █
+   2  approve     paused        0.0s  $0.000  █
       Plan is waiting for your approval. Review or edit /home/you/app/.belay/runs/20260905T142530Z-1f2e3d4c5b6a/artifacts/plan.md, then continue with: belay resume 20260905T142530Z-1f2e3d4c5b6a
       waited 4m 12.0s here, then resumed
-   3  approve    finished      0.0s  $0.000  █
+   3  approve     finished      0.0s  $0.000  █
       Plan approved; proceeding to code.
-   4  code       finished     45.2s  $0.180  ██████████████████
+   4  code        finished     45.2s  $0.180  ██████████████████
       code: claude-code reported changes to 3 file(s) (new session)
-   5  write      finished      0.1s  $0.000  █
+   5  write #1/3  finished      0.1s  $0.000  █
       verified 3 changed file(s): 3 present, 0 deleted; recorded artifacts/diff-0005.patch
-   6  test #1/3  finished      3.5s  $0.000  █
+   6  test #1/3   finished      3.5s  $0.000  █
       go-test: 12 tests, 1 failed
-   7  fix #1/2   finished     28.4s  $0.120  ███████████
+   7  fix #1/2    finished     28.4s  $0.120  ███████████
       fix attempt 1 of 3: 1 of 12 tests failing
-   8  test #2/3  finished      2.1s  $0.000  █
+   8  write #2/3  finished      0.1s  $0.000  █
+      verified 3 changed file(s): 3 present, 0 deleted; recorded artifacts/diff-0008.patch
+   9  test #2/3   finished      2.1s  $0.000  █
       go-test: 12 tests, 1 failed
-   9  fix #2/2   finished     31.2s  $0.150  ████████████
+  10  fix #2/2    finished     31.2s  $0.150  ████████████
       fix attempt 2 of 3: 1 of 12 tests failing
-  10  test #3/3  finished      2.9s  $0.000  █
+  11  write #3/3  finished      0.1s  $0.000  █
+      verified 3 changed file(s): 3 present, 0 deleted; recorded artifacts/diff-0011.patch
+  12  test #3/3   finished      2.9s  $0.000  █
       go-test: 12 tests, 0 failed
-  11  review     finished      6.4s  $0.000  ███
-      gate pass: no issues at or above fail_on=major (source=golangci-lint, report=artifacts/review-11.json)
+  13  review      finished      6.4s  $0.000  ███
+      gate pass: no issues at or above fail_on=major (source=golangci-lint, report=artifacts/review-13.json)
 
-  loops       test ran 3 times, fix ran 2 times
-  loop cost   steps 6-10 cost $0.270 and 1m 08.1s — 55% of the run's spend
-  agent time  2m 12.1s across 11 nodes
-  wall clock  6m 37.1s   2026-09-05 14:25:31Z → 14:32:08Z
+  loops       write ran 3 times, test ran 3 times, fix ran 2 times
+  loop cost   steps 5-12 cost $0.270 and 1m 08.4s — 55% of the run's spend
+  agent time  2m 12.3s across 13 nodes
+  wall clock  6m 39.3s   2026-09-05 14:25:31Z → 14:32:10Z
   spend       $0.490 of the $5.00 ceiling
 
 Files changed:
