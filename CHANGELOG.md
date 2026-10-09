@@ -581,11 +581,12 @@ that only `pkg/belay` carries a compatibility promise. Everything under
   belay is alive to do it. After a kill -9, or a second Ctrl-C, they were
   left running: your terminal's Ctrl-C never reaches them, so an agent could
   keep working, and keep spending, with nothing watching it. belay now
-  writes down every process it starts, in that step's directory under
-  `nodes/`, before the process starts, and `belay resume` kills whatever is
-  still running from the step that was interrupted. It checks each process's
-  start time first, so a process id that has since been given to something
-  else is never signalled.
+  writes down every process it starts, before the process starts, and
+  `belay resume` kills whatever is still running from the step that was
+  interrupted. It checks each process first — its start time, that it leads
+  its own process group, and that it still runs the program belay started —
+  so a process id that has since been given to something else is never
+  signalled.
 - **An empty `NO_COLOR` no longer turns `belay timeline` plain.** The
   timeline switched colour off whenever `NO_COLOR` existed, even exported
   empty, while every other command waits for a non-empty value, as
@@ -618,6 +619,19 @@ that only `pkg/belay` carries a compatibility promise. Everything under
   and in a queued goal's copy that is your own checkout. Once a copy is
   built, belay now follows every link it recreated through every link along
   the way and removes any that does not end inside the copy, loops included.
+- **A run's files can no longer make `belay resume` kill a process.**
+  `belay resume` kills the processes a killed belay left running, from
+  records it kept in the run's `nodes/` directory — which, in a run that edits
+  your workspace in place, is inside the workspace the agent writes. A
+  record written there naming any process of yours, with its real start
+  time, had belay send it SIGKILL. The records now live in belay's own state
+  directory, `$XDG_STATE_HOME/belay` or `~/.local/state/belay`, and a process
+  is killed only if it also leads its own process group and still runs the
+  program the record names. A record found in a run's `nodes/` directory is
+  reported and removed, never acted on: if you resume, with this belay, a run
+  a development build of belay was killed during, kill what it left running
+  yourself (`ps` lists it). belay now needs `HOME` or `XDG_STATE_HOME` set to
+  start a step's processes.
 
 ## v0.1.4 — 2026-09-17
 

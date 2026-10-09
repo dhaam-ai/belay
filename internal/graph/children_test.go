@@ -1921,6 +1921,7 @@ func TestAPanickingCandidateDoesNotTakeDownItsSiblings(t *testing.T) {
 // own Layout — and because an agent CLI left running after a kill -9 keeps
 // spending the user's money.
 func TestAResumeKillsACandidatesOrphanedProcessBeforeItsNodeRunsAgain(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir()) // where procgroup keeps the records
 	h := newRun(t, budgetCfg(3.00, 0), "kill what the dead process left running")
 	iso := newFakeIsolator(h.layout.CandidatesDir())
 	l := seedCandidate(t, h, iso, seeded{
@@ -1959,7 +1960,9 @@ func TestAResumeKillsACandidatesOrphanedProcessBeforeItsNodeRunsAgain(t *testing
 	if err != nil {
 		t.Fatalf("NodeDir: %v", err)
 	}
-	tracked, err := procgroup.Track(nodeDir, []string{"claude", "-p", "implement the plan"})
+	// The command it records is the one that runs: procgroup kills only a
+	// process still running the program its record names.
+	tracked, err := procgroup.Track(nodeDir, sleeper.Args)
 	if err != nil {
 		t.Fatalf("Track: %v", err)
 	}

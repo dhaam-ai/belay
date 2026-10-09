@@ -645,6 +645,7 @@ func (n *contextReadingNode) Run(ctx context.Context, _ *graph.RunContext) (grap
 // closed, and a live process group recorded in that execution's evidence
 // directory.
 func TestDispatcher_HealKillsProcessGroupsAKilledRunLeftRunning(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir()) // where procgroup keeps the records
 	h := newRun(t, config.Default(), "clean up after a kill -9")
 	h.seedJournal(t,
 		journal.Record{Event: journal.EventRunStarted},
@@ -677,7 +678,9 @@ func TestDispatcher_HealKillsProcessGroupsAKilledRunLeftRunning(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NodeDir: %v", err)
 	}
-	tracked, err := procgroup.Track(nodeDir, []string{"go", "test", "./..."})
+	// The command it records is the one that runs: procgroup kills only a
+	// process still running the program its record names.
+	tracked, err := procgroup.Track(nodeDir, sleeper.Args)
 	if err != nil {
 		t.Fatalf("Track: %v", err)
 	}

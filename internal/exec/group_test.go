@@ -16,6 +16,19 @@ import (
 	"github.com/dhaam-ai/belay/internal/procgroup"
 )
 
+// recordsOf points procgroup's state directory at a temporary one for the
+// test, and returns where it keeps the records of the processes started for
+// the node execution whose evidence directory is evidence.
+func recordsOf(t *testing.T, evidence string) string {
+	t.Helper()
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	dir, err := procgroup.RecordDir(evidence)
+	if err != nil {
+		t.Fatalf("RecordDir(%s): %v", evidence, err)
+	}
+	return dir
+}
+
 // groupRecords returns the process-group records in dir, parsed. A record
 // being rewritten at that instant is skipped rather than failed on; the
 // callers poll.
@@ -64,9 +77,10 @@ func dirEntries(t *testing.T, dir string) []string {
 // find itself there. Once Run has returned the record is gone: the process
 // was reaped, and there is nothing left to chase.
 func TestRunRecordsTheProcessBeforeItStarts(t *testing.T) {
-	dir := filepath.Join(t.TempDir(), "nodes", "004-test")
+	evidence := filepath.Join(t.TempDir(), "nodes", "004-test")
+	dir := recordsOf(t, evidence)
 
-	res, err := quietRunner().Run(procgroup.WithDir(t.Context(), dir), Command{
+	res, err := quietRunner().Run(procgroup.WithDir(t.Context(), evidence), Command{
 		Path:     testExe(t),
 		Args:     []string{dir},
 		ExtraEnv: helperEnvFor("ls", ""),
@@ -86,8 +100,9 @@ func TestRunRecordsTheProcessBeforeItStarts(t *testing.T) {
 // names the group it leads and the start time procgroup.Reap will check, so
 // a resume after a kill -9 can find it and prove it is the one belay started.
 func TestRunRecordsTheRunningProcessGroup(t *testing.T) {
-	dir := filepath.Join(t.TempDir(), "nodes", "004-test")
-	ctx, cancel := context.WithCancel(procgroup.WithDir(t.Context(), dir))
+	evidence := filepath.Join(t.TempDir(), "nodes", "004-test")
+	dir := recordsOf(t, evidence)
+	ctx, cancel := context.WithCancel(procgroup.WithDir(t.Context(), evidence))
 	defer cancel()
 
 	done := make(chan error, 1)
@@ -139,13 +154,16 @@ func TestRunRecordsTheRunningProcessGroup(t *testing.T) {
 // TestRunRefusesAProcessItCannotRecord: a process belay could not record is
 // one it could not stop after a crash, so it is not started at all.
 func TestRunRefusesAProcessItCannotRecord(t *testing.T) {
+	// belay's state directory, where the records go, is under a file, so
+	// no record can be written.
 	blocker := filepath.Join(t.TempDir(), "a-file")
 	if err := os.WriteFile(blocker, nil, 0o600); err != nil {
 		t.Fatal(err)
 	}
+	t.Setenv("XDG_STATE_HOME", blocker)
 	pidDir := t.TempDir()
 
-	_, err := quietRunner().Run(procgroup.WithDir(t.Context(), filepath.Join(blocker, "004-test")), Command{
+	_, err := quietRunner().Run(procgroup.WithDir(t.Context(), filepath.Join(t.TempDir(), "nodes", "004-test")), Command{
 		Path:     testExe(t),
 		ExtraEnv: helperEnvFor("args", pidDir),
 	})
