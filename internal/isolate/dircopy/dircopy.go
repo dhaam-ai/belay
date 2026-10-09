@@ -35,10 +35,15 @@
 //
 //   - Create never follows a symlink out of the source tree. A repository
 //     containing "link -> /" copies a symlink, never the filesystem. By
-//     default a symlink whose target lexically escapes the new workspace is
-//     not recreated at all (see [SymlinkInternal]), because inside the copy
-//     it would be a ready-made write primitive pointing out of the sandbox
-//     for the agent that runs there.
+//     default every symlink left in the new workspace, followed through
+//     every link along its way, ends inside it (see [SymlinkInternal]); one
+//     that would lead out is not recreated, because inside the copy it would
+//     be a ready-made write primitive pointing out of the sandbox for the
+//     agent that runs there. That is a promise about where each link leads,
+//     not about every path: "up/../x", which follows a link to the
+//     workspace root and then climbs, leaves it through the root's real
+//     parent, as "../x" does. Code that confines a path to the workspace
+//     must resolve its links, as os.Root does.
 //
 //   - Create leaves nothing behind when it fails. A copy interrupted by a
 //     read error, a full disk or a cancelled context has its partial
@@ -297,10 +302,21 @@ const (
 	// "up -> ../../.." is a write primitive pointing out of the sandbox that
 	// the agent did not have to work for.
 	//
-	// Containment is decided lexically, from the link text and the link's own
-	// location in the copy, because the tree is still being built and the
-	// target may not exist yet. Since every preserved link is individually
-	// contained, no chain of them can leave the workspace either.
+	// Containment is decided twice. While the tree is being built, a link
+	// whose text, read from its own location in the copy, lands outside it
+	// is not recreated. That alone is not enough, because the text reads
+	// every name in it as a directory: "up -> ../../.." in a/b/c lands on the
+	// root, so "esc -> a/b/c/up/../../../.." reads as the root too, yet
+	// climbs four levels above it. So once the copy is built, every link it
+	// recreated is followed through every link along its way, the way the
+	// kernel follows it, and removed unless it ends inside the copy; a loop,
+	// which ends nowhere, is removed too. A link to something not there yet
+	// is kept when its text stays inside. Both kinds count in
+	// Stats.SkippedSymlinks.
+	//
+	// What this guarantees is where each link left in the copy leads. It
+	// does not make ".." after a link mean what it reads as: "up/../x"
+	// climbs out of the root up points at, as "../x" does from the root.
 	SymlinkInternal SymlinkPolicy = iota
 
 	// SymlinkPreserveAll recreates every symlink exactly as it appears in the
@@ -559,6 +575,9 @@ func (i *Isolator) copyInto(ctx context.Context, srcDir, dst string, start time.
 		return Stats{}, err
 	}
 	if err := c.run(ctx); err != nil {
+		return Stats{}, err
+	}
+	if err := c.confine(); err != nil {
 		return Stats{}, err
 	}
 	c.stats.Duration = time.Since(start)

@@ -609,6 +609,15 @@ that only `pkg/belay` carries a compatibility promise. Everything under
   `--json` output of `timeline`, `runs` and `queue list` keeps every string
   exactly as recorded, and now escapes the DEL and C1 controls that
   encoding/json left raw, so it is safe to print as well.
+- **A chain of symlinks can no longer lead out of a copy belay makes.** The
+  copy a queued goal, a fork or an in-place candidate works in left out any
+  symlink whose text pointed outside it, but judged each link's text alone.
+  So `a/b/c/up -> ../../..`, which lands on the copy's root, was kept, and
+  so was `esc -> a/b/c/up/../../../..`, which reads as the root too — yet
+  the system follows `up` first and then climbs four levels above the copy,
+  and in a queued goal's copy that is your own checkout. Once a copy is
+  built, belay now follows every link it recreated through every link along
+  the way and removes any that does not end inside the copy, loops included.
 
 ## v0.1.4 — 2026-09-17
 

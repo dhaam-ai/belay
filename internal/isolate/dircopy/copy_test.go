@@ -217,6 +217,59 @@ func TestCreateSymlinkPolicies(t *testing.T) {
 	}
 }
 
+// TestCreateDropsALinkThatLeavesThroughAnotherLink is the security review's
+// evidence. Each link below is contained when its text is read on its own,
+// which is all the copy used to check: "up" lands on the workspace root, and
+// "esc" names a/b/c/up/../../../.., which reads as the root too. But up is a
+// link, so the kernel climbs those four ".." from the root, not from a/b/c,
+// and esc led out of the copy -- in a queue goal's copy, straight into the
+// person's own checkout. "y" does the same through a link to a directory,
+// and "loop" can never be followed to an end at all.
+func TestCreateDropsALinkThatLeavesThroughAnotherLink(t *testing.T) {
+	src := mkdirAll(t, filepath.Join(t.TempDir(), "repo"))
+	writeFile(t, filepath.Join(src, "a", "b", "c", "keep.go"), "keep", 0o600)
+	symlink(t, filepath.Join("..", "..", ".."), filepath.Join(src, "a", "b", "c", "up"))
+	symlink(t, "a/b/c/up/../../../..", filepath.Join(src, "esc"))
+	symlink(t, "..", filepath.Join(src, "x", "root"))
+	symlink(t, "x/root/..", filepath.Join(src, "y"))
+	symlink(t, "loop2", filepath.Join(src, "loop1"))
+	symlink(t, "loop1", filepath.Join(src, "loop2"))
+	symlink(t, "a/b/c/keep.go", filepath.Join(src, "inside"))
+
+	iso := newIsolator(t)
+	dir := mustCreate(t, iso, src, "cand")
+
+	for _, rel := range []string{"esc", "y", "loop1", "loop2"} {
+		requireGone(t, filepath.Join(dir, rel), "a link that leads out of the copy, or nowhere, through another link")
+	}
+	for _, rel := range []string{"a/b/c/up", "x/root", "inside"} {
+		requireExists(t, filepath.Join(dir, rel), "a link that leads somewhere inside the copy")
+	}
+	stats, _ := iso.Stats("cand")
+	if stats.Symlinks != 3 || stats.SkippedSymlinks != 4 {
+		t.Errorf("Stats = %d links kept, %d skipped; want 3 and 4", stats.Symlinks, stats.SkippedSymlinks)
+	}
+
+	// The guarantee itself: every link left in the copy, followed through
+	// every link along its way, ends inside the copy.
+	root, err := filepath.EvalSymlinks(dir)
+	if err != nil {
+		t.Fatalf("resolve the copy: %v", err)
+	}
+	err = filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
+		if err != nil || d.Type()&fs.ModeSymlink == 0 {
+			return err
+		}
+		if to, err := filepath.EvalSymlinks(path); err == nil && to != root && !isAncestorOf(root, to) {
+			t.Errorf("%s leads out of the copy, to %s", path, to)
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("walk the copy: %v", err)
+	}
+}
+
 // TestCreatePreservesModes covers requirement five: an executable script
 // stays executable, permissions are never widened, and setuid and setgid are
 // left behind.
