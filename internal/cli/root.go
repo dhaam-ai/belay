@@ -157,8 +157,19 @@ func Execute() error {
 	if err == nil {
 		return nil
 	}
+	os.Exit(exitReport(rootCmd.ErrOrStderr(), err))
+	return nil
+}
 
-	out := rootCmd.ErrOrStderr()
+// exitReport writes what a command that failed has left to say to out, and
+// returns the exit status to end with.
+//
+// What it writes is made printable (termsafe.Text) like everything say and
+// note print, and for the same reason: the message is usually an error, and
+// an error quotes whatever it was about -- a file an agent named, a goal, a
+// line of a tool's output. It is the last line a person reads, so it is the
+// one a hidden line would be hidden above.
+func exitReport(out io.Writer, err error) int {
 	var exit *ExitError
 	if errors.As(err, &exit) {
 		// A command that already printed its explanation carries neither a
@@ -166,14 +177,14 @@ func Execute() error {
 		// exited with status 1" under a refusal a person has just read
 		// undoes the work of writing the refusal.
 		if msg := strings.TrimSpace(exit.said()); msg != "" {
-			_, _ = fmt.Fprintln(out, msg)
+			_, _ = fmt.Fprintln(out, termsafe.Text(msg))
 		}
-		os.Exit(exit.Code)
+		return exit.Code
 	}
 
-	_, _ = fmt.Fprintf(out, "belay: %s\nRun \"belay --help\" to see the commands and flags belay accepts.\n", err)
-	os.Exit(graph.ExitFailed)
-	return nil
+	_, _ = fmt.Fprintf(out, "belay: %s\nRun \"belay --help\" to see the commands and flags belay accepts.\n",
+		termsafe.Text(err.Error()))
+	return graph.ExitFailed
 }
 
 // ui is one command invocation's output surface: the two streams it writes to

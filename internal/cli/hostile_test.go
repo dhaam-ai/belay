@@ -9,6 +9,7 @@ import (
 	"unicode"
 	"unicode/utf8"
 
+	"github.com/dhaam-ai/belay/internal/graph"
 	"github.com/dhaam-ai/belay/internal/state"
 )
 
@@ -145,5 +146,24 @@ func TestTheDryRunCeilingKeepsItsEmphasis(t *testing.T) {
 	}
 	if strings.Contains(strings.NewReplacer("\x1b[1m", "", "\x1b[0m", "").Replace(got), "\x1b") {
 		t.Errorf("the dry run carries an escape that is not belay's emphasis:\n%q", got)
+	}
+}
+
+// TestTheLastWordIsPrintable: the error a command ends with is printed by
+// Execute, after everything else, and is the line a person reads last. A
+// node's error quoting a file an agent named -- the review's policy scan
+// error -- reached `belay run`'s stderr as it was.
+func TestTheLastWordIsPrintable(t *testing.T) {
+	for _, err := range []error{
+		&ExitError{Code: graph.ExitFailed, Err: errors.New(`graph: node failed: "policy" returned an error: ` + hostileNote)},
+		&ExitError{Code: graph.ExitFailed, Message: "belay: " + hostileNote},
+		fmt.Errorf("unknown command %q for %q", hostile, "belay"),
+	} {
+		var out bytes.Buffer
+		exitReport(&out, err)
+		assertTerminalSafe(t, "the last word", out.String())
+		if !strings.Contains(out.String(), hostileShown) && !strings.Contains(out.String(), `\x1b`) {
+			t.Errorf("the last word does not show what was there: %q", out.String())
+		}
 	}
 }
