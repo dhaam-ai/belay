@@ -357,8 +357,8 @@ func (s *Spec) noteGiveUp() {
 		return
 	}
 	s.Config.Graph.GiveUp = used + 1
-	s.note("%s had used all %d of the fix loop's rounds, so it gave up without calling the agent; the fork gives "+
-		"it one more: graph.give_up is %d for the fork", s.label(), used, s.Config.Graph.GiveUp)
+	s.note("%s found every round of the fix loop used (%d), so it gave up without calling the agent; the fork "+
+		"gives it one more: graph.give_up is %d for the fork", s.label(), used, s.Config.Graph.GiveUp)
 }
 
 // label names the visit the way `belay timeline` does: "fix #2".
