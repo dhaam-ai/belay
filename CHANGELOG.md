@@ -368,6 +368,12 @@ that only `pkg/belay` carries a compatibility promise. Everything under
   `belay queue add` and `queue start` blamed `belay.yaml` for it. The queue no
   longer reads `graph.approval`: the gate stops every goal except one added
   with `--no-approval`.
+- **The command belay prints to remake a deleted run worktree works.** A
+  branch run whose worktree directory was deleted is refused with the git
+  command that makes it again, and git refused that command: the worktree
+  was still registered, and git takes the path back only with `worktree add
+  -f`. belay now prints `-f` when git still has the worktree registered, a
+  plain `worktree add` when it does not, and quotes the paths.
 - **A repair's file list is checked against the disk, not taken on trust.**
   The fix step routed straight back to the tests, so a repair was the one
   change in a run that nothing verified: no claimed path was proven to be a

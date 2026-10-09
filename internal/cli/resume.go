@@ -340,6 +340,14 @@ func pinnedOutputReason(out state.Output) string {
 // been called and paid for. Every refusal names the commands that get a
 // person somewhere: the directory, the branch that still holds the work, and
 // how to make the worktree again.
+//
+// That last command has to work as printed. A worktree whose directory was
+// deleted is still registered with git, which refuses a plain `worktree add`
+// of its path ("is a missing but already registered worktree"); `add -f`
+// takes it back. -f is printed only then: for a worktree git no longer knows,
+// a plain add works, and -f would also check the run's branch out a second
+// time if somebody had checked it out elsewhere since. Paths are quoted, as
+// every command belay writes out is, because a person pastes it.
 func (p *runPlan) bindRunWorkTree(ctx context.Context, out state.Output) {
 	repo, err := git.Open(ctx, exec.New(p.logger), out.Repo)
 	if err != nil {
@@ -361,10 +369,12 @@ func (p *runPlan) bindRunWorkTree(ctx context.Context, out state.Output) {
 		)
 		return
 	}
+	registered := false
 	for _, w := range list {
 		if w.Path != resolveWorkTreePath(out.WorkTree) {
 			continue
 		}
+		registered = true
 		switch {
 		case w.Prunable, !isDir(out.WorkTree):
 			// Registered but not there: someone deleted the directory. git
@@ -374,7 +384,7 @@ func (p *runPlan) bindRunWorkTree(ctx context.Context, out state.Output) {
 			p.block(
 				fmt.Sprintf("this run's worktree %s is on %s, not on the run's own branch %s.",
 					out.WorkTree, orDetached(w.Branch), out.Branch),
-				fmt.Sprintf("put it back with `git -C %s switch %s`, then resume", out.WorkTree, out.Branch),
+				fmt.Sprintf("put it back with `git -C %s switch %s`, then resume", shellQuote(out.WorkTree), shellQuote(out.Branch)),
 			)
 			return
 		default:
@@ -382,12 +392,16 @@ func (p *runPlan) bindRunWorkTree(ctx context.Context, out state.Output) {
 		}
 		break
 	}
+	add := "worktree add"
+	if registered {
+		add = "worktree add -f"
+	}
 	p.block(
 		fmt.Sprintf("this run works in its own git worktree at %s, and that worktree is gone. "+
 			"Everything it committed is still on the branch %s.", out.WorkTree, out.Branch),
-		fmt.Sprintf("make it again with `git -C %s worktree add %s %s`, then resume; "+
+		fmt.Sprintf("make it again with `git -C %s %s %s %s`, then resume; "+
 			"or start a fresh run and take what you need from %s",
-			out.Repo, out.WorkTree, out.Branch, out.Branch),
+			shellQuote(out.Repo), add, shellQuote(out.WorkTree), shellQuote(out.Branch), out.Branch),
 	)
 }
 

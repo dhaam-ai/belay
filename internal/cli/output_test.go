@@ -1004,3 +1004,102 @@ func TestAResumeJudgesThePinNotWhatBelayYamlWouldStartNow(t *testing.T) {
 		})
 	}
 }
+
+// runPrinted runs a command belay printed for a person to paste, through a
+// shell, as they would, with git kept away from the machine's own settings.
+func runPrinted(t *testing.T, command string) {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(t.Context(), time.Minute)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, "sh", "-c", command)
+	cmd.Env = append(os.Environ(), "GIT_CONFIG_GLOBAL=/dev/null", "GIT_CONFIG_SYSTEM=/dev/null", "GIT_TERMINAL_PROMPT=0")
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("the command belay printed failed: %v\n$ %s\n%s", err, command, out)
+	}
+}
+
+// TestTheCommandThatRemakesAMissingWorktreeWorks: a branch run whose worktree
+// is gone is refused before anything is spent, with the command that makes
+// the worktree again. That command has to work as printed. When the
+// directory was deleted, git still has the worktree registered and refuses a
+// plain `worktree add` ("is a missing but already registered worktree");
+// only `worktree add -f` takes the path back. When the registration was
+// pruned as well, a plain add works, and -f is not printed: it would also
+// check the branch out a second time if it were checked out somewhere else.
+// Either way, the printed command is run as printed, and then the run
+// resumes, in its worktree.
+func TestTheCommandThatRemakesAMissingWorktreeWorks(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		pruned bool
+		force  bool
+	}{
+		{name: "the directory was deleted and git still has it registered", force: true},
+		{name: "the directory was deleted and git pruned it", pruned: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := gitWorkspace(t)
+			plan, err := resolve(resolveRequest{workspace: dir, logger: quietLogger(), context: t.Context()})
+			if err != nil {
+				t.Fatalf("resolve: %v", err)
+			}
+			const runID = "20260101T000000Z-c0ffee000002"
+			store, err := createRun(t.Context(), plan, runSpec{Workspace: dir, RunID: runID, Goal: "add a --json flag"})
+			if err != nil {
+				t.Fatalf("createRun: %v", err)
+			}
+			layout := store.Layout()
+			if err := os.RemoveAll(layout.WorkTreeDir()); err != nil {
+				t.Fatalf("remove the run worktree: %v", err)
+			}
+			if tc.pruned {
+				gitIn(t, dir, "worktree", "prune")
+			}
+
+			refused, err := resolve(resolveRequest{workspace: dir, logger: quietLogger(), context: t.Context()})
+			if err != nil {
+				t.Fatalf("resolve: %v", err)
+			}
+			if err := refused.resumePreflight(t.Context(), state.NewStore(layout)); err != nil {
+				t.Fatalf("resumePreflight: %v", err)
+			}
+			fix := blockerText(refused)
+			start := strings.Index(fix, "`git -C ")
+			if start < 0 {
+				t.Fatalf("the refusal prints no git command to make the worktree again:\n%s", fix)
+			}
+			command := fix[start+1:]
+			command = command[:strings.Index(command, "`")]
+			if got := strings.Contains(command, " add -f "); got != tc.force {
+				t.Errorf("the printed command %q uses -f = %v, want %v", command, got, tc.force)
+			}
+			runPrinted(t, command)
+
+			resumed, err := resolve(resolveRequest{workspace: dir, logger: quietLogger(), context: t.Context()})
+			if err != nil {
+				t.Fatalf("resolve: %v", err)
+			}
+			work, err := resumed.openRun(t.Context(), layout)
+			if err != nil {
+				t.Fatalf("openRun: %v", err)
+			}
+			if len(resumed.blockers) > 0 {
+				t.Fatalf("the resume after running the printed command was refused: %s", blockerText(resumed))
+			}
+			var where string
+			registry := graph.NewRegistry()
+			registry.MustRegister(writesAFile{name: graph.NodePlan, rel: "proof.txt", body: "here\n", next: graph.End, where: &where})
+			resumed.registry = registry
+			view, err := dispatchOnce(t.Context(), resumed, work, true)
+			if err != nil || view.outcome.Status != state.RunStatusCompleted {
+				t.Fatalf("the resume: %v, %v %q; want it completed", err, view.outcome.Status, view.outcome.Note)
+			}
+			if where != layout.WorkTreeDir() {
+				t.Errorf("the resumed run worked in %s, want its remade worktree %s", where, layout.WorkTreeDir())
+			}
+			if _, err := os.Stat(filepath.Join(layout.WorkTreeDir(), "proof.txt")); err != nil {
+				t.Errorf("the resumed run's file is not in its worktree: %v", err)
+			}
+		})
+	}
+}
