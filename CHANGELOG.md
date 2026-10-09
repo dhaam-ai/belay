@@ -350,6 +350,12 @@ that only `pkg/belay` carries a compatibility promise. Everything under
   `belay.yaml` set `dircopy` as earlier docs advised could not start a run at
   all; both refusals now apply only to a run that fans out, and a resume
   judges them against the output and fanout the run was started with.
+- **`belay queue` says where a fanout goal's change is.** A queued goal whose
+  run fans out leaves its copy as it was claimed: the change is in the
+  winning candidate's own workspace, under the run's `candidates/`, because
+  belay does not merge a run that edits in place. The queue said the goal
+  "finished in its copy" and to take what you want from there, which found
+  nothing. It now names the winner and its workspace.
 - **A repair's file list is checked against the disk, not taken on trust.**
   The fix step routed straight back to the tests, so a repair was the one
   change in a run that nothing verified: no claimed path was proven to be a

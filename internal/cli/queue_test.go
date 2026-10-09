@@ -956,3 +956,67 @@ func TestAQueueCopyResumesWhateverOutputModeSays(t *testing.T) {
 		}
 	}
 }
+
+// settlesAFanout stands in for a fanout run's whole walk: it records the
+// candidates and the winner the way join leaves them, and ends the run.
+type settlesAFanout struct{ winner string }
+
+func (settlesAFanout) Name() string { return graph.NodePlan }
+
+func (n settlesAFanout) Run(_ context.Context, rc *graph.RunContext) (graph.Result, error) {
+	candidates := []state.Candidate{
+		{ID: "cand-01", Dir: filepath.Join(rc.Workspace, "candidate one"), TestPassed: true, IssueCount: 3},
+		{ID: "cand-02", Dir: filepath.Join(rc.Workspace, "candidate two"), TestPassed: true},
+	}
+	winner := n.winner
+	return graph.Result{Status: journal.StatusOK, Next: graph.End, Note: "cand-02 wins",
+		Patch: state.Patch{Candidates: &candidates, Winner: &winner}}, nil
+}
+
+// TestAFinishedFanoutGoalSaysWhereItsChangeIs: a goal whose run fans out
+// leaves its copy as it was claimed. The change is in the winning
+// candidate's own workspace, because belay does not merge a run that edits
+// in place, and the queue edits every goal in place. Saying "it finished in
+// its copy; take what you want from it" sent a person to a copy with nothing
+// in it. Both the start and the status name the winner and its workspace.
+func TestAFinishedFanoutGoalSaysWhereItsChangeIs(t *testing.T) {
+	ws := goWorkspace(t)
+	writeConfig(t, ws, fanoutConfig)
+	queueAdd(t, ws, "--no-approval", "add docs")
+	settles := func() *graph.Registry {
+		r := graph.NewRegistry()
+		r.MustRegister(settlesAFanout{winner: "cand-02"})
+		return r
+	}
+	out, err := startQueue(t.Context(), t, ws, settles)
+	if err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	done := goal(t, ws, 1)
+	if done.State != queue.StateFinished {
+		t.Fatalf("goal 1 = %+v, want this test's premise: finished", done)
+	}
+	man, err := state.LoadManifest(runLayout(t, done).ManifestPath())
+	if err != nil || man.Fanout == nil {
+		t.Fatalf("goal 1's run fanout pin = %+v (%v), want this test's premise: a run that fans out", man.Fanout, err)
+	}
+	status, _, err := runCLI(t, "queue", "status", "--workspace", ws)
+	if err != nil {
+		t.Fatalf("belay queue status: %v", err)
+	}
+	t.Logf("verbatim status:\n%s", status)
+
+	winnerDir := filepath.Join(done.Dir, "candidate two")
+	for name, text := range map[string]string{"the start": out, "the status": status} {
+		for _, phrase := range []string{"cand-02", winnerDir} {
+			if !strings.Contains(text, phrase) {
+				t.Errorf("%s never says %q, where the goal's change is:\n%s", name, phrase, text)
+			}
+		}
+		for _, phrase := range []string{"finished, in its copy", "finished in its copy", filepath.Join(done.Dir, "candidate one")} {
+			if strings.Contains(text, phrase) {
+				t.Errorf("%s says %q, which is not where the goal's change is:\n%s", name, phrase, text)
+			}
+		}
+	}
+}

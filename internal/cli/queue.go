@@ -558,9 +558,11 @@ func queueNextSteps(q queue.Queue, active bool, pid int) []string {
 		case queue.StateFailed, queue.StateStopped:
 			lines = append(lines, fmt.Sprintf("see what happened to goal %d:  %s", e.ID, timeline))
 		case queue.StateFinished:
-			lines = append(lines,
-				fmt.Sprintf("goal %d finished in its copy, %s; take what you want from it by hand", e.ID, e.Dir),
-				fmt.Sprintf("  see what it did:  %s", timeline))
+			finished := fmt.Sprintf("goal %d finished in its copy, %s; take what you want from it by hand", e.ID, e.Dir)
+			if where, fanned := winnerWorkspace(e); fanned {
+				finished = fmt.Sprintf("goal %d finished; its change is %s; take what you want from it by hand", e.ID, where)
+			}
+			lines = append(lines, finished, fmt.Sprintf("  see what it did:  %s", timeline))
 		}
 	}
 	if len(runnable(q)) > 0 {
@@ -571,6 +573,41 @@ func queueNextSteps(q queue.Queue, active bool, pid int) []string {
 		}
 	}
 	return lines
+}
+
+// winnerWorkspace says where a finished goal's change is when its run fanned
+// out, and reports whether it did.
+//
+// A goal's copy is where its change is, except when its run fans out. Then
+// the copy is as it was claimed: each candidate worked in a workspace of its
+// own, under the run's candidates directory, and belay does not merge a run
+// that edits in place -- which every queued goal's run does -- so the change
+// stayed in the winner's. A person sent to the copy to take the change by
+// hand would find nothing there. The answer is read from the goal's run, its
+// manifest's fanout pin and its blackboard's winner, as completedFanoutSteps
+// reads them for a run started by hand.
+func winnerWorkspace(e queue.Entry) (string, bool) {
+	man, ok := goalManifest(e)
+	if !ok || man.Fanout == nil {
+		return "", false
+	}
+	layout, err := state.NewLayout(e.Dir, e.RunID)
+	if err != nil {
+		return "", false
+	}
+	st, err := state.LoadState(layout.StatePath())
+	if err != nil || st.Winner == "" {
+		// A finished fanout always has a winner: join fails a run with
+		// none. Not finding one, belay says where to look, not what to guess.
+		return "in its winning candidate's own workspace, which belay timeline names", true
+	}
+	winner := state.Candidate{ID: st.Winner}
+	for _, c := range st.Candidates {
+		if c.ID == st.Winner {
+			winner = c
+		}
+	}
+	return fmt.Sprintf("in the workspace of %s, the candidate that won: %s", winner.ID, dirOrUnrecorded(winner.Dir)), true
 }
 
 // runnable lists the goals a start would run, in the order it runs them: the
@@ -882,9 +919,10 @@ type queueDriver struct {
 	source     string
 	configPath string
 	cassette   string
-	// adjust, when set, changes each goal's plan once it is resolved. Tests
-	// use it to give a goal's run a graph of fake nodes; nothing else sets
-	// it.
+	// adjust, when set, changes each goal's plan once it is final: resolved,
+	// and for a run being driven, bound to the run's pins, which rebuilds
+	// its registry. Tests use it to give a goal's run a graph of fake nodes;
+	// nothing else sets it.
 	adjust func(*runPlan)
 }
 
@@ -912,11 +950,15 @@ func (d *queueDriver) plan(ctx context.Context, e queue.Entry) (*runPlan, error)
 	if err != nil {
 		return nil, err
 	}
+	plan.goal = e.Goal
+	return plan, nil
+}
+
+// adjusted applies the test seam adjust to a goal's final plan.
+func (d *queueDriver) adjusted(plan *runPlan) {
 	if d.adjust != nil {
 		d.adjust(plan)
 	}
-	plan.goal = e.Goal
-	return plan, nil
 }
 
 // Observe implements queue.Driver.
@@ -949,6 +991,7 @@ func (d *queueDriver) Create(ctx context.Context, e queue.Entry) error {
 	if err != nil {
 		return err
 	}
+	d.adjusted(plan)
 	if err := blocked(plan); err != nil {
 		return err
 	}
@@ -980,6 +1023,7 @@ func (d *queueDriver) Drive(ctx context.Context, e queue.Entry) (queue.Outcome, 
 	if err != nil {
 		return queue.Outcome{}, err
 	}
+	d.adjusted(plan)
 	if err := blocked(plan); err != nil {
 		return queue.Outcome{}, err
 	}
@@ -1057,6 +1101,10 @@ func (d *queueDriver) sayOutcome(e queue.Entry, out queue.Outcome) {
 		d.u.say("goal %d is waiting for you to approve its plan; %s", e.ID, out.Note)
 		d.u.say("  the queue moves on; approve it later with:  belay queue approve %d", e.ID)
 	case out.State == queue.StateFinished:
+		if where, fanned := winnerWorkspace(e); fanned {
+			d.u.say("goal %d finished; its change is %s", e.ID, where)
+			return
+		}
 		d.u.say("goal %d finished, in its copy %s", e.ID, e.Dir)
 	case out.State == queue.StatePaused:
 		d.u.say("goal %d stopped at one of belay's limits: %s", e.ID, out.Note)
