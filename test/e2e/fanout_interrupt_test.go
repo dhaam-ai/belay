@@ -218,6 +218,7 @@ func TestFanoutKillRightAfterACandidateRunStartsConverges(t *testing.T) {
 	if !found {
 		t.Fatalf("cand-03's journal %q has no complete record", body)
 	}
+	//nolint:gosec // a path this test's own run made, under its own temp directory
 	if err := os.WriteFile(path, append(first, '\n'), 0o600); err != nil {
 		t.Fatalf("rewrite cand-03's journal: %v", err)
 	}

@@ -2913,7 +2913,7 @@ type reportingSupervisor struct {
 	seen    []float64
 }
 
-func (*reportingSupervisor) Name() string           { return graph.NodeFanout }
+func (*reportingSupervisor) Name() string          { return graph.NodeFanout }
 func (*reportingSupervisor) SupervisesCandidates() {}
 
 func (s *reportingSupervisor) Run(_ context.Context, rc *graph.RunContext) (graph.Result, error) {
