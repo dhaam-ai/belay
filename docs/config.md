@@ -117,8 +117,14 @@ The values are model identifiers, passed to the backend exactly as
 `agent.model` is, so the same aliases and full names work. Every one of them
 is checked against the backend before a run starts, not only `agent.model`:
 `belay run --dry-run` prints one row per node with the model it would use and
-that model's list rate, and a model the backend cannot price or run stops the
-run there, before anything is spent. The rate is per million tokens, and belay
+that model's list rate, and a model the backend refuses stops the run there,
+before anything is spent. The Claude Code backend refuses none: a model its
+price table does not list, such as a dated identifier, an alias like
+`sonnet[1m]` or `opusplan` it cannot resolve, or one released after this
+version of belay, is priced at the highest rate belay knows, so the budget
+ceiling errs towards stopping a run early, and belay warns once naming the
+model. The CLI normally reports each call's cost itself; the table is only
+used when it does not. The rate is per million tokens, and belay
 states no total, because it cannot know how many tokens your goal will take
 and a confident wrong figure is worse than none.
 

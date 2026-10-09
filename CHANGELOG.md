@@ -304,6 +304,15 @@ that only `pkg/belay` carries a compatibility promise. Everything under
 
 ### Fixed
 
+- **belay starts on a Claude model its price table does not list.** It
+  refused, before spending anything, any model outside the table it ships
+  with: `claude-sonnet-4-5`, `claude-opus-4-1`, a dated identifier such as
+  `claude-haiku-4-5-20251001`, and the aliases `sonnet[1m]` and `opusplan`.
+  Dated identifiers and those aliases are now priced as the model they name.
+  Any other model is priced at the most expensive rate belay knows, marked as
+  an estimate, with a warning naming it, so the budget ceiling still holds
+  and errs towards stopping early. The table is only used when the CLI does
+  not report a call's cost itself.
 - **`fanout.select: fastest` no longer depends on how a run was
   interrupted.** A candidate's time counted a step a Ctrl-C cut short but not
   one a crash cut short, so the same work could win or lose depending on

@@ -28,7 +28,9 @@
 // Usage.USD and stops a run when it crosses the configured ceiling. The CLI
 // reports total_cost_usd, and when a future version does not, this package
 // prices the reported tokens from a static table and sets Usage.Estimated.
-// The guard's precision degrades; the guard itself never silently vanishes.
+// A model the table does not list is priced at the highest rate it holds,
+// with a warning, rather than refused. The guard's precision degrades; the
+// guard itself never silently vanishes.
 // Note that the CLI's own figure is a client-side estimate of the bill rather
 // than authoritative billing data:
 // https://code.claude.com/docs/en/agent-sdk/cost-tracking
@@ -262,8 +264,6 @@ func (b *Backend) prices() map[string]Price {
 //     when it ran and failed,
 //   - *ParseError (errors.Is ErrUnparsableOutput) when its stdout was not the
 //     promised JSON object,
-//   - *PriceError (errors.Is ErrUnknownModel) when a cost had to be estimated
-//     and no price entry matched,
 //   - ctx.Err() when the caller's context was cancelled,
 //   - nil on success.
 //
@@ -297,9 +297,10 @@ func (b *Backend) respond(ctx context.Context, req belay.AgentRequest, res exec.
 		return belay.AgentResponse{}, err
 	}
 
-	usage, err := usageOf(parsed, req.Model, b.prices())
-	if err != nil {
-		return belay.AgentResponse{}, err
+	usage, unpriced := usageOf(parsed, req.Model, b.prices())
+	for _, model := range unpriced {
+		p, _ := resolvePrice(b.prices(), model)
+		warnUnpriced(b.logger(), model, p)
 	}
 
 	out := belay.AgentResponse{

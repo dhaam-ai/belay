@@ -29,6 +29,8 @@ Only the nodes that ask a backend for a model may be keyed: `plan`, `code` and `
 
 The model **and its price** are the backend's knowledge, not belay's, so both come from behind the `AgentBackend` contract. Every model a run would use is priced before the run starts, walking the route rather than the `agent.models` map: a model routed to a node this run never reaches costs nothing, and refusing to start over it would be belay enforcing a rule about a step that is not going to happen. A backend that declines to say — a replayed run, which spends nothing — has not refused the model, and does not block.
 
+*Amended 2026-10-09:* the Claude Code backend no longer refuses a model its price table does not list. The table is a snapshot, and refusing put every CLI release with a new model, every dated identifier and the aliases `sonnet[1m]` and `opusplan` out of reach. Such a model is priced at the highest rate the table holds, marked estimated, with a warning naming it, which keeps the ceiling at the safe end; alias shapes resolve to the entry they name. The blocker above still stops a run whose backend does refuse a model.
+
 ### Policy is pinned
 
 `policy.*` is read once, when the run is created, and recorded in the run's `manifest.json` together with a survey of what the workspace declared at that moment. Every later call for that run, including the one a resume makes days later, uses the pin. `state.Manifest.SetPolicy` is the only way to write it, because the field and the capability an older belay would have to refuse are one decision (ADR-0011); the capability is `policy.gate`.

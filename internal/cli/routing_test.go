@@ -72,27 +72,31 @@ func TestDryRunStatesRatesAndInventsNoTotal(t *testing.T) {
 	}
 }
 
-// A model the backend cannot run is worth catching before the run spends
-// anything, and the refusal has to name the setting that holds it: after
-// routing there are four places a model can come from, and "the model is
-// wrong" would leave a person searching their belay.yaml for which one.
-func TestAModelTheBackendCannotPriceStopsTheRunBeforeItSpends(t *testing.T) {
+// A model outside the claude backend's price table does not stop a run.
+// belay refused to start on one, and a CLI upgrade, a dated identifier or an
+// alias such as sonnet[1m] or opusplan was enough to cause that. The backend
+// now prices such a model at the highest rate it knows, so the dry run states
+// that rate, never a zero, and the run is held to its ceiling at the safe end
+// (internal/agent/claude's resolvePrice argues it). The blocker blockModel
+// raises is still there for a backend that refuses a model; this backend no
+// longer does.
+func TestAModelOutsideThePriceTableIsShownAtTheHighestKnownRate(t *testing.T) {
 	t.Setenv(anthropicKeyEnv, "sk-ant-test")
 
 	tests := []struct {
 		name   string
 		config string
-		want   []string
+		want   string
 	}{
 		{
 			name:   "a routed node's model",
 			config: "version: 1\nagent:\n  model: sonnet\n  models:\n    code: claude-unobtainium-9\n",
-			want:   []string{"agent.models.code", "claude-unobtainium-9"},
+			want:   "code claude-unobtainium-9 $10.00 in / $50.00 out per million tokens",
 		},
 		{
 			name:   "the fallback model every other node uses",
 			config: "version: 1\nagent:\n  model: claude-unobtainium-9\n",
-			want:   []string{"agent.model", "claude-unobtainium-9"},
+			want:   "plan claude-unobtainium-9 $10.00 in / $50.00 out per million tokens",
 		},
 	}
 	for _, tt := range tests {
@@ -101,28 +105,19 @@ func TestAModelTheBackendCannotPriceStopsTheRunBeforeItSpends(t *testing.T) {
 			writeConfig(t, ws, tt.config)
 
 			out, _, err := runCLI(t, "run", "--dry-run", "--workspace", ws, "add tests")
-			if err == nil {
-				t.Fatalf("belay run --dry-run accepted a model it cannot price:\n%s", out)
+			if err != nil {
+				t.Fatalf("belay run --dry-run refused a model outside the price table: %v\n%s", err, out)
 			}
-			for _, want := range append(tt.want, "belay would refuse to start this run", "nothing was spent") {
-				if !strings.Contains(strings.ToLower(out), strings.ToLower(want)) {
-					t.Errorf("the refusal never says %q; got:\n%s", want, out)
-				}
+			if !strings.Contains(out, tt.want) {
+				t.Errorf("the dry run does not show the highest known rate for the model (%q):\n%s", tt.want, out)
 			}
 		})
 	}
 }
 
-// The same refusal must happen on the way into a real run, not only in the
-// dry run: a person who never types --dry-run must not be the one who finds
-// out, halfway through, that a model does not exist.
-//
-// It is asserted at the resolve seam rather than by running belay, because
-// both paths read the same blockers -- startRun refuses on them before it
-// creates a run -- and because a test that really started a run to prove the
-// refusal would call the backend on the day the refusal is broken, which is
-// the one day it must not.
-func TestResolveBlocksAModelItCannotPriceBeforeAnythingIsCreated(t *testing.T) {
+// resolve no longer blocks a model outside the price table, and the rate it
+// records for that node is the highest the backend knows, not a zero.
+func TestResolvePricesAModelOutsideTheTableAtTheHighestKnownRate(t *testing.T) {
 	ws := goWorkspace(t)
 	writeConfig(t, ws, "version: 1\nagent:\n  model: sonnet\n  models:\n    fix: claude-unobtainium-9\n")
 
@@ -130,17 +125,22 @@ func TestResolveBlocksAModelItCannotPriceBeforeAnythingIsCreated(t *testing.T) {
 	if err != nil {
 		t.Fatalf("resolve: %v", err)
 	}
-	var found bool
 	for _, b := range p.blockers {
-		if strings.Contains(b.problem, "agent.models.fix") && strings.Contains(b.problem, "claude-unobtainium-9") {
+		if strings.Contains(b.problem, "claude-unobtainium-9") {
+			t.Errorf("resolve blocked a model outside the price table: %+v", b)
+		}
+	}
+	var found bool
+	for _, m := range p.models {
+		if m.node == "fix" {
 			found = true
-			if b.fix == "" {
-				t.Error("the blocker says what is wrong but not what to do about it")
+			if !m.priced || m.rate.Input != 10 || m.rate.Output != 50 {
+				t.Errorf("fix's model is recorded as %+v, want priced at $10 in and $50 out", m)
 			}
 		}
 	}
 	if !found {
-		t.Errorf("no blocker names agent.models.fix and the model it holds; got %+v", p.blockers)
+		t.Errorf("no model is recorded for fix; got %+v", p.models)
 	}
 }
 
