@@ -924,7 +924,7 @@ type nodeModel struct {
 func (p *runPlan) resolveModels() {
 	pricer, _ := p.agent.(belay.ModelPricer)
 	routable := config.RoutableNodes()
-	blocked := map[string]bool{}
+	blocked, assumed := map[string]bool{}, map[string]bool{}
 
 	// A fanout run's own walk calls one model, the plan's; its candidates
 	// call the rest, once each. Walking only the run's route would wave a
@@ -943,6 +943,10 @@ func (p *runPlan) resolveModels() {
 			// backend prices nothing.
 		case err == nil:
 			entry.rate, entry.priced = rate, true
+			if rate.Assumed && !assumed[entry.model] {
+				assumed[entry.model] = true
+				p.warnAssumedRate(entry.model, rate)
+			}
 		case errors.Is(err, belay.ErrUnsupported):
 			p.modelNote = "this run answers from a recording, so it calls no model and spends nothing"
 		default:
@@ -954,6 +958,23 @@ func (p *runPlan) resolveModels() {
 		}
 		p.models = append(p.models, entry)
 	}
+}
+
+// warnAssumedRate tells the person, once per model, that the rate a model is
+// charged at is a stand-in: the backend has no price of its own for it and
+// answered with the highest rate it knows (belay.ModelRate.Assumed).
+//
+// It is a plan warning, so it is said before anything is spent and without
+// --verbose: in the dry run's "worth knowing", and before a dispatch where
+// every warning is said. The backend says the same once per process, but to
+// its log, which only --verbose shows, so a run spending against a guessed
+// rate said so to nobody. It is a warning and not a blocker for the reason
+// the backend gives (internal/agent/claude's resolvePrice): the stand-in
+// holds the ceiling at the safe end.
+func (p *runPlan) warnAssumedRate(model string, rate belay.ModelRate) {
+	p.warn("belay has no price for the model %q, so wherever it has to price a step itself it charges the "+
+		"highest rate it knows, %s in / %s out per million tokens. That keeps budget.max_usd safe; adding the "+
+		"model to belay's price table gives the exact figure.", model, dollars(rate.Input), dollars(rate.Output))
 }
 
 // listPrice asks pricer about model, tolerating a nil pricer so that

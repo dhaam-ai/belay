@@ -163,3 +163,49 @@ func TestAReplayedRunIsNotRefusedForHavingNoRates(t *testing.T) {
 		t.Errorf("the dry run does not say why it shows no rates:\n%s", out)
 	}
 }
+
+// TestAnAssumedRateIsMarkedAndSaidOnceWithoutVerbose: the rate shown for a
+// model outside the price table is the highest belay knows, standing in for
+// a price belay does not have, so the dry run marks it as assumed rather than
+// showing it as that model's list price. And the person is told once, without
+// --verbose: the backend's own warning about it goes to the verbose log
+// alone, so a run spending against a stand-in rate said so to nobody.
+func TestAnAssumedRateIsMarkedAndSaidOnceWithoutVerbose(t *testing.T) {
+	t.Setenv(anthropicKeyEnv, "sk-ant-test")
+	ws := goWorkspace(t)
+	// The unpriced model is the fallback, so plan, code and fix all use it:
+	// three rows marked, one warning.
+	writeConfig(t, ws, "version: 1\nagent:\n  model: claude-unobtainium-9\n  models:\n    plan: sonnet\n")
+
+	out, _, err := runCLI(t, "run", "--dry-run", "--workspace", ws, "add tests")
+	if err != nil {
+		t.Fatalf("belay run --dry-run: %v\n%s", err, out)
+	}
+	for _, want := range []string{
+		"code claude-unobtainium-9 $10.00 in / $50.00 out per million tokens (assumed)",
+		"fix  claude-unobtainium-9 $10.00 in / $50.00 out per million tokens (assumed)",
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("the dry run does not mark the stand-in rate as assumed (%q):\n%s", want, out)
+		}
+	}
+	for _, line := range strings.Split(out, "\n") {
+		if strings.Contains(line, "sonnet") && strings.Contains(line, "(assumed)") {
+			t.Errorf("a model belay has a price for is marked as assumed: %q", line)
+		}
+	}
+	const said = `belay has no price for the model "claude-unobtainium-9"`
+	if n := strings.Count(out, said); n != 1 {
+		t.Errorf("the dry run says %q %d times, want once:\n%s", said, n, out)
+	}
+
+	// A real run says it where every warning before a dispatch is said, and
+	// not only with --verbose.
+	p, err := resolve(resolveRequest{workspace: ws, logger: quietLogger()})
+	if err != nil {
+		t.Fatalf("resolve: %v", err)
+	}
+	if n := strings.Count(strings.Join(p.warnings, "\n"), said); n != 1 {
+		t.Errorf("the plan's warnings say %q %d times, want once: %q", said, n, p.warnings)
+	}
+}

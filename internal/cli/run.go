@@ -1404,6 +1404,11 @@ func dryRunModels(plan *runPlan) dryRunSection {
 		case m.priced:
 			priced = true
 			row += fmt.Sprintf(" %s in / %s out per million tokens", dollars(m.rate.Input), dollars(m.rate.Output))
+			// A stand-in for a price the backend does not have, which
+			// warnAssumedRate explains once, below.
+			if m.rate.Assumed {
+				row += " (assumed)"
+			}
 		case m.note != "":
 			row += " " + m.note
 		}

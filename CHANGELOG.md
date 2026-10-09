@@ -369,7 +369,8 @@ that only `pkg/belay` carries a compatibility promise. Everything under
   Any other model is priced at the most expensive rate belay knows, marked as
   an estimate, with a warning naming it, so the budget ceiling still holds
   and errs towards stopping early. The table is only used when the CLI does
-  not report a call's cost itself.
+  not report a call's cost itself. `--dry-run` marks such a rate
+  "(assumed)", and the warning is shown without `--verbose`.
 - **`fanout.select: fastest` no longer depends on how a run was
   interrupted.** A candidate's time counted a step a Ctrl-C cut short but not
   one a crash cut short, so the same work could win or lose depending on
