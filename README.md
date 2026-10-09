@@ -57,11 +57,13 @@ make build          # -> ./bin/belay
 
 belay does not run natively on Windows and no Windows binary is published.
 `internal/exec`, `internal/runner` and `internal/linter` are `//go:build unix`,
-because the two controls that make belay safe to point at a repository — the
-process-group kill that stops a runaway agent, and the `os.Root` containment
-that stops it writing outside the workspace — have no direct Windows
-equivalent. Shipping a build without them would be shipping something weaker
-while calling it the same tool.
+because two controls belay relies on have no direct Windows equivalent: the
+process-group kill that stops a runaway agent and everything it started, and
+the `os.Root` containment that keeps belay's own file access inside the
+workspace, so that the step verifying the agent's change and the policy gate
+never follow a path the agent chose out of it. Neither one confines the agent
+itself; see [Known Limitations](#known-limitations). Shipping a build without
+them would be shipping something weaker while calling it the same tool.
 
 Inside WSL2 belay is simply a Linux program, and everything works:
 
@@ -529,6 +531,8 @@ belay is **early but real**. Use it for:
 6. **SonarQube integration is optional**: The challenge names SonarQube as a quality gate. belay ships with local linters (golangci-lint, eslint, ruff) as the default. SonarQube is available via `review.mode: sonar` if you have Docker or a server. See ADR-0008.
 
 7. **No credentials management**: belay reads ANTHROPIC_API_KEY or CLAUDE_CODE_OAUTH_TOKEN from your shell, or relies on Claude Code's own login. It does not manage secrets, store tokens, or integrate with secret vaults.
+
+8. **belay does not sandbox the agent**: Claude Code runs as you, with your file permissions, and so does your test command, which runs the code the agent just wrote. belay narrows what the agent is offered — the plan step gets read-only tools, and the code and fix steps get Read, Grep, Glob, Edit and Write but no shell — and it keeps its own file access inside the workspace, but nothing in belay stops the agent, or a test it wrote, from writing a file outside the workspace: an agent that wrote `../outside-marker.txt` left it there, and the run finished normally. belay's checks, the policy gate included, judge what changed inside the workspace and cannot see anything written elsewhere, including into belay's own `.belay` directory. If you need the agent confined, run belay inside a container or a VM that holds only the repository; belay does not provide one.
 
 ## Contributing
 
