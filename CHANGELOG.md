@@ -591,6 +591,12 @@ that only `pkg/belay` carries a compatibility promise. Everything under
   timeline switched colour off whenever `NO_COLOR` existed, even exported
   empty, while every other command waits for a non-empty value, as
   no-color.org asks. It now reads it the same way as the rest of belay.
+- **Ctrl-C while `belay fork` is copying your tree stops it cleanly.**
+  `belay fork` says to press Ctrl-C once to stop it, but until its step
+  started running, a Ctrl-C killed belay outright, part-way through copying
+  the tree, and left a half-made copy under `.belay/forks` that `belay runs`
+  listed as unreadable. A Ctrl-C during the copy now cancels it, removes
+  what was copied, and says nothing was kept or spent.
 
 ### Security
 

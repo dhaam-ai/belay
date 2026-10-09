@@ -200,7 +200,7 @@ func makeFork(cmd *cobra.Command, u *ui, plan *runPlan, req forkRequest) error {
 
 	spec, err := fork.Prepare(ctx, fork.Request{
 		Source: source, Tree: tree, Node: req.node, Visit: req.visit,
-		AcceptCurrentFiles: req.currentFiles, Config: plan.config, Survey: surveyWorkspace,
+		AcceptCurrentFiles: req.currentFiles, Config: plan.config, Survey: forkSurvey,
 		Plan: func() ([]byte, error) { return sourcePlan(ctx, u, plan.workspace, source, man) },
 	})
 	var refusal *fork.Refusal
@@ -223,9 +223,22 @@ func makeFork(cmd *cobra.Command, u *ui, plan *runPlan, req forkRequest) error {
 		return refuseToFork(u, plan)
 	}
 
+	// Ctrl-C is handled from here, before the copy, to the end of the
+	// dispatch, as announceFork is about to promise. A Ctrl-C during the
+	// copy cancels it and Create removes what it had made; with no handler
+	// until the dispatch, it killed belay part-way through the copy and left
+	// a half-made one that `belay runs` lists as unreadable.
+	ctx, stop := stopOnSignal(ctx, u)
+	defer stop()
+
 	announceFork(u, plan, chosen, spec, treeNote)
 	f, err := createFork(ctx, plan, spec)
 	if err != nil {
+		if ctx.Err() != nil {
+			u.say("")
+			u.say("belay stopped because you asked it to, before the fork was made: it kept nothing, and spent nothing.")
+			return &ExitError{Code: graph.ExitAborted, Err: errors.Join(graph.ErrInterrupted, err)}
+		}
 		if errors.As(err, &refusal) {
 			plan.block(refusal.Reason, forkFix(refusal.Err, chosen.id))
 			return refuseToFork(u, plan)
@@ -247,8 +260,14 @@ func makeFork(cmd *cobra.Command, u *ui, plan *runPlan, req forkRequest) error {
 	if err != nil {
 		return &ExitError{Code: graph.ExitFailed, Message: "belay: " + err.Error(), Err: err}
 	}
-	return driveFork(cmd, u, plan, store, f.Workspace.Dir)
+	return driveFork(ctx, cmd, u, plan, store, f.Workspace.Dir)
 }
+
+// forkSurvey digests a tree for a fork: before the copy, to compare with the
+// visit's snapshot, and after it, to prove nothing changed while it was
+// being made. It is surveyWorkspace, and a variable only so that a test can
+// press Ctrl-C at a known point inside the copy.
+var forkSurvey = surveyWorkspace
 
 // createFork makes the fork spec describes as a new run, in a copy under the
 // workspace's .belay/forks.
@@ -271,15 +290,14 @@ func createFork(ctx context.Context, plan *runPlan, spec *fork.Spec) (fork.Fork,
 // driveFork dispatches a new fork once, stopping it after its one node, does
 // what follows every dispatch, and reports.
 //
-// It is driveRun for a fork, with two differences. The dispatch stops after
-// one node (graph.Options.PauseAfter), which is the whole point of a fork. And
-// a gate that pauses is not offered for review here: the fork was asked to
-// run one step, and the person reads the result first. Ctrl-C, the closing
-// steps and the report are driveRun's, so the two cannot drift apart.
-func driveFork(cmd *cobra.Command, u *ui, plan *runPlan, store *state.Store, copyDir string) error {
-	ctx, stop := stopOnSignal(cmd.Context(), u)
-	defer stop()
-
+// It is driveRun for a fork, with three differences. The dispatch stops
+// after one node (graph.Options.PauseAfter), which is the whole point of a
+// fork. A gate that pauses is not offered for review here: the fork was asked
+// to run one step, and the person reads the result first. And ctx is already
+// the one stopOnSignal cancels, because makeFork handles Ctrl-C from before
+// the copy. What a Ctrl-C does to the dispatch, the closing steps and the
+// report are driveRun's, so the two cannot drift apart.
+func driveFork(ctx context.Context, cmd *cobra.Command, u *ui, plan *runPlan, store *state.Store, copyDir string) error {
 	view, err := dispatchOnce(ctx, plan, store, false, pauseOnCancel, pauseAfterOneNode)
 	if err != nil {
 		return &ExitError{Code: graph.ExitFailed, Message: "belay: " + err.Error(), Err: err}

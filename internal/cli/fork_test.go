@@ -11,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -526,5 +527,67 @@ func TestAForkResumesFromItsCopy(t *testing.T) {
 		if !strings.Contains(stdout, phrase) {
 			t.Errorf("the resume's dry run never says %q:\n%s", phrase, stdout)
 		}
+	}
+}
+
+// TestCtrlCDuringAForksCopyUnwindsIt: belay fork says "press Ctrl-C once;
+// belay saves its state and exits" before it copies the tree, and a Ctrl-C
+// during the copy must do that. With no handler installed until the
+// dispatch, it killed belay part-way through the copy, leaving a half-made
+// copy that `belay runs` lists as unreadable.
+//
+// The Ctrl-C is a real SIGINT to this process, sent from inside the copy,
+// once the copied tree exists and before the fork is written into it.
+func TestCtrlCDuringAForksCopyUnwindsIt(t *testing.T) {
+	ws, id := forkSource(t)
+	runDir := filepath.Join(ws, ".belay", "runs", id)
+	before := treeSums(t, runDir)
+
+	pressed := false
+	survey := forkSurvey
+	t.Cleanup(func() { forkSurvey = survey })
+	forkSurvey = func(ctx context.Context, dir string) (string, error) {
+		if pressed || len(forksIn(t, ws)) == 0 {
+			return survey(ctx, dir)
+		}
+		pressed = true
+		if err := syscall.Kill(os.Getpid(), syscall.SIGINT); err != nil {
+			t.Fatalf("press Ctrl-C: %v", err)
+		}
+		select {
+		case <-ctx.Done():
+			return "", ctx.Err()
+		case <-time.After(5 * time.Second):
+			return "", errors.New("Ctrl-C did not cancel the copy")
+		}
+	}
+
+	var out bytes.Buffer
+	u := &ui{out: &out, err: &out}
+	req := forkRequest{runID: id, node: graph.NodeTest}
+	plan, err := resolve(resolveRequest{workspace: ws, logger: newLogger(u), override: req.configure})
+	if err != nil {
+		t.Fatalf("resolve: %v", err)
+	}
+	plan.registry, _ = forkScript()
+
+	err = makeFork(cmdWithContext(), u, plan, req)
+	t.Logf("verbatim output:\n%s", out.String())
+
+	if !pressed {
+		t.Fatal("the copy never reached the point the test presses Ctrl-C at")
+	}
+	var exit *ExitError
+	if !errors.As(err, &exit) || exit.Code != graph.ExitAborted {
+		t.Errorf("makeFork = %v, want the exit code a Ctrl-C always has, %d", err, graph.ExitAborted)
+	}
+	if !strings.Contains(out.String(), "because you asked it to") {
+		t.Errorf("the fork never says it stopped because it was asked to:\n%s", out.String())
+	}
+	if forks := forksIn(t, ws); len(forks) != 0 {
+		t.Errorf("a Ctrl-C during the copy left %v under .belay/forks", forks)
+	}
+	if diff := cmp.Diff(before, treeSums(t, runDir)); diff != "" {
+		t.Errorf("the source run changed (-before +after):\n%s", diff)
 	}
 }
