@@ -7,6 +7,41 @@
 // internal/policy, which this node imports as `rules`; everything here is
 // about turning a verdict into a graph.Result.
 //
+// # What it judges
+//
+// The files the workspace says changed, and never only the files the agent
+// says it changed. An agent's report is a claim, and a gate that judged it
+// was a gate the agent could walk past: one that edited infra/main.tf and
+// belay.yaml and reported only src/app.py passed every rule, and both edits
+// were committed. So the gate judges the run's recorded change, which the
+// write node built from the report and the workspace's own answer, together
+// with that answer asked again here (graph.RunContext.Changes): git against
+// the run's base commit, or the record of the workspace's files taken when
+// the run began. Every file the agent changed and did not report is judged
+// like any other and named in the verdict, so a run cannot hide an edit.
+//
+// A run whose workspace keeps no record to measure against — a fork's copy,
+// a run created before belay recorded one — is judged on the agent's
+// report, and every verdict it gets says so and why: "policy judges the
+// files the agent reports: ...". The limitation is stated where it applies,
+// not in a document a person might not read.
+//
+// A workspace that cannot answer at all is no verdict, an error, and never
+// a fall back to the report: an agent can break the answer on purpose, by
+// rewriting the .git file in its workspace, and that must not make its own
+// word the thing that is judged.
+//
+// Paths are judged in the file system's own names, so a report spelled
+// "Infra/main.tf" cannot dodge "infra/**"; and on a disk that folds case,
+// which the run records when it is created (state.PolicyPin.FoldCase), the
+// rules match without regard to case, because there the two spellings are
+// one file.
+//
+// What it cannot see is anything the agent writes outside the workspace,
+// belay's own .belay directory included: belay does not sandbox the agent,
+// and the gate judges the workspace. Nor, in a git checkout, a file git
+// ignores, which a commit never carries either.
+//
 // # Three outcomes, and none of them is an error
 //
 //   - Nothing broken: (Result{Next: graph.NodeTest, StatusOK}, nil).
@@ -16,7 +51,8 @@
 //   - Something it cannot: (Result{Status: StatusFailed}, nil). The run ends.
 //
 // A non-nil error is reserved for "no verdict was reachable": a pinned rule
-// this belay cannot compile, a changed file it cannot read. That distinction
+// this belay cannot compile, a changed file it cannot read, a workspace that
+// cannot say what changed. That distinction
 // is the one worth being careful about here, because collapsing it into a
 // pass is the failure the whole feature exists to prevent. A guardrail belay
 // skipped must never be recorded as a guardrail belay satisfied.
@@ -54,7 +90,9 @@
 // verdict about code like any other (ADR-0006).
 //
 // It converges on re-run. The verdict is a pure function of the pinned rules
-// and the bytes on disk, and the artifact is named by step, so the re-run the
+// and the workspace as it stands — its bytes, and what git or the run's file
+// record says differs from the run's start — and the artifact is named by
+// step, so the re-run the
 // dispatcher performs after a crash inside this node rewrites the same file
 // with the same content and reaches the same verdict as the attempt that
 // crashed.
@@ -129,9 +167,16 @@ func (n *Node) Run(ctx context.Context, rc *graph.RunContext) (graph.Result, err
 		}, nil
 	}
 
+	files, missed, why, err := judged(ctx, rc)
+	if err != nil {
+		// The workspace could not say what changed. That is no verdict,
+		// never the agent's report standing in for one.
+		return graph.Result{Status: journal.StatusFailed}, err
+	}
 	report, err := rules.Evaluate(ctx, rc.Policy.Policy, rc.Policy.Baseline, rules.Change{
 		Workspace: rc.Workspace,
-		Files:     rc.State.Code.ChangedFiles,
+		Files:     files,
+		FoldCase:  rc.Policy.FoldCase,
 	})
 	if err != nil {
 		// No verdict, so no Patch and no artifact: the blackboard must not
@@ -147,28 +192,88 @@ func (n *Node) Run(ctx context.Context, rc *graph.RunContext) (graph.Result, err
 	block := state.NewPolicy(quality, path)
 	patch := state.Patch{Policy: &block}
 
+	checked := "; " + plural(len(files)) + " checked" + truthNote(missed, why)
+	if len(missed) > 0 {
+		log.Warn("policy: judged files the agent changed and did not report",
+			slog.String("files", strings.Join(missed, ", ")))
+	}
+	if why != "" {
+		log.Warn("policy: judging only the files the agent reports", slog.String("why", why))
+	}
 	switch {
 	case report.Clean():
 		log.Info("policy: the change obeys every rule", slog.String("artifact", path))
 		return graph.Result{
 			Next: graph.NodeTest, Status: journal.StatusOK, Patch: patch,
-			Note: note(report, "the change obeys every rule; "+plural(len(rc.State.Code.ChangedFiles))+" checked"),
+			Note: note(report, "the change obeys every rule"+checked),
 		}, nil
 	case report.Failed():
 		log.Warn("policy: the change breaks a rule the run cannot continue past",
 			slog.String("rules", broken(report)), slog.String("artifact", path))
 		return graph.Result{
 			Status: journal.StatusFailed, Patch: patch,
-			Note: note(report, "the run cannot continue past "+broken(report)),
+			Note: note(report, "the run cannot continue past "+broken(report)+checked),
 		}, nil
 	default:
 		log.Info("policy: sending the change to be repaired",
 			slog.String("rules", broken(report)), slog.String("artifact", path))
 		return graph.Result{
 			Next: graph.NodeFix, Status: journal.StatusOK, Patch: patch,
-			Note: note(report, "asking for a repair of "+broken(report)),
+			Note: note(report, "asking for a repair of "+broken(report)+checked),
 		}, nil
 	}
+}
+
+// judged returns the files the gate judges: the run's recorded change, which
+// the write node built from the agent's report and the workspace's own
+// answer, together with the workspace's answer asked again here, so the
+// gate never judges less than the workspace says changed whatever reached
+// it. missed is every file in that answer the agent did not report.
+//
+// why is set, and nothing is asked, when the run keeps no record to measure
+// against: then the gate judges what the agent reported, and says so in its
+// verdict. Any other failure to answer is returned as an error.
+func judged(ctx context.Context, rc *graph.RunContext) (files, missed []string, why string, err error) {
+	recorded := rc.State.Code.ChangedFiles
+	if rc.Changes == nil {
+		return recorded, nil, "nothing checks the report against the workspace", nil
+	}
+	truth, err := rc.Changes.Changes(ctx, rc.Workspace)
+	switch {
+	case errors.Is(err, graph.ErrUnrecorded):
+		return recorded, nil, strings.TrimPrefix(err.Error(), graph.ErrUnrecorded.Error()+": "), nil
+	case err != nil:
+		return nil, nil, "", fmt.Errorf("nodes/policy: read what the workspace changed: %w", err)
+	}
+	files = slices.Concat(recorded, truth)
+	slices.Sort(files)
+	files = slices.Compact(files)
+	missed = slices.Clone(rc.State.Code.Unreported)
+	for _, t := range truth {
+		if !slices.Contains(recorded, t) {
+			missed = append(missed, t)
+		}
+	}
+	slices.Sort(missed)
+	return files, slices.Compact(missed), "", nil
+}
+
+// truthNote says what the verdict rests on beyond the files themselves: the
+// files the agent changed and did not report, which were judged all the
+// same, or that the gate had only the agent's report, and why.
+func truthNote(missed []string, why string) string {
+	switch {
+	case why != "":
+		return "; policy judges the files the agent reports: " + why
+	case len(missed) == 0:
+		return ""
+	}
+	const named = 5
+	list := strings.Join(missed[:min(len(missed), named)], ", ")
+	if len(missed) > named {
+		list += fmt.Sprintf(" and %d more", len(missed)-named)
+	}
+	return fmt.Sprintf("; %d the agent did not report (%s), judged all the same", len(missed), list)
 }
 
 // archive writes the full report beside the run's other evidence and returns

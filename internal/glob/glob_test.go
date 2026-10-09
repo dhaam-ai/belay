@@ -105,3 +105,43 @@ func TestMatchAnyReportsTheFirstPatternThatMatched(t *testing.T) {
 		t.Errorf("Set.Match(%q) matched; want no match", "internal/main.go")
 	}
 }
+
+// A folded pattern matches without regard to case, for a disk on which two
+// names that differ only in case are one file. It quotes the pattern as it
+// was written, because a violation quotes it back to the person who wrote
+// it.
+func TestAFoldedPatternMatchesAnyCase(t *testing.T) {
+	t.Parallel()
+
+	set, err := glob.CompileAll([]string{"infra/**", "**/Secrets.YAML", "src/[A-C]*.go"})
+	if err != nil {
+		t.Fatalf("CompileAll: %v", err)
+	}
+	folded := set.Fold()
+	for _, tc := range []struct {
+		name        string
+		exact, fold bool
+		quoted      string
+	}{
+		{name: "INFRA/evil.tf", exact: false, fold: true, quoted: "infra/**"},
+		{name: "infra/main.tf", exact: true, fold: true, quoted: "infra/**"},
+		{name: "config/secrets.yaml", exact: false, fold: true, quoted: "**/Secrets.YAML"},
+		{name: "SRC/b.GO", exact: false, fold: true, quoted: "src/[A-C]*.go"},
+		{name: "src/d.go", exact: false, fold: false},
+		{name: "infrastructure/x", exact: false, fold: false},
+	} {
+		if _, hit := set.Match(tc.name); hit != tc.exact {
+			t.Errorf("Match(%q) = %v, want %v", tc.name, hit, tc.exact)
+		}
+		p, hit := folded.Match(tc.name)
+		if hit != tc.fold {
+			t.Errorf("folded Match(%q) = %v, want %v", tc.name, hit, tc.fold)
+		}
+		if hit && p.String() != tc.quoted {
+			t.Errorf("folded Match(%q) quotes %q, want the pattern as written, %q", tc.name, p.String(), tc.quoted)
+		}
+	}
+	if set.Len() != folded.Len() {
+		t.Errorf("Fold changed the number of patterns: %d, want %d", folded.Len(), set.Len())
+	}
+}
