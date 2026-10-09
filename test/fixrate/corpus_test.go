@@ -915,3 +915,41 @@ func TestRunCorpus_AnArmThatSpentNothingDidNotAttemptTheTask(t *testing.T) {
 		})
 	}
 }
+
+// TestRunCorpus_AfterTaskRunsOnceATaskIsScored: a SWE-bench instance image is
+// gigabytes, and a full corpus is 500 of them. AfterTask is where a caller
+// frees what a task needed, so it must run once every cell of the task has a
+// verdict -- not before, when a cell may still need the image, and not again
+// on a resume.
+func TestRunCorpus_AfterTaskRunsOnceATaskIsScored(t *testing.T) {
+	t.Parallel()
+
+	tasks := widgetTasks(t, 2)
+	dir := t.TempDir()
+	var mu sync.Mutex
+	var done []string
+	opts := corpusOptions(t, dir, tasks, nil, &fakeEvaluator{}, newTemplateProvisioner())
+	opts.Arms = []Arm{ArmControl}
+	opts.AfterTask = func(_ context.Context, task Task) error {
+		mu.Lock()
+		defer mu.Unlock()
+		for _, c := range []string{"result.json", "verdict.json"} {
+			if !exists(filepath.Join(dir, "cells", task.ID, "control-r1", c)) {
+				t.Errorf("AfterTask(%s) ran before its cell had %s", task.ID, c)
+			}
+		}
+		done = append(done, task.ID)
+		return errors.New("an image that would not be removed")
+	}
+	if _, err := RunCorpus(t.Context(), opts); err != nil {
+		t.Fatalf("RunCorpus() error = %v; a failed AfterTask is logged, not fatal", err)
+	}
+	if _, err := RunCorpus(t.Context(), opts); err != nil {
+		t.Fatalf("second RunCorpus() error = %v", err)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if want := []string{"example__widget-1", "example__widget-2"}; !slices.Equal(done, want) {
+		t.Errorf("AfterTask ran for %v, want %v: once each, and not again on a resume", done, want)
+	}
+}

@@ -244,6 +244,13 @@ type CorpusOptions struct {
 	// read on every run rather than pinned, so a corpus that stopped at it
 	// can be resumed with a higher one.
 	MaxUSD float64
+	// AfterTask, if set, is called once for each task, as soon as every one
+	// of its cells has a verdict: the place to free what the task needed,
+	// such as its instance image. It is called once per corpus, not per
+	// run -- a marker in the task's directory records the call -- and its
+	// error is logged rather than stopping the corpus, because nothing a
+	// cleanup fails to do changes a verdict.
+	AfterTask func(ctx context.Context, task Task) error
 	// Now is the clock, for tests. Defaults to time.Now.
 	Now func() time.Time
 	// Logger receives progress. Defaults to a discarding logger.
@@ -543,8 +550,33 @@ func (r *corpusRun) work(ctx context.Context) error {
 				return err
 			}
 		}
+		if err := r.afterTask(ctx, task, cells); err != nil {
+			return err
+		}
 	}
 	return nil
+}
+
+// afterTask calls AfterTask for a task whose cells all have verdicts, once
+// per corpus; see CorpusOptions.AfterTask.
+func (r *corpusRun) afterTask(ctx context.Context, task Task, cells []Cell) error {
+	if r.opts.AfterTask == nil {
+		return nil
+	}
+	marker := filepath.Join(r.opts.Dir, "cells", task.ID, "after-task.done")
+	if exists(marker) {
+		return nil
+	}
+	for _, cell := range cells {
+		if !exists(verdictPath(r.cellDir(cell))) {
+			return nil
+		}
+	}
+	if err := r.opts.AfterTask(ctx, task); err != nil {
+		r.logger.LogAttrs(ctx, slog.LevelWarn, "fixrate: after-task cleanup failed",
+			slog.String("task", task.ID), slog.String("error", err.Error()))
+	}
+	return writeFileAtomic(marker, []byte(r.now().UTC().Format(time.RFC3339)+"\n"), 0o600)
 }
 
 // scoreAll scores every cell that has a result and no verdict, which is what
