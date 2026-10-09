@@ -18,6 +18,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/dhaam-ai/belay/internal/config"
 	"github.com/dhaam-ai/belay/internal/graph"
 	"github.com/dhaam-ai/belay/internal/journal"
 	"github.com/dhaam-ai/belay/internal/procgroup"
@@ -2203,34 +2204,45 @@ func (p *probingFanout) Run(ctx context.Context, rc *graph.RunContext) (graph.Re
 // tell from a candidate waiting on a fault, so it said "its run is paused, not
 // ended" and exited 0. The outcome now carries the limit the candidate's own
 // dispatcher stopped it at, and the reason its journal gives.
+//
+// The envelope holds whatever budget.on_exceed the parent run was given. A
+// parent at warn spends past its own ceiling by choice, but a candidate
+// honouring that would be N runs with no ceiling at all, so the candidate's
+// envelope is enforced as abort either way (candidateConfig).
 func TestACandidateStoppedAtALimitSaysWhich(t *testing.T) {
-	h := newRun(t, budgetCfg(5.00, 0), "stop at the envelope")
-	iso := newFakeIsolator(h.layout.CandidatesDir())
-	code := newCandidateNode(graph.NodeCode, func(context.Context, string, *graph.RunContext) (graph.Result, error) {
-		return Result{Next: graph.NodeTest, Status: journal.StatusOK, Usage: belay.Usage{USD: 1.20}}, nil
-	})
-	testNode := newCandidateNode(graph.NodeTest, finishes(0.10))
-	specs := poolSpecs(h, 1)
-	specs[0].Envelope = state.Envelope{LimitUSD: 1.00}
+	for _, onExceed := range []config.OnExceed{config.OnExceedAbort, config.OnExceedWarn} {
+		t.Run("the parent at on_exceed "+string(onExceed), func(t *testing.T) {
+			cfg := budgetCfg(5.00, 0)
+			cfg.Budget.OnExceed = onExceed
+			h := newRun(t, cfg, "stop at the envelope")
+			iso := newFakeIsolator(h.layout.CandidatesDir())
+			code := newCandidateNode(graph.NodeCode, func(context.Context, string, *graph.RunContext) (graph.Result, error) {
+				return Result{Next: graph.NodeTest, Status: journal.StatusOK, Usage: belay.Usage{USD: 1.20}}, nil
+			})
+			testNode := newCandidateNode(graph.NodeTest, finishes(0.10))
+			specs := poolSpecs(h, 1)
+			specs[0].Envelope = state.Envelope{LimitUSD: 1.00}
 
-	node := &runsCandidates{specs: specs}
-	if _, err := h.poolDispatcher(t, pool{registry: candidateRegistry(t, code, testNode), isolator: iso}, node).
-		Run(context.Background()); err != nil {
-		t.Fatalf("Run() error = %v", err)
-	}
-	o := node.outcomes[0]
-	if o.Status != state.RunStatusPaused || o.Err != nil {
-		t.Fatalf("outcome = {%v, err %v}, want a candidate paused with no fault", o.Status, o.Err)
-	}
-	var budgetErr *belay.BudgetError
-	if !errors.As(o.Stopped, &budgetErr) || !closeTo(budgetErr.LimitUSD, 1.00) {
-		t.Errorf("Stopped = %v, want the *belay.BudgetError of its $1.00 envelope", o.Stopped)
-	}
-	if !strings.Contains(o.Note, "budget ceiling reached before \"test\"") {
-		t.Errorf("Note = %q, want the reason the candidate's own journal gives", o.Note)
-	}
-	if testNode.ran("cand-01") != 0 {
-		t.Errorf("test ran %d times past the envelope", testNode.ran("cand-01"))
+			node := &runsCandidates{specs: specs}
+			if _, err := h.poolDispatcher(t, pool{registry: candidateRegistry(t, code, testNode), isolator: iso}, node).
+				Run(context.Background()); err != nil {
+				t.Fatalf("Run() error = %v", err)
+			}
+			o := node.outcomes[0]
+			if o.Status != state.RunStatusPaused || o.Err != nil {
+				t.Fatalf("outcome = {%v, err %v}, want a candidate paused with no fault", o.Status, o.Err)
+			}
+			var budgetErr *belay.BudgetError
+			if !errors.As(o.Stopped, &budgetErr) || !closeTo(budgetErr.LimitUSD, 1.00) {
+				t.Errorf("Stopped = %v, want the *belay.BudgetError of its $1.00 envelope", o.Stopped)
+			}
+			if !strings.Contains(o.Note, "budget ceiling reached before \"test\"") {
+				t.Errorf("Note = %q, want the reason the candidate's own journal gives", o.Note)
+			}
+			if testNode.ran("cand-01") != 0 {
+				t.Errorf("test ran %d times past the envelope", testNode.ran("cand-01"))
+			}
+		})
 	}
 }
 
