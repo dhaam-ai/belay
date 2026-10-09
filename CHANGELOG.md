@@ -304,6 +304,12 @@ that only `pkg/belay` carries a compatibility promise. Everything under
 
 ### Fixed
 
+- **A Ctrl-C just after a candidate's workspace is made no longer loses that
+  candidate.** A candidate whose run had been interrupted, or killed, before
+  its first step resumed at "plan", a step a candidate does not have, and
+  ended failed for good; the fanout then settled without it, and a Ctrl-C
+  as the last copy finished could fail every candidate and the whole run. A
+  candidate now starts at its own first step until its journal records one.
 - **The golangci-lint gate waits for golangci-lint instead of failing on
   it.** golangci-lint allows one instance per machine at a time, and one
   that finds another running waits about five seconds and then gives up with

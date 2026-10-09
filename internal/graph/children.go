@@ -559,8 +559,10 @@ func (r *candidateRunner) resume(ctx context.Context, c *candidateClaim, out *Ca
 //
 //   - Store, and therefore Layout, journal and ledger, are the candidate's
 //     own — the one-writer-per-file rule;
-//   - Entry is code, because the candidate's journal is empty and
-//     journal.FirstNode is "plan", a node its registry does not have;
+//   - Entry is code, because until the candidate's journal names a node
+//     journal.FirstNode is "plan", a node its registry does not have. That
+//     includes a journal holding run_started and nothing else, which is
+//     what a Ctrl-C or a kill between Create and the first node leaves;
 //   - Config is the parent's with the budget replaced by this candidate's
 //     persisted envelope, enforced as abort. budget.on_exceed: warn is
 //     deliberately not honoured inside a candidate: a warning per candidate

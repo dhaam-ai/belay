@@ -148,12 +148,21 @@ type Options struct {
 	// its parent has already had approved, and a registry without a plan
 	// node would end such a run on its first step with an unknown node.
 	//
-	// It is ignored the moment the journal holds any record at all.
-	// Where a run with history resumes is journal.ResolveStart's decision
+	// It is ignored the moment the journal records a node starting. Where
+	// a run that has run a node resumes is journal.ResolveStart's decision
 	// and nothing else's, because the journal is the only thing that knows
 	// which node died and at which attempt; applying Entry over it would
 	// re-run the entry node on every resume, paying again for work the
 	// journal says is done.
+	//
+	// A journal with run-level records and no node record has not run
+	// anything, and it is not rare: a Ctrl-C between a candidate's
+	// run_started and its first node leaves run_started and run_paused,
+	// and a kill in the same window leaves run_started alone. ResolveStart
+	// can only answer journal.FirstNode for one, because no record names a
+	// node, so Entry still decides where it begins. Letting that history
+	// outvote Entry ended such a candidate failed, for good, on an unknown
+	// "plan" node, over an interruption that had cost nothing.
 	Entry string
 
 	// CandidateRegistry is the graph a fanout candidate's own run is
@@ -540,13 +549,14 @@ func (d *Dispatcher) dispatch(ctx context.Context, resuming bool) (Outcome, erro
 	if err != nil {
 		return Outcome{ExitCode: ExitFailed}, fmt.Errorf("graph: resolve resume point: %w", err)
 	}
-	// Where a run with any history at all goes next is ResolveStart's
+	// Where a run that has run a node goes next is ResolveStart's
 	// decision: it is the only thing that knows which node died, at which
 	// attempt, and what the last finished node named as its successor.
 	// Options.Entry answers the one question the journal cannot, which is
-	// where a run that has never run anything begins.
-	if d.entry != "" && len(read.Records) == 0 {
-		start.Node = d.entry
+	// where a run that has never run anything begins — including one whose
+	// journal holds run-level records and nothing else (see Options.Entry).
+	if d.entry != "" && !startedANode(read.Records) {
+		start.Node, start.Attempt = d.entry, 1
 	}
 
 	// Rebuilt, never New: a resumed run must keep accumulating spend from
@@ -583,6 +593,19 @@ func (d *Dispatcher) dispatch(ctx context.Context, resuming bool) (Outcome, erro
 		repeats = attemptOneSeq(read.Records, start.Node)
 	}
 	return d.loop(ctx, jrnl, &man, ledger, start, repeats)
+}
+
+// startedANode reports whether records hold any node record. A node_finished
+// is never written without its node_started, so looking for node_started
+// alone is enough; both are checked so that a journal this belay did not
+// write cannot make the answer depend on that rule.
+func startedANode(records []journal.Record) bool {
+	for _, r := range records {
+		if r.Event == journal.EventNodeStarted || r.Event == journal.EventNodeFinished {
+			return true
+		}
+	}
+	return false
 }
 
 // attemptOneSeq returns the Seq of the node_started that began the execution

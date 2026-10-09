@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 	"syscall"
 	"testing"
@@ -459,6 +460,63 @@ func TestDispatcher_EntryNeverOverridesAJournalWithHistory(t *testing.T) {
 	}
 	if testNode.calls != 1 {
 		t.Errorf("test ran %d times, want 1", testNode.calls)
+	}
+}
+
+// TestDispatcher_EntryHoldsUntilANodeHasStarted covers the window between a
+// candidate run's first record and its first node. A Ctrl-C there leaves
+// run_started and run_paused, and a kill leaves run_started alone: history,
+// but none that names a node. journal.ResolveStart can only answer
+// journal.FirstNode for such a journal, a node a candidate's registry does
+// not have, so a resume that let the history outvote Entry ended the
+// candidate failed, for good, over an interruption that cost nothing.
+func TestDispatcher_EntryHoldsUntilANodeHasStarted(t *testing.T) {
+	tests := []struct {
+		name    string
+		history []journal.Record
+	}{
+		{
+			name: "a Ctrl-C before the first node started",
+			history: []journal.Record{
+				{Event: journal.EventRunStarted},
+				{Event: journal.EventRunPaused, Note: "interrupted at \"code\"; use `belay resume` to continue"},
+			},
+		},
+		{
+			name:    "a kill before the first node started",
+			history: []journal.Record{{Event: journal.EventRunStarted}},
+		},
+		{
+			name: "a Ctrl-C before the first node started, resumed and interrupted again",
+			history: []journal.Record{
+				{Event: journal.EventRunStarted},
+				{Event: journal.EventRunPaused, Note: "interrupted"},
+				{Event: journal.EventRunResumed},
+				{Event: journal.EventRunPaused, Note: "interrupted"},
+			},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			h := newRun(t, config.Default(), "start where the caller says, however often it is interrupted")
+			h.seedJournal(t, tt.history...)
+			code := ok(graph.NodeCode, graph.NodeTest)
+			testNode := ok(graph.NodeTest, graph.End)
+
+			out, err := h.entryDispatcher(t, graph.NodeCode, code, testNode).Resume(context.Background())
+			if err != nil {
+				t.Fatalf("Resume() error = %v, want nil (note %q)", err, out.Note)
+			}
+			if out.Status != state.RunStatusCompleted {
+				t.Fatalf("Outcome.Status = %v, want completed (note %q)", out.Status, out.Note)
+			}
+			if code.calls != 1 || code.attempts[0] != 1 {
+				t.Errorf("the entry node ran %d times at attempts %v, want once at attempt 1", code.calls, code.attempts)
+			}
+			if got := h.timeline(t); !slices.Contains(got, "code#1 started") {
+				t.Errorf("timeline = %v, want the entry node started at attempt 1", got)
+			}
+		})
 	}
 }
 
