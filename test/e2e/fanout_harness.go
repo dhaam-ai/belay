@@ -102,9 +102,36 @@ type fanoutHarness struct {
 	cfg       config.Config
 }
 
+// fanoutTightEnv, set in a child process's environment, gives the child
+// fanoutTightConfig and a $1.00 plan in place of the suite's defaults.
+const fanoutTightEnv = fanoutChildEnv + "_TIGHT"
+
+// fanoutTightPlanUSD is what the plan costs in a run under
+// fanoutTightConfig.
+const fanoutTightPlanUSD = 1.00
+
+// fanoutTightConfig is a fanout whose ceiling leaves little slack: two
+// candidates under $3.50, after a plan that costs $1.00, so each candidate's
+// envelope is $1.25 and the launch projection ($1.00 a candidate on top of
+// $1.00 spent) fits with $0.50 to spare. Any figure a resume wrongly adds to
+// the spend before the fanout shows up as a refusal.
+func fanoutTightConfig() config.Config {
+	cfg := fanoutConfig()
+	cfg.Fanout.Candidates = 2
+	cfg.Fanout.Concurrency = 2
+	cfg.Budget.MaxUSD = 3.50
+	return cfg
+}
+
 // newFanoutRun creates a workspace holding a small project, and a run in it
 // whose manifest pins a fanout, exactly as createRun writes one.
 func newFanoutRun(t *testing.T) *fanoutHarness {
+	t.Helper()
+	return newFanoutRunWith(t, fanoutConfig())
+}
+
+// newFanoutRunWith is newFanoutRun under cfg.
+func newFanoutRunWith(t *testing.T, cfg config.Config) *fanoutHarness {
 	t.Helper()
 	ws := t.TempDir()
 	fanoutSeed(t, ws, map[string]string{
@@ -112,6 +139,7 @@ func newFanoutRun(t *testing.T) *fanoutHarness {
 		"app.go": "package app\n\n// Name is the app's name.\nfunc Name() string { return \"app\" }\n",
 	})
 	h := openFanoutRun(t, ws)
+	h.cfg = cfg
 	if err := os.MkdirAll(h.layout.RunDir(), 0o750); err != nil {
 		t.Fatalf("MkdirAll(%s) error = %v", h.layout.RunDir(), err)
 	}
@@ -271,6 +299,9 @@ type fanoutWorld struct {
 	// child process of the crash test parks anyone: it is how that process
 	// is caught with candidates in flight.
 	park map[string]bool
+	// planUSD, when above zero, is what the plan costs instead of the
+	// scripted plan's own figure.
+	planUSD float64
 
 	mu    sync.Mutex
 	calls map[string]int
@@ -284,7 +315,11 @@ func newFanoutWorld() *fanoutWorld { return &fanoutWorld{calls: map[string]int{}
 // something before its fanout, which is what an interrupted attempt is
 // charged against.
 func (w *fanoutWorld) planner() belay.AgentBackend {
-	return &belaytest.FakeAgent{NameValue: "claude-code", Responses: []belay.AgentResponse{loopPlanResponse()}}
+	plan := loopPlanResponse()
+	if w.planUSD > 0 {
+		plan.Usage.USD = w.planUSD
+	}
+	return &belaytest.FakeAgent{NameValue: "claude-code", Responses: []belay.AgentResponse{plan}}
 }
 
 // candidate is graph.Options.CandidateAgent: the backend candidate id calls.

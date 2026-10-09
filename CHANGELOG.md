@@ -318,6 +318,66 @@ that only `pkg/belay` carries a compatibility promise. Everything under
 
 ### Fixed
 
+- **belay starts on a Claude model its price table does not list.** It
+  refused, before spending anything, any model outside the table it ships
+  with: `claude-sonnet-4-5`, `claude-opus-4-1`, a dated identifier such as
+  `claude-haiku-4-5-20251001`, and the aliases `sonnet[1m]` and `opusplan`.
+  Dated identifiers and those aliases are now priced as the model they name.
+  Any other model is priced at the most expensive rate belay knows, marked as
+  an estimate, with a warning naming it, so the budget ceiling still holds
+  and errs towards stopping early. The table is only used when the CLI does
+  not report a call's cost itself.
+- **`fanout.select: fastest` no longer depends on how a run was
+  interrupted.** A candidate's time counted a step a Ctrl-C cut short but not
+  one a crash cut short, so the same work could win or lose depending on
+  which stopped it. Only the steps that finished count now.
+- **A paused fanout no longer fails for good on a resume it cannot carry
+  out yet.** Resumed after `budget.max_usd` was set to 0, a run that fans out
+  ended failed, with every candidate it had paid for out of reach; so did one
+  whose run directory could not be read at that moment. The first now pauses
+  at exit 3 and says to set `budget.max_usd` above zero; the second pauses
+  with the fault in its note, and resuming tries again.
+- **A fanout whose candidates stop at a limit says so, and exits 3.** A
+  candidate that met its share of `budget.max_usd`, `graph.max_steps` or
+  `graph.node_timeout`, each of which applies to every candidate, left the
+  run "waiting for you" with exit 0, no reason printed and no setting named,
+  and resuming met the same limit for ever. The run now stops like any
+  other limit: it names each candidate, why its own run stopped and the
+  setting to raise, and a resume that raises nothing spends nothing. The
+  run's spend, in `belay runs` and the closing report, now includes what its
+  candidates have spent, at every pause and not only once the fanout
+  finishes: it showed $0.10 of $1.00 where $1.10 had been spent.
+- **After a crash mid-fanout, resuming collects the candidates without a
+  raised ceiling.** The resume charged the killed fanout step the plan's cost
+  a second time, then re-ran the launch-time cost projection against that
+  inflated spend and refused to continue ("projected at $2.0000 each on top
+  of $2.0000 already spent") until `budget.max_usd` was raised, which also
+  raised the candidates' envelopes. Candidates already claimed are now
+  adopted without the projection, at the envelopes they were given.
+- **A crash inside `join`, `promote` or the fanout itself is no longer billed
+  as the run's costliest step.** Resuming after a kill charges the step that
+  died an estimate of what its agent may have spent, but these steps call no
+  agent of their own: after a fanout the costliest step was the whole
+  fanout, so a kill inside promote's merge reported $2.10 against $1.10
+  spent, and a kill mid-fanout charged the plan again. They are now charged
+  nothing; a candidate's own steps are still charged as before.
+- **A step stopped by Ctrl-C or `graph.node_timeout` is charged for, so the
+  budget ceiling stops a step that keeps being interrupted.** The agent CLI
+  prints its bill only when it finishes, so a call belay stopped reported
+  nothing and was recorded as free: four Ctrl-C and resume cycles of a
+  fanout started ten $0.40 calls and reported $0.90, and a step that kept
+  timing out was never stopped by the ceiling. Such a step is now charged
+  what a kill at the same moment is charged — the costliest step the run (or
+  a candidate's parent) has paid for, marked as an estimate — unless it
+  reported its own spend. When the interrupted step costs more than any step
+  before it, each interruption still under-counts by the difference, so the
+  ceiling stops it later than its real cost would; ADR-0007 states the bound.
+- **A Ctrl-C just after a candidate's workspace is made no longer loses that
+  candidate.** A candidate whose run had been interrupted, or killed, before
+  its first step resumed at "plan", a step a candidate does not have, and
+  ended failed for good; the fanout then settled without it, and a Ctrl-C
+  as the last copy finished could fail every candidate and the whole run. A
+  candidate now starts at its own first step until its journal records one.
 - **The golangci-lint gate waits for golangci-lint instead of failing on
   it.** golangci-lint allows one instance per machine at a time, and one
   that finds another running waits about five seconds and then gives up with

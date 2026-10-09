@@ -47,7 +47,7 @@ The fanout divides what is left of `budget.max_usd` (and of `budget.max_tokens`)
 
 ### A fanout settles only durable end states
 
-A provisioning refusal no resume could change is written into the candidate's own manifest and settles as that candidate's outcome. Anything a resume could fix — a full disk, a git lock, a deadline, a panic — leaves the candidate's journal open and pauses the fanout with no Patch at all, so `belay resume` retries exactly that candidate while every finished one is adopted without running a node. One Ctrl-C pauses every candidate. A second Ctrl-C, or a `SIGKILL`, is the crash path, and the next resume heals each journal and reaps each candidate's recorded process groups before its node runs again — the single-run recovery, N + 1 times.
+A provisioning refusal no resume could change is written into the candidate's own manifest and settles as that candidate's outcome. Anything a resume could fix — a full disk, a git lock, a deadline, a panic — leaves the candidate's journal open and pauses the fanout with no Patch at all, so `belay resume` retries exactly that candidate while every finished one is adopted without running a node. A candidate whose own run paused at a limit — its envelope, `graph.max_steps` or `graph.node_timeout`, which apply to each candidate run — is neither: the fanout pauses the run as the limit it is, exit 3, naming each such candidate, the reason its journal gives and the setting to raise, and a resume that raises nothing meets the limit again having run nothing (amended 2026-10-09; it once reported "its run is paused, not ended" with exit 0). One Ctrl-C pauses every candidate. A second Ctrl-C, or a `SIGKILL`, is the crash path, and the next resume heals each journal and reaps each candidate's recorded process groups before its node runs again — the single-run recovery, N + 1 times.
 
 ### What a candidate's quality gate can and cannot be
 
@@ -63,17 +63,17 @@ SonarQube and AI review are refused with fanout. Both name the SonarQube project
 - **Resume is the single-run path, N + 1 times.** A parent killed with three of five candidates in flight re-runs exactly those three open nodes, and the finished candidates run nothing. `test/e2e` proves it with a real `SIGKILL` of a child process and a crash-free control.
 - **Nothing in the journal format, `journal.Validate`, `ResolveStart`, visits, `Patch`, `pkg/belay` or the dispatcher loop's ignorance of the graph's shape changed.**
 - **Crash safety is inherited, not re-invented.** Snapshots, ledgers rebuilt from the journal, the estimated charge for a killed attempt and process-group reaping already worked per run, so they work per candidate, and every later improvement to them reaches candidates for free.
-- **Every dollar belongs to exactly one ledger**, with a share known before anything is spent and shown by `--dry-run`.
+- **Every dollar belongs to exactly one candidate's ledger**, with a share known before anything is spent and shown by `--dry-run`. The parent's ledger records the candidates' running total as one sum on every fanout attempt, charged only the increase on the attempt before, so the run's own record and `belay runs` are right at every pause (amended 2026-10-09; it learned the sum only when the fanout settled). That sum is never evidence for an interrupted step's estimate, and it is not held against the fanout itself: the parent's guard before the fanout, and the ceiling the fanout divides, are the spend before it, so a resume divides the same figure and can always adopt. The launch-time cost projection is asked only of a fanout that has claimed nothing.
 - **A candidate run is inspectable with every existing tool**: `belay timeline <run> --candidate cand-02`, its snapshots, its artifacts, its evidence directories.
 - **`fanout.concurrency: 1` is sequential execution for free.**
 
 ### Negative
-- **The overshoot is N-fold.** A candidate is checked before a step and not during one, so each can pass its envelope by the cost of the step that crossed it: a fanout can end up to one step per candidate over `budget.max_usd`, and up to two per candidate when every candidate is killed during its first paid step, which the run has no evidence to charge for. A single run can overshoot by one step. The dry run says so.
+- **The overshoot is N-fold.** A candidate is checked before a step and not during one, so each can pass its envelope by the cost of the step that crossed it: a fanout can end up to one step per candidate over `budget.max_usd`. A single run can overshoot by one step. The dry run says so. A step cut short by a Ctrl-C, a timeout or a kill is charged the costliest step recorded before it, and a candidate's record starts from its parent's, so a cut adds overshoot only when the step it cut cost more than any step before it, by the difference; every cut is charged something, so a step cut short again and again is still stopped by its envelope (ADR-0007, amended 2026-10-09). An earlier version of this bullet said "up to two steps per candidate"; that was wrong both ways, because an attempt cut short with nothing recorded was charged nothing, every time.
 - **Disk is N-fold, and nothing collects it.** A fanout run leaves N workspaces — N directory copies of the tree, or N worktrees — and N candidate-run directories, each with its own snapshots and evidence. Promote destroys ephemeral workspaces in a branch run; an in-place run keeps every candidate's copy, because the winner's change is copied back from it by hand. The `belay cleanup` command ADR-0004 named as a follow-up is still owed, and it is now N run directories larger.
 - **An in-place fanout does not merge.** Its winner's change stays in the winner's workspace, and the run's next steps name the directory and the timeline command; only a branch run promotes the winner.
 - **An unspent envelope is not given to the other candidates,** and lowering `budget.max_usd` mid-fanout does not take back a share already given.
 - **N concurrent agents, test suites and linters compete** for CPU, for the agent's rate limit, and for golangci-lint's lock, which serialises review.
-- **`select: fastest` is not stable across a change of `fanout.concurrency`,** because a duration measured under contention is a different number. `fewest_issues` and `first_pass` are.
+- **`select: fastest` is not stable across a change of `fanout.concurrency`,** because a duration measured under contention is a different number. `fewest_issues` and `first_pass` are. It no longer depends on how a run was interrupted: only settled attempts are counted, since a Ctrl-C closes an attempt with the time it ran and a kill with none (amended 2026-10-09).
 - **A panic in a goroutine a node itself starts still ends the process.** Only the candidate's own goroutine is recovered.
 - **The parent's blackboard has no `Test` or `Review` of its own in a fanout run.** The detail lives in the candidate runs.
 - **A directory-copy candidate first provisioned after a crash copies the checkout as it is then.** A branch run is immune, because its candidates start from a commit.
@@ -103,7 +103,7 @@ SonarQube and AI review are refused with fanout. Both name the SonarQube project
 - Anyone asks for two `belay resume` of one parent at once. That needs the run lock first.
 
 ## References
-- ADR-0002, ADR-0003, ADR-0004, ADR-0007 (amended 2026-09-19), ADR-0011, ADR-0012, ADR-0014
+- ADR-0002, ADR-0003, ADR-0004, ADR-0007 (amended 2026-09-19 and 2026-10-09), ADR-0011, ADR-0012, ADR-0014
 - `internal/nodes/fanout` — the package doc, which quotes what it used to say
 - `internal/nodes/wire.go` — `WithFanout`, `Candidate`, and the conditional-node rule
 - `internal/graph/children.go` — the candidate runner

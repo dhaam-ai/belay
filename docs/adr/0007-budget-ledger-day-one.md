@@ -101,7 +101,9 @@ truth.
   again. Its total reads "(estimated)" from then on.
 - A run can still pass its ceiling in one case: killed during its first paid
   step, before anything has been recorded, when there is no evidence to charge
-  from. The overshoot is at most what that one step cost.
+  from. The overshoot is at most what that one step cost. (Corrected by the
+  2026-10-09 amendment below: that holds for one kill, not for a step killed
+  or interrupted again and again.)
 - A kill -9 during a step that spends nothing, such as the test step, is
   charged as if it were the costliest step. That is the conservative choice
   working as intended, and the price of it is a run that stops early.
@@ -140,6 +142,54 @@ reason; internal/graph's Dispatcher doc argues it for the graph. The limits are
 read live on every dispatch, deliberately unlike the shape of the graph, which
 is pinned in the manifest when the run is created. The exit code does not
 change: an invocation stopped by a limit still exits 3.
+
+## Amendment (2026-10-09): a step cut short is charged like a step killed
+
+The 2026-09-19 amendment charged an attempt a kill left open and recorded an
+attempt a Ctrl-C or `graph.node_timeout` cut short at whatever its node
+reported, on the reasoning that a node cut off part-way still knows what it
+spent. The Claude backend does not: the CLI prints its bill when it finishes,
+and the one belay stopped printed none, so the node reported zero and the
+call was free. Interrupting and resuming became a way to spend past the
+ceiling with the ledger unaware. A fanout with `max_usd: 1.00` and four Ctrl-C
+and resume cycles started ten $0.40 calls and reported $0.90; a run with a 3s
+`node_timeout` started five paid calls and recorded $0.10. A kill at the same
+moments would have been charged.
+
+### Decision
+
+4. **An attempt cut short that reported nothing is charged what heal charges
+   a killed one**: the costliest step the run has recorded, marked estimated,
+   with a note that says so. A report of real spend is still taken as
+   reported. A node that cannot spend (`join`, `promote`) or whose spend is
+   its candidate runs' and recorded in their journals (`fanout`) is charged
+   only what it reported, by a kill as much as by a Ctrl-C, because an
+   estimate there is money nobody spent.
+5. **A candidate run's evidence includes its parent's.** Its estimate is never
+   less, in any dimension, than the costliest step the parent had recorded
+   when it fanned out. A candidate's own ledger is empty until its first paid
+   step finishes, which is exactly when most interruptions land, and the
+   parent's plan is evidence of what one step of this work costs.
+
+### What the ceiling still lets through
+
+The "at most what that one step cost" above is true of one kill. Stated for
+every way a step can stop:
+
+- **One step over, per run.** Each step is checked before it runs and not
+  during, so a run can end one step past its ceiling, and a fanout one step per
+  candidate past `budget.max_usd`.
+- **An interruption adds only what the estimate missed.** A step cut short, by
+  a Ctrl-C, a timeout or a kill, is charged the costliest step recorded before
+  it. When the step that was cut is costlier than any recorded, each cut
+  under-counts by the difference. Every such charge is above zero, though, so
+  the guard still stops a step that keeps being cut short, after at most the
+  remaining headroom divided by the charge, plus one.
+- **One gap is left: a run's very first paid step.** Before any step has
+  finished there is nothing to charge from, and a run that is not a candidate
+  has no parent to borrow from, so each attempt of that one step cut short is
+  charged nothing. Every cycle of it needs a person to resume. Candidate runs
+  do not have the gap.
 
 ### Revisit if
 

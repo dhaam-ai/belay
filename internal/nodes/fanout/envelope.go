@@ -1,6 +1,7 @@
 package fanout
 
 import (
+	"errors"
 	"fmt"
 
 	"github.com/dhaam-ai/belay/internal/budget"
@@ -43,10 +44,19 @@ import (
 // Ledger.Check is post-hoc — it compares what a run has spent, not what it
 // is about to — so one node can cross the ceiling by its own cost. With C
 // the most expensive single node execution, a fanout of N is bounded by
-// max_usd + N*C ordinarily, and by max_usd + 2*N*C in the worst case where
-// every candidate is killed part-way through its first paid node and the
-// resume charges that attempt an estimate. The envelope is what makes the
-// bound proportional to C at all; without it the bound is N * max_usd.
+// max_usd + N*C. The envelope is what makes the bound proportional to C at
+// all; without it the bound is N * max_usd.
+//
+// An interruption does not double that, as this comment once claimed, and
+// before the dispatcher charged an attempt cut short it was not bounded at
+// all: a Ctrl-C, a timeout or a kill during a candidate's first paid step was
+// charged nothing, every time. Now such an attempt is charged the costliest
+// step recorded before it, and a candidate's record starts from its parent's
+// (graph.Options.InterruptedFloor), so a cut adds to the bound only when the
+// step it cut cost more than any step before it, by at most C minus that
+// charge, and every cut is charged something, so a step cut short again and
+// again still meets its envelope. ADR-0007's 2026-10-09 amendment states the
+// whole bound.
 //
 // The arithmetic lives in internal/budget, where micro-dollars already do,
 // and returns plain scalars, so neither internal/state nor internal/budget
@@ -54,6 +64,13 @@ import (
 // result for the manifest that stores it.
 func Envelopes(remaining budget.Snapshot, cfg config.Budget, n int) (state.Envelope, error) {
 	usd, tokens, err := budget.Partition(remaining, cfg, n)
+	if errors.Is(err, budget.ErrNoCeiling) {
+		// Reachable only on a resume: fanout.enabled requires a ceiling when
+		// a run is created, and the pin keeps the fanout while belay.yaml
+		// may since have dropped it. The dispatcher pauses over it.
+		return state.Envelope{}, fmt.Errorf("fanout: this run divides budget.max_usd between %d candidates, "+
+			"and it is no longer set; set budget.max_usd above zero and resume: %w", n, err)
+	}
 	if err != nil {
 		return state.Envelope{}, fmt.Errorf("fanout: dividing what is left of the budget between %d candidates: %w", n, err)
 	}

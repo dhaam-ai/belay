@@ -88,6 +88,18 @@ var (
 // one the run has already paid for.
 type CandidateRunner interface {
 	Run(ctx context.Context, specs []CandidateSpec) ([]CandidateOutcome, error)
+
+	// Claimed reports whether any of the candidates ids names has already
+	// been claimed by an earlier attempt of this run's fanout, which is to
+	// say whether asking for them now would adopt rather than launch.
+	//
+	// It reads and never writes. A node needs it because what it may check
+	// before asking differs between the two: the cost projection that
+	// decides whether to start N candidates means nothing once they hold
+	// envelopes already reserved, and refusing to adopt them saves no money
+	// and strands work the run has paid for. An error means the runner
+	// could not tell, which is a fault a resume could fix.
+	Claimed(ids []string) (bool, error)
 }
 
 // CandidateSpec is one candidate as the fanout node decided it: everything
@@ -154,10 +166,13 @@ type CandidateOutcome struct {
 	Envelope state.Envelope
 	// Steps is how many node executions the candidate run performed.
 	Steps int
-	// DurationMS sums the candidate's own node durations, which is what
-	// the fastest strategy compares. Summing node records rather than
-	// taking wall-clock time excludes the downtime between a crash and the
-	// resume that healed it, which no candidate should be blamed for.
+	// DurationMS sums the durations of the candidate's own settled node
+	// executions, which is what the fastest strategy compares. Summing node
+	// records rather than taking wall-clock time excludes the downtime
+	// between a crash and the resume that healed it, which no candidate
+	// should be blamed for. An attempt cut short is left out however it was
+	// cut: a Ctrl-C closes one with the time it ran and a kill with none,
+	// and counting either made the winner depend on which it was.
 	DurationMS int64
 	// Workspace is the tree the candidate worked in, as the isolator
 	// described it, so promote and cleanup know what they may destroy.
@@ -169,6 +184,17 @@ type CandidateOutcome struct {
 	// that is final. A refusal is durable and may be settled; see
 	// state.Provision.
 	Provision state.Provision
+	// Stopped is the limit of belay's own that this candidate's run paused
+	// at, as its dispatcher reported it: a *belay.BudgetError for its
+	// envelope, or an error wrapping ErrMaxSteps or ErrNodeTimeout, both of
+	// which apply to each candidate run as they do to any run. It is nil for
+	// a candidate that did not pause at one, and Note holds the reason its
+	// own journal gives.
+	//
+	// It is not a fault: resuming without raising the limit meets it again,
+	// having run nothing. The node reports it as the limit it is, so the
+	// person is told which setting to raise.
+	Stopped error
 	// Err is a fault a resume could fix — a full disk, a git lock, a
 	// panic — which is why it is a field rather than the Run error: the
 	// other candidates still have end states worth reporting, and a node
@@ -310,6 +336,10 @@ func (r *candidateRunner) Run(ctx context.Context, specs []CandidateSpec) ([]Can
 	if err != nil {
 		return outcomes, fmt.Errorf("graph: load the parent manifest before claiming candidates: %w", err)
 	}
+	floor, err := r.costliestParentStep()
+	if err != nil {
+		return outcomes, err
+	}
 
 	claims := make([]*candidateClaim, len(specs))
 	whole := true
@@ -322,6 +352,7 @@ func (r *candidateRunner) Run(ctx context.Context, specs []CandidateSpec) ([]Can
 				slog.String("candidate", spec.ID), slog.String("error", err.Error()))
 			continue
 		}
+		c.floor = floor
 		claims[i] = c
 		outcomes[i].RunDir = c.runDir
 	}
@@ -341,6 +372,51 @@ func (r *candidateRunner) Run(ctx context.Context, specs []CandidateSpec) ([]Can
 		return outcomes, fmt.Errorf("graph: the candidate runs were interrupted: %w", err)
 	}
 	return outcomes, nil
+}
+
+// Claimed implements CandidateRunner. A candidate is claimed once its run
+// directory holds a manifest, which a claim writes last: a directory with
+// none is a torn claim that the next Run clears and makes again, so it does
+// not count.
+func (r *candidateRunner) Claimed(ids []string) (bool, error) {
+	for _, id := range ids {
+		layout, err := state.NewCandidateRunLayout(r.parent.store.Layout(), id)
+		if err != nil {
+			return false, fmt.Errorf("graph: candidate %q: %w", id, err)
+		}
+		_, err = os.Stat(layout.ManifestPath())
+		switch {
+		case err == nil:
+			return true, nil
+		case !errors.Is(err, fs.ErrNotExist):
+			return false, fmt.Errorf("graph: inspect the manifest of candidate %q: %w", id, err)
+		}
+	}
+	return false, nil
+}
+
+// costliestParentStep is the most any one step of the parent run has cost,
+// in each dimension, as its journal records it: what every candidate run is
+// handed as Options.InterruptedFloor, so that an attempt of a candidate's
+// first paid step cut short with nothing reported is charged something.
+//
+// It is read from the parent's journal and not passed down from its ledger,
+// because the parent is not running a node that could hand it over: the
+// fanout node is, and a node never sees the ledger. Reading it here, once per
+// call, is also what keeps it a function of the parent's durable record, so
+// every attempt of the fanout hands its candidates the same figure.
+func (r *candidateRunner) costliestParentStep() (belay.Usage, error) {
+	read, err := journal.ReadFile(r.parent.store.Layout().JournalPath())
+	if err != nil {
+		return belay.Usage{}, fmt.Errorf("graph: read the parent journal before claiming candidates: %w", err)
+	}
+	largest := rebuildLedger(read.Records, state.Budget{}, r.parent.supervises).Largest()
+	floor := r.parent.floor
+	return belay.Usage{
+		InputTokens:  max(largest.InputTokens, floor.InputTokens),
+		OutputTokens: max(largest.OutputTokens, floor.OutputTokens),
+		USD:          max(largest.USD, floor.USD),
+	}, nil
 }
 
 // drive runs the claimed candidates, at most concurrency of them at a time,
@@ -559,8 +635,13 @@ func (r *candidateRunner) resume(ctx context.Context, c *candidateClaim, out *Ca
 //
 //   - Store, and therefore Layout, journal and ledger, are the candidate's
 //     own — the one-writer-per-file rule;
-//   - Entry is code, because the candidate's journal is empty and
-//     journal.FirstNode is "plan", a node its registry does not have;
+//   - Entry is code, because until the candidate's journal names a node
+//     journal.FirstNode is "plan", a node its registry does not have. That
+//     includes a journal holding run_started and nothing else, which is
+//     what a Ctrl-C or a kill between Create and the first node leaves;
+//   - InterruptedFloor is the parent's costliest step, so that a step of the
+//     candidate cut short before its own ledger holds anything is charged
+//     what one step of this run has been seen to cost, not nothing;
 //   - Config is the parent's with the budget replaced by this candidate's
 //     persisted envelope, enforced as abort. budget.on_exceed: warn is
 //     deliberately not honoured inside a candidate: a warning per candidate
@@ -588,20 +669,21 @@ func (r *candidateRunner) childOptions(c *candidateClaim, store *state.Store) Op
 		agent = r.agentFor(c.spec.ID)
 	}
 	return Options{
-		Store:         store,
-		Registry:      r.registry,
-		Config:        candidateConfig(p.cfg, c.envelope),
-		Entry:         NodeCode,
-		Logger:        p.logger.With(slog.String("candidate", c.spec.ID)),
-		Now:           p.now,
-		Redact:        p.redact,
-		PauseOnCancel: true,
-		PauseAfter:    0,
-		Fingerprint:   p.fingerprint,
-		Agent:         agent,
-		Runner:        p.runner,
-		Linter:        p.linter,
-		Reviewer:      p.reviewer,
+		Store:            store,
+		Registry:         r.registry,
+		Config:           candidateConfig(p.cfg, c.envelope),
+		Entry:            NodeCode,
+		InterruptedFloor: c.floor,
+		Logger:           p.logger.With(slog.String("candidate", c.spec.ID)),
+		Now:              p.now,
+		Redact:           p.redact,
+		PauseOnCancel:    true,
+		PauseAfter:       0,
+		Fingerprint:      p.fingerprint,
+		Agent:            agent,
+		Runner:           p.runner,
+		Linter:           p.linter,
+		Reviewer:         p.reviewer,
 	}
 }
 
@@ -639,7 +721,12 @@ func (r *candidateRunner) collect(c *candidateClaim, store *state.Store, out *Ca
 	out.Status = runStatusFor(start.State)
 
 	for _, rec := range read.Records {
-		if rec.Event == journal.EventNodeFinished {
+		// Settled attempts only. One a Ctrl-C or a timeout cut short is
+		// closed with the time it ran and one a kill cut short with none,
+		// so counting them made the fastest candidate depend on how the run
+		// was interrupted; and an attempt cut short produced nothing the
+		// candidate kept, its re-run being the work that did.
+		if rec.Event == journal.EventNodeFinished && !rec.Interrupted() {
 			out.DurationMS += rec.DurationMS
 		}
 		if note, ended := runMarkerNote(rec); ended {
@@ -653,7 +740,7 @@ func (r *candidateRunner) collect(c *candidateClaim, store *state.Store, out *Ca
 		return
 	}
 	out.Steps = man.Step
-	out.Spent = rebuildLedger(read.Records, man.Budget).Total()
+	out.Spent = rebuildLedger(read.Records, man.Budget, nil).Total()
 	if man.Candidate != nil {
 		out.Envelope = man.Candidate.Envelope
 		out.Provision = man.Candidate.Provision
@@ -667,6 +754,13 @@ func (r *candidateRunner) collect(c *candidateClaim, store *state.Store, out *Ca
 	}
 	out.State = st
 
+	if start.State == journal.RunStatePaused && len(LimitSettings(runErr)) > 0 {
+		// Paused by one of belay's own limits, which apply to a candidate
+		// run as to any: its envelope, graph.max_steps, graph.node_timeout.
+		// runErr is the cause its dispatcher paused it over, and Note the
+		// reason its own journal gives.
+		out.Stopped = runErr
+	}
 	if start.State == journal.RunStateRunnable {
 		// The run stopped without recording how it ended, which is the one
 		// thing this runner may not settle: something machine-shaped got in
@@ -712,6 +806,9 @@ type candidateClaim struct {
 	// call found it, which is what decides whether debris a Create that
 	// died part-way left has to be reclaimed before another is attempted.
 	adopted bool
+	// floor is the parent's costliest step, the candidate run's
+	// Options.InterruptedFloor (see costliestParentStep).
+	floor belay.Usage
 }
 
 // claim makes sure spec has a run directory, either by writing one or by

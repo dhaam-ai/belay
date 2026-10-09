@@ -3,10 +3,16 @@
 package claude
 
 import (
+	"bytes"
+	"context"
 	"errors"
+	"log/slog"
+	"slices"
 	"strings"
 	"testing"
 
+	"github.com/dhaam-ai/belay/internal/budget"
+	"github.com/dhaam-ai/belay/internal/config"
 	"github.com/dhaam-ai/belay/pkg/belay"
 )
 
@@ -24,11 +30,13 @@ func TestCostScenarios(t *testing.T) {
 		body          string
 		model         string
 		prices        map[string]Price
-		wantErr       error
 		wantUSD       float64
 		wantEstimated bool
 		wantInput     int64
 		wantOutput    int64
+		// wantUnpriced is every model usageOf had to charge at the highest
+		// rate, which the backend warns about.
+		wantUnpriced []string
 	}{
 		{
 			// 1. Cost fields present: report them verbatim, exactly.
@@ -63,11 +71,63 @@ func TestCostScenarios(t *testing.T) {
 			wantEstimated: true,
 		},
 		{
-			// 3. Unknown model and nothing reported: a loud typed error.
-			name:    "unknown model with tokens spent is an error, never a zero",
-			fixture: "success_without_cost.json",
-			model:   "claude-unobtainium-9",
-			wantErr: ErrUnknownModel,
+			// 3. Unknown model and nothing reported: charged at the highest
+			// rate belay knows ($10/$50), flagged, and named. It used to be
+			// a *PriceError, which stopped belay starting at all on any
+			// model newer or older than its table.
+			// 40000 * $10/MTok + 10000 * $50/MTok = 0.40 + 0.50.
+			name:          "an unknown model is charged the highest known rate, never a zero",
+			fixture:       "success_without_cost.json",
+			model:         "claude-unobtainium-9",
+			wantUSD:       0.90,
+			wantInput:     40000,
+			wantOutput:    10000,
+			wantEstimated: true,
+			wantUnpriced:  []string{"claude-unobtainium-9"},
+		},
+		{
+			// Alias shapes the CLI accepts resolve to the entry they name.
+			name:          "a context-window alias prices like its family",
+			fixture:       "success_without_cost.json",
+			model:         "sonnet[1m]",
+			wantUSD:       0.18,
+			wantInput:     40000,
+			wantOutput:    10000,
+			wantEstimated: true,
+		},
+		{
+			// opusplan is Opus while planning and Sonnet otherwise; the
+			// dearer of the two is the one a ceiling can rely on.
+			// 40000 * $5/MTok + 10000 * $25/MTok = 0.20 + 0.25.
+			name:          "opusplan prices as opus",
+			fixture:       "success_without_cost.json",
+			model:         "opusplan",
+			wantUSD:       0.45,
+			wantInput:     40000,
+			wantOutput:    10000,
+			wantEstimated: true,
+		},
+		{
+			// 40000 * $1/MTok + 10000 * $5/MTok = 0.04 + 0.05.
+			name:          "a dated identifier prices like the model it dates",
+			fixture:       "success_without_cost.json",
+			model:         "claude-haiku-4-5-20251001",
+			wantUSD:       0.09,
+			wantInput:     40000,
+			wantOutput:    10000,
+			wantEstimated: true,
+		},
+		{
+			// A real model belay's table does not list is not guessed from
+			// its family, whose members can differ threefold in price.
+			name:          "a model outside the table is not priced from its family",
+			fixture:       "success_without_cost.json",
+			model:         "claude-opus-4-1",
+			wantUSD:       0.90,
+			wantInput:     40000,
+			wantOutput:    10000,
+			wantEstimated: true,
+			wantUnpriced:  []string{"claude-opus-4-1"},
 		},
 		{
 			// 4. Unknown fields alongside a real cost: still exact.
@@ -166,29 +226,9 @@ func TestCostScenarios(t *testing.T) {
 				table = defaultPrices
 			}
 
-			got, err := usageOf(parsed, tt.model, table)
-			if tt.wantErr != nil {
-				if !errors.Is(err, tt.wantErr) {
-					t.Fatalf("usageOf error = %v, want one wrapping %v", err, tt.wantErr)
-				}
-				var pe *PriceError
-				if !errors.As(err, &pe) {
-					t.Fatalf("errors.As(*PriceError) = false for %v", err)
-				}
-				if pe.Model != tt.model {
-					t.Errorf("PriceError.Model = %q, want %q", pe.Model, tt.model)
-				}
-				if pe.InputTokens == 0 && pe.OutputTokens == 0 {
-					t.Error("PriceError should report the tokens that went unpriced")
-				}
-				// A silent zero is exactly what must not happen.
-				if got != (belay.Usage{}) {
-					t.Errorf("usageOf returned %+v alongside an error, want the zero value", got)
-				}
-				return
-			}
-			if err != nil {
-				t.Fatalf("usageOf: %v", err)
+			got, unpriced := usageOf(parsed, tt.model, table)
+			if !slices.Equal(unpriced, tt.wantUnpriced) {
+				t.Errorf("unpriced models = %v, want %v", unpriced, tt.wantUnpriced)
 			}
 			if !almostEqual(got.USD, tt.wantUSD) {
 				t.Errorf("USD = %v, want %v", got.USD, tt.wantUSD)
@@ -227,6 +267,10 @@ func TestLookupPrice(t *testing.T) {
 		{name: "vertex dated snapshot", model: "claude-opus-5@20260101", want: Price{5, 25}, found: true},
 		{name: "mixed case", model: "Claude-Opus-5", want: Price{5, 25}, found: true},
 		{name: "surrounding space", model: "  claude-haiku-4-5 ", want: Price{1, 5}, found: true},
+		{name: "context-window alias", model: "sonnet[1m]", want: Price{2, 10}, found: true},
+		{name: "plan-mode alias", model: "opusplan", want: Price{5, 25}, found: true},
+		{name: "dated identifier", model: "claude-haiku-4-5-20251001", want: Price{1, 5}, found: true},
+		{name: "bedrock versioned identifier", model: "anthropic.claude-haiku-4-5-20251001-v1:0", want: Price{1, 5}, found: true},
 		{name: "unknown model", model: "claude-unobtainium-9"},
 		{name: "empty model", model: ""},
 		// Guessing by prefix would be a confident wrong answer; a miss is
@@ -343,18 +387,58 @@ func TestListPriceAnswersForAModelTheBackendCanRun(t *testing.T) {
 	}
 }
 
-// An unknown model must be a loud refusal naming the model, not a zero rate.
-// A zero rate would print "$0.00 per million tokens" in the dry run and let
-// the run start on a model the backend may not even accept.
-func TestListPriceRefusesAModelItCannotPrice(t *testing.T) {
+// A model outside belay's table is not a refusal. belay refused to start on
+// any model its table did not list, which an upgrade of the CLI, a dated
+// identifier or an alias such as sonnet[1m] or opusplan was enough to cause.
+// The rate is the highest belay knows, never a zero, so the dry run never
+// shows a model as free and the ceiling is held at the safe end; and belay
+// says so, once per model, naming it.
+func TestListPriceChargesAModelOutsideTheTableTheHighestKnownRate(t *testing.T) {
 	t.Parallel()
+	var logs bytes.Buffer
+	b := &Backend{Logger: slog.New(slog.NewTextHandler(&logs, nil))}
+	model := "claude-opus-9-" + t.Name()
 
-	_, err := New(nil).ListPrice("claude-opus-9")
-	if !errors.Is(err, ErrUnknownModel) {
-		t.Fatalf("ListPrice = %v, want an error wrapping ErrUnknownModel", err)
+	for range 2 {
+		rate, err := b.ListPrice(model)
+		if err != nil {
+			t.Fatalf("ListPrice(%q) = %v, want the highest known rate", model, err)
+		}
+		if rate.Input != 10 || rate.Output != 50 {
+			t.Errorf("ListPrice(%q) = %+v, want the highest known rate, $10 in and $50 out", model, rate)
+		}
 	}
-	if !strings.Contains(err.Error(), "claude-opus-9") {
-		t.Errorf("error %q does not name the model", err)
+	if n := strings.Count(logs.String(), "most expensive rate"); n != 1 {
+		t.Errorf("warned %d times, want once:\n%s", n, logs.String())
+	}
+	if !strings.Contains(logs.String(), model) {
+		t.Errorf("the warning does not name the model:\n%s", logs.String())
+	}
+}
+
+// TestTheCeilingHoldsForAModelOutsideTheTable: the reason belay refused an
+// unpriceable model was that a ceiling it could not price was no ceiling. A
+// call on such a model whose CLI reports no cost is charged at the highest
+// known rate, so the ledger still sees money and the guard still stops the
+// run.
+func TestTheCeilingHoldsForAModelOutsideTheTable(t *testing.T) {
+	t.Parallel()
+	r := &fakeRunner{Result: okResult(fixture(t, "success_without_cost.json"))}
+	b := newBackend(t, r)
+	req := validRequest()
+	req.Model = "claude-sonnet-4-5"
+
+	resp, err := b.Invoke(context.Background(), req)
+	if err != nil {
+		t.Fatalf("Invoke() error = %v, want a response priced at the highest known rate", err)
+	}
+	if !resp.Usage.Estimated || !almostEqual(resp.Usage.USD, 0.90) {
+		t.Fatalf("Usage = %+v, want $0.90 marked estimated", resp.Usage)
+	}
+	ledger := budget.New()
+	ledger.Record("code", resp.Usage)
+	if err := ledger.Check(config.Budget{MaxUSD: 0.50, OnExceed: config.OnExceedAbort}); !errors.Is(err, belay.ErrBudgetExceeded) {
+		t.Errorf("Check() = %v after a $0.90 call against $0.50, want the ceiling to hold", err)
 	}
 }
 

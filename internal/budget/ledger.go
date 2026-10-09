@@ -143,18 +143,106 @@ func (l *Ledger) Record(node string, u belay.Usage) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 
+	l.entry(node).add(u)
+	l.total.add(u)
+
+	var call totals
+	call.add(u)
+	l.largest.atLeast(call)
+}
+
+// RecordSum adds u to node's running total and to the grand total, like
+// Record, except that u is not one call's usage but the sum of many: what
+// the runs a supervising node waits on have spent. It is money the run spent,
+// so every total counts it; it is not what one step cost, so Largest never
+// sees it.
+//
+// The difference matters to exactly one reader. Largest is the evidence an
+// interrupted step's estimated charge is taken from, and a fanout's whole
+// bill read as "one step" would make every later estimate, and every
+// candidate's, the size of the whole fanout.
+func (l *Ledger) RecordSum(node string, u belay.Usage) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.entry(node).add(u)
+	l.total.add(u)
+}
+
+// entry returns node's running total, creating it in first-seen order. The
+// caller holds l.mu.
+func (l *Ledger) entry(node string) *totals {
 	t, ok := l.nodes[node]
 	if !ok {
 		t = &totals{}
 		l.nodes[node] = t
 		l.order = append(l.order, node)
 	}
-	t.add(u)
-	l.total.add(u)
+	return t
+}
 
-	var call totals
-	call.add(u)
-	l.largest.atLeast(call)
+// Of returns what has been recorded under node so far, by Record and
+// RecordSum together.
+func (l *Ledger) Of(node string) belay.Usage {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if t, ok := l.nodes[node]; ok {
+		return t.usage()
+	}
+	return belay.Usage{}
+}
+
+// Unrecorded returns the part of cumulative that has not yet been recorded
+// under node: cumulative less Of(node), in each dimension, and never below
+// zero. Estimated passes through from cumulative.
+//
+// It is how a node that reports a running total on every attempt, rather
+// than what each attempt spent, is charged without being counted twice: each
+// attempt is charged the increase since the attempts before it. A report that
+// saw less than was already recorded (one that could not read every run it
+// supervises) charges nothing in that dimension, so a total recorded once is
+// never recorded again, and a later, complete report brings the record up to
+// the truth.
+func (l *Ledger) Unrecorded(node string, cumulative belay.Usage) belay.Usage {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	var seen totals
+	if t, ok := l.nodes[node]; ok {
+		seen = *t
+	}
+	return belay.Usage{
+		InputTokens:  max(0, cumulative.InputTokens-seen.inputTokens),
+		OutputTokens: max(0, cumulative.OutputTokens-seen.outputTokens),
+		USD:          microsToUSD(max(0, usdToMicros(cumulative.USD)-seen.micros)),
+		Estimated:    cumulative.Estimated,
+	}
+}
+
+// Without returns a copy of l with everything recorded under node taken out
+// of the grand total and the breakdown: the run as it would stand had node
+// never been charged. l itself is unchanged.
+//
+// A dispatcher measures a supervising node against it, because what that
+// node has recorded is its candidates' spend, which their own envelopes
+// already bound: the parent's ceiling is about what the run spends before the
+// fanout divides it, and dividing it again on a resume must start from the
+// same figure the first attempt did.
+func (l *Ledger) Without(node string) *Ledger {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	out := New()
+	out.total, out.largest = l.total, l.largest
+	for _, name := range l.order {
+		t := *l.nodes[name]
+		if name == node {
+			out.total.inputTokens -= t.inputTokens
+			out.total.outputTokens -= t.outputTokens
+			out.total.micros -= t.micros
+			continue
+		}
+		out.nodes[name] = &t
+		out.order = append(out.order, name)
+	}
+	return out
 }
 
 // Total returns the ledger's cumulative usage across every node recorded
@@ -194,6 +282,10 @@ type NodeUsage struct {
 	// for it — more than one invocation's worth, for a node that was
 	// retried.
 	Usage belay.Usage
+	// Sum, on an entry handed to Rebuild, says Usage is a sum of many steps
+	// rather than one step's cost, and is recorded with RecordSum so that
+	// Largest never sees it. Breakdown never sets it.
+	Sum bool
 }
 
 // Breakdown returns the ledger's per-node usage in the order each node
@@ -301,6 +393,10 @@ func Restore(snap Snapshot) *Ledger {
 func Rebuild(entries []NodeUsage, floor Snapshot) *Ledger {
 	l := New()
 	for _, e := range entries {
+		if e.Sum {
+			l.RecordSum(e.Node, e.Usage)
+			continue
+		}
 		l.Record(e.Node, e.Usage)
 	}
 	l.total.atLeast(totals{

@@ -46,6 +46,8 @@ func (f *fakeCandidateRunner) Run(_ context.Context, specs []graph.CandidateSpec
 	return f.outcomes, f.err
 }
 
+func (f *fakeCandidateRunner) Claimed([]string) (bool, error) { return f.asked != nil, nil }
+
 // miniFanout is the shape of the node this seam exists for, reduced to the
 // three things it does with the runner: refuse when there is none, ask for
 // the specs it decided on, and record what comes back by index.
@@ -2053,6 +2055,225 @@ func TestACancelledPoolAdmitsNoFurtherCandidate(t *testing.T) {
 		man := candidateManifest(t, h, spec.ID)
 		if man.Candidate == nil || man.Candidate.Provision != state.ProvisionPending {
 			t.Errorf("%s = %+v, want it claimed and not provisioned", spec.ID, man.Candidate)
+		}
+	}
+}
+
+// TestACandidateCutShortInItsFirstPaidStepIsChargedItsParentsCostliestStep:
+// a candidate's own ledger is empty until its first paid step finishes, so
+// the estimate an attempt cut short is charged (the costliest step the run
+// has paid for) was zero for every Ctrl-C, timeout or kill during a
+// candidate's first step, which is when most of them land. The parent has
+// already paid for its plan by then, and that is evidence of what one step
+// of this run costs, so a candidate run is charged at least that. Without it
+// interrupting a fanout and resuming it, again and again, bought one paid
+// first step per candidate per cycle and recorded none of them.
+func TestACandidateCutShortInItsFirstPaidStepIsChargedItsParentsCostliestStep(t *testing.T) {
+	planSpend := journal.Usage{InputTokens: 1000, OutputTokens: 200, USD: 0.40}
+	h := newRun(t, budgetCfg(5.00, 0), "charge every cut, from the first")
+	h.seedJournal(t,
+		journal.Record{Event: journal.EventRunStarted},
+		journal.Record{Event: journal.EventNodeStarted, Node: graph.NodePlan, Attempt: 1},
+		journal.Record{
+			Event: journal.EventNodeFinished, Node: graph.NodePlan, Attempt: 1,
+			Status: journal.StatusOK, Next: graph.NodeFanout, Usage: &planSpend,
+		},
+	)
+	iso := reclaimingIsolator{newFakeIsolator(h.layout.CandidatesDir())}
+	specs := poolSpecs(h, 1)
+	specs[0].Envelope = state.Envelope{LimitUSD: 1.00}
+
+	// The code node cancels the dispatch it is running in, as a Ctrl-C
+	// would, and reports nothing, as a killed agent CLI does.
+	var cancelCurrent atomic.Pointer[context.CancelFunc]
+	code := newCandidateNode(graph.NodeCode, func(ctx context.Context, _ string, _ *graph.RunContext) (graph.Result, error) {
+		(*cancelCurrent.Load())()
+		<-ctx.Done()
+		return Result{}, ctx.Err()
+	})
+
+	var budgetStopped bool
+	for range 10 {
+		ctx, cancel := context.WithCancel(context.Background())
+		cancelCurrent.Store(&cancel)
+		node := &runsCandidates{specs: specs}
+		_, _ = h.poolDispatcher(t, pool{
+			registry: candidateRegistry(t, code), isolator: iso, concurrency: 1, pauseOnCancel: true,
+		}, node).Resume(ctx)
+		cancel()
+		if node.outcomes != nil && node.outcomes[0].Status == state.RunStatusPaused && node.err == nil {
+			budgetStopped = true
+			break
+		}
+	}
+
+	recs := candidateRecords(t, h, "cand-01")
+	var first *journal.Record
+	for i := range recs {
+		if recs[i].Interrupted() {
+			first = &recs[i]
+			break
+		}
+	}
+	want := journal.Usage{InputTokens: 1000, OutputTokens: 200, USD: 0.40, Estimated: true}
+	if first == nil || first.Usage == nil || *first.Usage != want {
+		t.Fatalf("the candidate's first cut-short attempt was charged %+v, want the parent's plan %+v", first, want)
+	}
+	if !budgetStopped {
+		t.Fatalf("ten Ctrl-C and resume cycles never brought the candidate to its envelope; code ran %d times", code.ran("cand-01"))
+	}
+	// $0.40 a cut against a $1.00 envelope: the guard lets a third cut start
+	// at $0.80 and stops the fourth at $1.20.
+	if n := code.ran("cand-01"); n != 3 {
+		t.Errorf("the candidate's first step started %d times, want 3 before its envelope stopped it", n)
+	}
+}
+
+// TestClaimedSaysWhetherAFanoutWouldAdopt: the fanout node asks before it
+// projects what N candidates will cost, because the projection is about
+// launching and means nothing once the candidates hold envelopes. A torn
+// claim, a directory with no manifest, is not a claim: the next Run clears
+// it and claims afresh.
+func TestClaimedSaysWhetherAFanoutWouldAdopt(t *testing.T) {
+	h := newRun(t, budgetCfg(5.00, 0), "adopt or launch")
+	iso := newFakeIsolator(h.layout.CandidatesDir())
+	code := newCandidateNode(graph.NodeCode, finishes(0.10))
+	specs := poolSpecs(h, 2)
+	ids := []string{"cand-01", "cand-02"}
+
+	var before, torn, after bool
+	probe := &probingFanout{specs: specs, ids: ids, before: &before, torn: &torn, after: &after,
+		tear: func() {
+			if err := os.MkdirAll(candidateLayout(t, h, "cand-01").RunDir(), 0o750); err != nil {
+				t.Fatalf("make a torn claim: %v", err)
+			}
+		}}
+	if _, err := h.poolDispatcher(t, pool{registry: candidateRegistry(t, code), isolator: iso}, probe).Run(context.Background()); err != nil {
+		t.Fatalf("Run() error = %v", err)
+	}
+	if before {
+		t.Error("Claimed() = true before anything was claimed")
+	}
+	if torn {
+		t.Error("Claimed() = true for a run directory with no manifest, which is a torn claim")
+	}
+	if !after {
+		t.Error("Claimed() = false after the candidates were claimed")
+	}
+}
+
+// probingFanout asks Claimed before anything exists, after a torn claim is
+// left behind, and after the runner has claimed and run every candidate.
+type probingFanout struct {
+	specs               []graph.CandidateSpec
+	ids                 []string
+	before, torn, after *bool
+	tear                func()
+}
+
+func (*probingFanout) Name() string          { return graph.NodeFanout }
+func (*probingFanout) SupervisesCandidates() {}
+
+func (p *probingFanout) Run(ctx context.Context, rc *graph.RunContext) (graph.Result, error) {
+	var err error
+	if *p.before, err = rc.CandidateRuns.Claimed(p.ids); err != nil {
+		return graph.Result{}, err
+	}
+	p.tear()
+	if *p.torn, err = rc.CandidateRuns.Claimed(p.ids); err != nil {
+		return graph.Result{}, err
+	}
+	if _, err := rc.CandidateRuns.Run(ctx, p.specs); err != nil {
+		return graph.Result{}, err
+	}
+	if *p.after, err = rc.CandidateRuns.Claimed(p.ids); err != nil {
+		return graph.Result{}, err
+	}
+	return Result{Next: graph.End, Status: journal.StatusOK}, nil
+}
+
+// TestACandidateStoppedAtALimitSaysWhich: a candidate run meets its envelope,
+// graph.max_steps or graph.node_timeout like any run, and pauses. The runner
+// used to report only that it was paused, which the fanout node could not
+// tell from a candidate waiting on a fault, so it said "its run is paused, not
+// ended" and exited 0. The outcome now carries the limit the candidate's own
+// dispatcher stopped it at, and the reason its journal gives.
+func TestACandidateStoppedAtALimitSaysWhich(t *testing.T) {
+	h := newRun(t, budgetCfg(5.00, 0), "stop at the envelope")
+	iso := newFakeIsolator(h.layout.CandidatesDir())
+	code := newCandidateNode(graph.NodeCode, func(context.Context, string, *graph.RunContext) (graph.Result, error) {
+		return Result{Next: graph.NodeTest, Status: journal.StatusOK, Usage: belay.Usage{USD: 1.20}}, nil
+	})
+	testNode := newCandidateNode(graph.NodeTest, finishes(0.10))
+	specs := poolSpecs(h, 1)
+	specs[0].Envelope = state.Envelope{LimitUSD: 1.00}
+
+	node := &runsCandidates{specs: specs}
+	if _, err := h.poolDispatcher(t, pool{registry: candidateRegistry(t, code, testNode), isolator: iso}, node).
+		Run(context.Background()); err != nil {
+		t.Fatalf("Run() error = %v", err)
+	}
+	o := node.outcomes[0]
+	if o.Status != state.RunStatusPaused || o.Err != nil {
+		t.Fatalf("outcome = {%v, err %v}, want a candidate paused with no fault", o.Status, o.Err)
+	}
+	var budgetErr *belay.BudgetError
+	if !errors.As(o.Stopped, &budgetErr) || !closeTo(budgetErr.LimitUSD, 1.00) {
+		t.Errorf("Stopped = %v, want the *belay.BudgetError of its $1.00 envelope", o.Stopped)
+	}
+	if !strings.Contains(o.Note, "budget ceiling reached before \"test\"") {
+		t.Errorf("Note = %q, want the reason the candidate's own journal gives", o.Note)
+	}
+	if testNode.ran("cand-01") != 0 {
+		t.Errorf("test ran %d times past the envelope", testNode.ran("cand-01"))
+	}
+}
+
+// TestACandidatesDurationDoesNotDependOnHowItWasInterrupted: `fastest`
+// compares candidates by their summed node durations. An attempt a Ctrl-C or
+// a timeout cut short is closed with the time it ran, and one a kill cut
+// short is closed by heal with none, so the winner depended on how the run
+// had been interrupted rather than on how fast each candidate did its work.
+// Only the attempts that settled are counted now: an attempt cut short
+// produced nothing the candidate kept, and its re-run is the work that did.
+func TestACandidatesDurationDoesNotDependOnHowItWasInterrupted(t *testing.T) {
+	h := newRun(t, budgetCfg(5.00, 0), "time the work, not the interruptions")
+	iso := newFakeIsolator(h.layout.CandidatesDir())
+	history := func(cutShortMS int64) []journal.Record {
+		return []journal.Record{
+			{Event: journal.EventRunStarted},
+			{Event: journal.EventNodeStarted, Node: graph.NodeCode, Attempt: 1},
+			{
+				Event: journal.EventNodeFinished, Node: graph.NodeCode, Attempt: 1, DurationMS: cutShortMS,
+				Status: journal.StatusAborted, Next: graph.NodeCode, Usage: &journal.Usage{},
+			},
+			{Event: journal.EventRunPaused},
+			{Event: journal.EventRunResumed},
+			{Event: journal.EventNodeStarted, Node: graph.NodeCode, Attempt: 2},
+			{
+				Event: journal.EventNodeFinished, Node: graph.NodeCode, Attempt: 2, DurationMS: 100,
+				Status: journal.StatusOK, Next: graph.End, Usage: &journal.Usage{},
+			},
+			{Event: journal.EventRunCompleted, Note: "run completed"},
+		}
+	}
+	// cand-01 was stopped by a Ctrl-C 400ms into its first attempt; cand-02
+	// by a kill at the same moment, which heal closes with no duration.
+	seedCandidate(t, h, iso, seeded{id: "cand-01", index: 1, provision: state.ProvisionOK,
+		envelope: oneEnvelope, status: state.RunStatusCompleted, step: 1, records: history(400)})
+	seedCandidate(t, h, iso, seeded{id: "cand-02", index: 2, provision: state.ProvisionOK,
+		envelope: oneEnvelope, status: state.RunStatusCompleted, step: 1, records: history(0)})
+
+	node := &runsCandidates{specs: poolSpecs(h, 2)}
+	code := newCandidateNode(graph.NodeCode, finishes(0.10))
+	if _, err := h.poolDispatcher(t, pool{registry: candidateRegistry(t, code), isolator: iso}, node).
+		Run(context.Background()); err != nil {
+		t.Fatalf("Run() error = %v", err)
+	}
+	for _, o := range node.outcomes {
+		if o.DurationMS != 100 {
+			t.Errorf("%s DurationMS = %d, want 100: the attempt that did the work, however the other was cut short",
+				o.ID, o.DurationMS)
 		}
 	}
 }

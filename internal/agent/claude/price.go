@@ -3,49 +3,13 @@
 package claude
 
 import (
-	"errors"
-	"fmt"
+	"log/slog"
+	"slices"
 	"strings"
+	"sync"
 
 	"github.com/dhaam-ai/belay/pkg/belay"
 )
-
-// ErrUnknownModel reports that a cost had to be estimated but no price entry
-// matched the model.
-//
-// It exists so that the budget guard can never be handed a silent zero. When
-// the CLI stops reporting total_cost_usd and belay cannot price the tokens
-// either, the correct outcome is a loud failure: a run that keeps going with
-// USD == 0 spends real money against a ledger that believes it is free, which
-// is the exact failure ADR-0007 exists to prevent.
-var ErrUnknownModel = errors.New("belay/claude: no price entry for model")
-
-// PriceError reports that tokens were spent under a model with no price entry.
-//
-// It wraps ErrUnknownModel; recover it with errors.As to report which model
-// needs adding to the table.
-type PriceError struct {
-	// Model is the model identifier that could not be priced.
-	Model string
-	// InputTokens and OutputTokens are the counts that went unpriced, so an
-	// operator can see how much was at stake.
-	InputTokens, OutputTokens int64
-}
-
-// Error implements error.
-func (e *PriceError) Error() string {
-	name := e.Model
-	if name == "" {
-		name = "(unspecified)"
-	}
-	return fmt.Sprintf(
-		"belay/claude: cannot price %d input and %d output tokens: "+
-			"no price entry for model %q and the CLI reported no total_cost_usd",
-		e.InputTokens, e.OutputTokens, name)
-}
-
-// Unwrap returns ErrUnknownModel.
-func (e *PriceError) Unwrap() error { return ErrUnknownModel }
 
 // Price is the list price of one model in US dollars per million tokens.
 //
@@ -127,9 +91,11 @@ func DefaultPrices() map[string]Price {
 // lookupPrice finds the price for a model identifier.
 //
 // It tries the identifier verbatim, then a single normalisation pass, and then
-// gives up. It deliberately does not guess by prefix: pricing an unrecognised
-// "claude-opus-6" at Opus 5 rates would be a silent, confident wrong answer,
-// and a loud ErrUnknownModel is the better failure.
+// gives up. It deliberately does not guess by prefix or by family: pricing an
+// unrecognised "claude-opus-6" at Opus 5 rates, or "claude-opus-4-1" at the
+// rate of the opus models the table does list, would be a silent, confident
+// wrong answer, and members of one family have differed threefold in price. A
+// miss is answered by resolvePrice, at the highest rate the table knows.
 func lookupPrice(table map[string]Price, model string) (Price, bool) {
 	if p, ok := table[model]; ok {
 		return p, true
@@ -142,12 +108,62 @@ func lookupPrice(table map[string]Price, model string) (Price, bool) {
 	return Price{}, false
 }
 
-// normalizeModel strips the decorations a model identifier picks up on its way
-// through a provider, leaving the bare id the price table is keyed on.
+// resolvePrice is the rate a model is charged at: its own when the table
+// knows it (lookupPrice), and otherwise the highest rate the table holds, in
+// each tier separately. known reports which.
 //
-// Two forms are handled, both seen in real model identifiers: a provider
-// prefix ("anthropic.claude-opus-5", as Bedrock spells it) and a dated
-// snapshot suffix ("claude-opus-4-5@20251101"). Nothing else is guessed.
+// # Why the highest, and not a refusal
+//
+// belay once refused to start on any model its table did not list, on the
+// reasoning that a ceiling it could not price was no ceiling. The reasoning
+// was right and the remedy was wrong: the table is a snapshot, so every CLI
+// release with a new model, every dated identifier and every alias the CLI
+// accepts (sonnet[1m], opusplan) stopped belay outright, although the CLI
+// normally reports its own cost and the table is only the fallback. Charging
+// the dearest rate belay knows keeps what the refusal protected: the ledger
+// is never handed a zero, and an error in the estimate errs towards stopping
+// a run early, which a person can resume after raising the ceiling, never
+// towards spending past it. Usage.Estimated says the figure is a guess, and
+// the backend says, once per model, that it is one (warnUnpriced).
+//
+// "Highest" means highest in this table. A model dearer than anything belay
+// lists is still under-charged on the fallback path; the warning names it so
+// a person can see that, and adding it to the table is the remedy.
+func resolvePrice(table map[string]Price, model string) (p Price, known bool) {
+	if p, ok := lookupPrice(table, model); ok {
+		return p, true
+	}
+	return highestPrice(table), false
+}
+
+// highestPrice is the highest input rate and the highest output rate in
+// table, which need not come from one model.
+func highestPrice(table map[string]Price) Price {
+	var top Price
+	for _, p := range table {
+		top.Input = max(top.Input, p.Input)
+		top.Output = max(top.Output, p.Output)
+	}
+	return top
+}
+
+// planAliases are CLI aliases that name more than one model, each mapped to
+// the dearest model it can run. opusplan runs Opus while planning and Sonnet
+// otherwise, and a ceiling can only rely on the dearer.
+var planAliases = map[string]string{
+	"opusplan": "opus",
+}
+
+// normalizeModel strips the decorations a model identifier picks up on its way
+// through a provider or the CLI, leaving the bare id the price table is keyed
+// on.
+//
+// The forms handled are all seen in real identifiers: a provider prefix
+// ("anthropic.claude-opus-5", "us.anthropic.claude-opus-5", as Bedrock spells
+// it), a Bedrock version suffix ("-v1:0"), a dated snapshot, either Vertex's
+// ("claude-opus-4-5@20251101") or the API's ("claude-haiku-4-5-20251001"), a
+// context-window suffix the CLI accepts on an alias ("sonnet[1m]"), and an
+// alias that names several models (planAliases). Nothing else is guessed.
 func normalizeModel(model string) string {
 	m := strings.TrimSpace(strings.ToLower(model))
 	if i := strings.LastIndex(m, "."); i >= 0 && strings.HasSuffix(m[:i+1], "anthropic.") {
@@ -156,7 +172,72 @@ func normalizeModel(model string) string {
 	if i := strings.IndexByte(m, '@'); i >= 0 {
 		m = m[:i]
 	}
+	if i := strings.IndexByte(m, '['); i >= 0 && strings.HasSuffix(m, "]") {
+		m = m[:i]
+	}
+	m = trimVersionSuffix(m)
+	m = trimDateSuffix(m)
+	if alias, ok := planAliases[m]; ok {
+		m = alias
+	}
 	return m
+}
+
+// trimVersionSuffix removes a Bedrock model version, "-v1:0" or "-v2", from
+// the end of m.
+func trimVersionSuffix(m string) string {
+	if i := strings.LastIndex(m, ":"); i >= 0 && allDigits(m[i+1:]) {
+		m = m[:i]
+	}
+	if i := strings.LastIndex(m, "-v"); i >= 0 && allDigits(m[i+2:]) {
+		m = m[:i]
+	}
+	return m
+}
+
+// trimDateSuffix removes a snapshot date, "-20251001", from the end of m.
+func trimDateSuffix(m string) string {
+	if i := strings.LastIndex(m, "-"); i >= 0 && len(m)-i-1 == 8 && allDigits(m[i+1:]) {
+		return m[:i]
+	}
+	return m
+}
+
+// allDigits reports whether s is non-empty and every byte of it is a digit.
+func allDigits(s string) bool {
+	if s == "" {
+		return false
+	}
+	for i := 0; i < len(s); i++ {
+		if s[i] < '0' || s[i] > '9' {
+			return false
+		}
+	}
+	return true
+}
+
+// warnedUnpriced holds the models this process has already warned about
+// (warnUnpriced). It is package-level because the warning is about the price
+// table, which is shared by every Backend in the process, and the point is to
+// say it once rather than once per call or per Backend.
+var warnedUnpriced sync.Map
+
+// warnUnpriced tells the person, once per model per process, that model is
+// not in the price table and is charged at the highest rate belay knows.
+func warnUnpriced(logger *slog.Logger, model string, rate Price) {
+	name := model
+	if name == "" {
+		name = "(unspecified)"
+	}
+	if _, seen := warnedUnpriced.LoadOrStore(name, true); seen {
+		return
+	}
+	logger.Warn("belay/claude: belay has no price for this model, so wherever it has to price one itself it "+
+		"assumes the most expensive rate it knows, which keeps the budget ceiling safe; add the model to "+
+		"the price table for an exact figure",
+		slog.String("model", name),
+		slog.Float64("input_usd_per_mtok", rate.Input),
+		slog.Float64("output_usd_per_mtok", rate.Output))
 }
 
 // tokenCounts is the billable token volume of one invocation, split by tier
@@ -229,15 +310,17 @@ func countsByModel(res result, requestModel string) map[string]tokenCounts {
 }
 
 // usageOf converts a decoded result into a belay.Usage, reporting the CLI's
-// own cost when it gave one and estimating from table otherwise.
+// own cost when it gave one and estimating from table otherwise. It also
+// returns every model it had to charge at the highest rate the table knows,
+// for the backend to warn about.
 //
 // The three outcomes, in the order they are tried:
 //
 //  1. total_cost_usd was present and positive: USD is that figure verbatim
 //     and Estimated is false.
 //  2. It was absent, unreadable, or non-positive, and tokens were spent: USD
-//     is priced from table and Estimated is true. A model with no entry is a
-//     *PriceError, never a zero.
+//     is priced from table and Estimated is true. A model with no entry is
+//     priced at the highest rate in the table (resolvePrice), never a zero.
 //  3. It was absent and no tokens were spent either: USD is zero and
 //     Estimated is true — nothing to price, but nothing confirmed either.
 //
@@ -245,7 +328,7 @@ func countsByModel(res result, requestModel string) map[string]tokenCounts {
 // every cost field on the result it emits after a session crash, so a run
 // that really did spend money can report $0.00 with its token counts intact.
 // Treating that as an exact zero would let the ledger lose the whole node.
-func usageOf(res result, requestModel string, table map[string]Price) (belay.Usage, error) {
+func usageOf(res result, requestModel string, table map[string]Price) (belay.Usage, []string) {
 	buckets := countsByModel(res, requestModel)
 
 	var totals tokenCounts
@@ -268,41 +351,37 @@ func usageOf(res result, requestModel string, table map[string]Price) (belay.Usa
 		return out, nil
 	}
 
+	var unpriced []string
 	for name, c := range buckets {
-		p, ok := lookupPrice(table, name)
-		if !ok {
-			return belay.Usage{}, &PriceError{
-				Model:        name,
-				InputTokens:  c.billableInput(),
-				OutputTokens: c.output,
-			}
+		p, known := resolvePrice(table, name)
+		if !known && c.total() > 0 {
+			unpriced = append(unpriced, name)
 		}
 		out.USD += c.cost(p)
 	}
-	return out, nil
+	slices.Sort(unpriced)
+	return out, unpriced
 }
 
 // ListPrice implements belay.ModelPricer: it reports what model lists at, in
 // USD per million tokens, before anything has been spent on it.
 //
-// It reads the same table, through the same lookup, that usageOf prices a
-// finished call with, so the rate a dry run shows for a node and the rate its
-// spend is estimated at cannot come apart. A model that is not in the table
-// is an error wrapping ErrUnknownModel rather than a zero rate, for the
-// reason ErrUnknownModel exists: a silent zero is a budget that cannot be
-// enforced.
+// It reads the same table, through the same resolution, that usageOf prices
+// a finished call with, so the rate a dry run shows for a node and the rate
+// its spend is estimated at cannot come apart. A model that is not in the
+// table is answered with the highest rate the table holds rather than an
+// error, and the backend says so once (see resolvePrice, which argues why).
+// It is never a zero: a zero would read as "free" in anything that printed
+// it.
 //
-// What this proves is narrower than "the CLI will accept this model", and the
-// difference matters to whoever reads a refusal. The table is belay's own
-// knowledge of Claude models, so a genuine model released after this version
-// is refused here although the CLI would run it. That is the safe direction:
-// belay could not have held such a run to its ceiling anyway, because it
-// could not price the tokens if the CLI stopped reporting a cost. The remedy
-// is a belay that knows the model, and the error says which one it did not.
+// It never returns an error. The table is belay's own knowledge, so a model
+// it does not list may still be one the CLI runs, and refusing it here is
+// what stopped belay starting on every model newer, older or more decorated
+// than its table.
 func (b *Backend) ListPrice(model string) (belay.ModelRate, error) {
-	p, ok := lookupPrice(b.prices(), model)
-	if !ok {
-		return belay.ModelRate{}, fmt.Errorf("%w %q", ErrUnknownModel, model)
+	p, known := resolvePrice(b.prices(), model)
+	if !known {
+		warnUnpriced(b.logger(), model, p)
 	}
 	return belay.ModelRate{Input: p.Input, Output: p.Output}, nil
 }

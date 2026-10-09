@@ -398,3 +398,105 @@ func TestLedger_Largest(t *testing.T) {
 		})
 	}
 }
+
+// TestLedger_RecordSum_CountsTowardTheTotalButIsNotAStep: a supervising
+// node reports what the runs it supervises spent, many steps' worth at
+// once. It is money the run spent, so the total and the node's breakdown
+// count it; it is not what one step cost, so the evidence an estimate for an
+// interrupted step is taken from (Largest) never sees it.
+func TestLedger_RecordSum_CountsTowardTheTotalButIsNotAStep(t *testing.T) {
+	l := New()
+	l.Record("plan", belay.Usage{InputTokens: 100, OutputTokens: 20, USD: 0.40})
+	l.RecordSum("fanout", belay.Usage{InputTokens: 5000, OutputTokens: 900, USD: 3.00, Estimated: true})
+
+	want := belay.Usage{InputTokens: 5100, OutputTokens: 920, USD: 3.40, Estimated: true}
+	if diff := cmp.Diff(want, l.Total(), cmpopts.EquateApprox(0, 1e-9)); diff != "" {
+		t.Errorf("Total() mismatch (-want +got):\n%s", diff)
+	}
+	if diff := cmp.Diff(belay.Usage{InputTokens: 100, OutputTokens: 20, USD: 0.40}, l.Largest(),
+		cmpopts.EquateApprox(0, 1e-9)); diff != "" {
+		t.Errorf("Largest() mismatch, a sum is not a step (-want +got):\n%s", diff)
+	}
+	if got := l.Of("fanout"); got.USD < 2.999999 || got.USD > 3.000001 {
+		t.Errorf("Of(fanout).USD = %v, want 3.00", got.USD)
+	}
+}
+
+// TestLedger_Unrecorded is the arithmetic that lets a supervising node
+// report a running total on every attempt without the run counting it
+// twice: each attempt is charged only what no earlier attempt of the node
+// was, and never less than nothing, in each dimension.
+func TestLedger_Unrecorded(t *testing.T) {
+	tests := []struct {
+		name       string
+		recorded   []belay.Usage
+		cumulative belay.Usage
+		want       belay.Usage
+	}{
+		{
+			name:       "nothing recorded yet: the whole report",
+			cumulative: belay.Usage{InputTokens: 10, OutputTokens: 5, USD: 1.00},
+			want:       belay.Usage{InputTokens: 10, OutputTokens: 5, USD: 1.00},
+		},
+		{
+			name:       "an earlier attempt recorded part of it",
+			recorded:   []belay.Usage{{InputTokens: 4, OutputTokens: 1, USD: 0.30}},
+			cumulative: belay.Usage{InputTokens: 10, OutputTokens: 5, USD: 1.00, Estimated: true},
+			want:       belay.Usage{InputTokens: 6, OutputTokens: 4, USD: 0.70, Estimated: true},
+		},
+		{
+			name:       "a report that saw less than was recorded charges nothing",
+			recorded:   []belay.Usage{{InputTokens: 10, OutputTokens: 5, USD: 1.00}},
+			cumulative: belay.Usage{InputTokens: 12, OutputTokens: 2, USD: 0.50},
+			want:       belay.Usage{InputTokens: 2},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			l := New()
+			for _, u := range tt.recorded {
+				l.RecordSum("fanout", u)
+			}
+			if diff := cmp.Diff(tt.want, l.Unrecorded("fanout", tt.cumulative), cmpopts.EquateApprox(0, 1e-9)); diff != "" {
+				t.Errorf("Unrecorded() mismatch (-want +got):\n%s", diff)
+			}
+		})
+	}
+}
+
+// TestLedger_Without: the spend a run had before one node, which is what a
+// supervising node's own guard and its view of the budget are measured
+// against, because what that node itself has recorded is its candidates',
+// already bounded by their envelopes.
+func TestLedger_Without(t *testing.T) {
+	l := New()
+	l.Record("plan", belay.Usage{InputTokens: 100, OutputTokens: 20, USD: 0.40})
+	l.RecordSum("fanout", belay.Usage{InputTokens: 5000, OutputTokens: 900, USD: 3.00})
+
+	got := l.Without("fanout")
+	if diff := cmp.Diff(belay.Usage{InputTokens: 100, OutputTokens: 20, USD: 0.40}, got.Total(),
+		cmpopts.EquateApprox(0, 1e-9)); diff != "" {
+		t.Errorf("Without(fanout).Total() mismatch (-want +got):\n%s", diff)
+	}
+	if diff := cmp.Diff(belay.Usage{InputTokens: 5100, OutputTokens: 920, USD: 3.40}, l.Total(),
+		cmpopts.EquateApprox(0, 1e-9)); diff != "" {
+		t.Errorf("Without changed the ledger it was called on (-want +got):\n%s", diff)
+	}
+}
+
+// TestRebuild_ASumIsNotAStep: a resumed run's ledger must say the same about
+// one step's cost as the ledger that recorded it, or the estimate an
+// interrupted step is charged would grow to the size of a whole fanout the
+// moment the run was resumed.
+func TestRebuild_ASumIsNotAStep(t *testing.T) {
+	l := Rebuild([]NodeUsage{
+		{Node: "plan", Usage: belay.Usage{InputTokens: 100, USD: 0.40}},
+		{Node: "fanout", Usage: belay.Usage{InputTokens: 9000, USD: 3.00}, Sum: true},
+	}, Snapshot{})
+	if diff := cmp.Diff(belay.Usage{InputTokens: 100, USD: 0.40}, l.Largest(), cmpopts.EquateApprox(0, 1e-9)); diff != "" {
+		t.Errorf("Largest() mismatch (-want +got):\n%s", diff)
+	}
+	if got := l.Total(); got.InputTokens != 9100 || got.USD < 3.399999 || got.USD > 3.400001 {
+		t.Errorf("Total() = %+v, want 9100 tokens in and $3.40", got)
+	}
+}

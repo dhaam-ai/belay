@@ -3,6 +3,7 @@ package fanout_test
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"os"
@@ -20,6 +21,7 @@ import (
 	"github.com/dhaam-ai/belay/internal/state"
 	"github.com/dhaam-ai/belay/pkg/belay"
 	"github.com/google/go-cmp/cmp"
+	"github.com/google/go-cmp/cmp/cmpopts"
 )
 
 const testRunID = "20260101T000000Z-abcdef123456"
@@ -46,6 +48,15 @@ type recordingRunner struct {
 	answer   func(specs []graph.CandidateSpec) ([]graph.CandidateOutcome, error)
 	outcomes []graph.CandidateOutcome
 	err      error
+
+	// claimed is what Claimed answers: whether a previous attempt of the
+	// fanout already claimed these candidates. claimErr is its error.
+	claimed  bool
+	claimErr error
+}
+
+func (r *recordingRunner) Claimed(ids []string) (bool, error) {
+	return r.claimed && len(ids) > 0, r.claimErr
 }
 
 var _ graph.CandidateRunner = (*recordingRunner)(nil)
@@ -445,6 +456,45 @@ func TestRunBudgetPreCheckRefusesBeforeAnyCandidateRuns(t *testing.T) {
 	}
 }
 
+// The launch projection decides whether to start N candidates. Once a
+// previous attempt has claimed them, their envelopes are reserved and
+// persisted, and nothing about the projection can take back money a
+// candidate already holds: refusing to adopt them saves nothing, and leaves
+// work the run has paid for uncollectable until someone raises a ceiling.
+// So an attempt that finds its candidates claimed adopts them without it.
+func TestFanoutAdoptsClaimedCandidatesWithoutTheLaunchProjection(t *testing.T) {
+	// $4 spent, three candidates projected at $4 each: $16 against $10,
+	// which the projection refuses at launch.
+	cfg := enabledConfig(3)
+	layout, _ := newLayout(t)
+	runs := &recordingRunner{claimed: true, outcomes: []graph.CandidateOutcome{
+		completed(1, "cand-01", 0, 0.5, 100),
+		completed(2, "cand-02", 1, 0.5, 200),
+		completed(3, "cand-03", 2, 0.5, 300),
+	}}
+	rc := newRunContext(cfg, layout, runs, state.Budget{LimitUSD: 10, SpentUSD: 4})
+
+	res, err := fanout.New().Run(context.Background(), rc)
+	if err != nil {
+		t.Fatalf("Run() error = %v, want the claimed candidates adopted", err)
+	}
+	if runs.callCount() != 1 {
+		t.Fatalf("the candidate runner was called %d time(s), want 1", runs.callCount())
+	}
+	if res.Status != journal.StatusOK || res.Next != graph.NodeJoin {
+		t.Errorf("Result = {%v, %q}, want a settled route to join", res.Status, res.Next)
+	}
+
+	// Not claimed: the same figures are refused before anything runs.
+	fresh := &recordingRunner{}
+	if _, err := fanout.New().Run(context.Background(), newRunContext(cfg, layout, fresh, state.Budget{LimitUSD: 10, SpentUSD: 4})); !errors.Is(err, belay.ErrBudgetExceeded) {
+		t.Fatalf("an unclaimed fanout: Run() error = %v, want the projection's refusal", err)
+	}
+	if fresh.callCount() != 0 {
+		t.Errorf("the runner was called %d time(s) for a fanout the projection refused", fresh.callCount())
+	}
+}
+
 func TestProjectCandidateCost(t *testing.T) {
 	tests := []struct {
 		name  string
@@ -760,12 +810,116 @@ func TestFanoutPausesWhenACandidateHasNoDurableEndState(t *testing.T) {
 			if !strings.Contains(res.Note, tt.wantNote) {
 				t.Errorf("Note = %q, want it to name %q", res.Note, tt.wantNote)
 			}
-			// The parent's ledger must not learn the candidates' spend at a
-			// pause: the resume settles the whole sum, which already
-			// includes it, and recording it twice would inflate the run's
-			// bill once per interruption.
-			if (res.Usage != belay.Usage{}) {
-				t.Errorf("Usage = %+v on a pause, want zero", res.Usage)
+			// The candidates' spend is reported at a pause too, as the
+			// running total it is: a fanout paused over its candidates used
+			// to leave the parent's ledger, its manifest and `belay runs`
+			// showing the plan alone. The dispatcher charges each attempt
+			// only the increase on the one before (graph's supervises), so
+			// the total is not counted twice.
+			want := belay.Usage{InputTokens: 200, OutputTokens: 100, USD: 0.8}
+			if diff := cmp.Diff(want, res.Usage, cmpopts.EquateApprox(0, 1e-9)); diff != "" {
+				t.Errorf("Usage on a pause mismatch, want what the candidates have spent (-want +got):\n%s", diff)
+			}
+		})
+	}
+}
+
+// stoppedAt is a candidate its own run paused at one of belay's limits, with
+// the note that run's journal gives, as the dispatcher writes it.
+func stoppedAt(index int, id string, cause error, reason, setting string) graph.CandidateOutcome {
+	o := completed(index, id, 0, 0.5, 100)
+	o.Status = state.RunStatusPaused
+	o.Stopped = cause
+	o.Note = reason + "; paused, so raising " + setting + " and resuming continues this run"
+	return o
+}
+
+// A candidate run that meets a limit is paused, like any run: its envelope,
+// graph.max_steps and graph.node_timeout all apply to each candidate. The
+// fanout used to report that as "its run is paused, not ended", exit 0, as
+// if it were waiting for a person to read something, with the reason in the
+// candidate's journal and nowhere else, and resuming met the same limit for
+// ever. It is now the limit pause it is: an error the dispatcher pauses the
+// run over with exit 3, naming each candidate, why its own run stopped, and
+// the setting to raise; and the spend so far, which the parent's ledger and
+// `belay runs` report.
+func TestFanoutStopsAtTheLimitItsCandidatesStoppedAt(t *testing.T) {
+	envelope := &belay.BudgetError{SpentUSD: 0.50, LimitUSD: 0.45}
+	envelopeReason := `graph: budget ceiling reached before "write": belay: budget exceeded: spent $0.5000 of $0.4500 limit`
+	steps := fmt.Errorf("%w: 3 node executions performed, limit is graph.max_steps=3", graph.ErrMaxSteps)
+	stepsReason := "graph: max steps exceeded: 3 node executions performed, limit is graph.max_steps=3"
+	slow := fmt.Errorf(`%w: "test" exceeded graph.node_timeout=1s`, graph.ErrNodeTimeout)
+	slowReason := `graph: node timeout exceeded: "test" exceeded graph.node_timeout=1s`
+	diskFull := errors.New("write candidate-runs/cand-03: no space left on device")
+
+	tests := []struct {
+		name     string
+		outcomes []graph.CandidateOutcome
+		wantIs   []error
+		wantText []string
+	}{
+		{
+			name: "candidates at their envelopes",
+			outcomes: []graph.CandidateOutcome{
+				stoppedAt(1, "cand-01", envelope, envelopeReason, "budget.max_usd or budget.max_tokens"),
+				stoppedAt(2, "cand-02", envelope, envelopeReason, "budget.max_usd or budget.max_tokens"),
+			},
+			wantIs:   []error{belay.ErrBudgetExceeded},
+			wantText: []string{"cand-01", "cand-02", "budget.max_usd", "spent $0.5000 of $0.4500"},
+		},
+		{
+			name: "one candidate at graph.max_steps, one finished",
+			outcomes: []graph.CandidateOutcome{
+				completed(1, "cand-01", 0, 0.5, 100),
+				stoppedAt(2, "cand-02", steps, stepsReason, "graph.max_steps"),
+			},
+			wantIs:   []error{graph.ErrMaxSteps},
+			wantText: []string{"cand-02", "graph.max_steps", "3 node executions performed"},
+		},
+		{
+			name: "one at graph.node_timeout, one at its envelope, one with a fault",
+			outcomes: []graph.CandidateOutcome{
+				stoppedAt(1, "cand-01", slow, slowReason, "graph.node_timeout"),
+				stoppedAt(2, "cand-02", envelope, envelopeReason, "budget.max_usd or budget.max_tokens"),
+				{ID: "cand-03", Index: 3, Err: diskFull},
+			},
+			wantIs: []error{graph.ErrNodeTimeout, belay.ErrBudgetExceeded},
+			wantText: []string{"cand-01", "graph.node_timeout", `"test" exceeded`, "cand-02", "budget.max_usd",
+				"cand-03", "no space left on device"},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := enabledConfig(len(tt.outcomes))
+			layout, _ := newLayout(t)
+			rc := newRunContext(cfg, layout, &recordingRunner{outcomes: tt.outcomes}, state.Budget{LimitUSD: 10, SpentUSD: 1})
+
+			res, err := fanout.New().Run(context.Background(), rc)
+			if err == nil {
+				t.Fatalf("Run() = %+v, nil; want an error the dispatcher pauses the run over at a limit", res)
+			}
+			for _, want := range tt.wantIs {
+				if !errors.Is(err, want) {
+					t.Errorf("Run() error = %v, want one wrapping %v", err, want)
+				}
+			}
+			for _, want := range tt.wantText {
+				if !strings.Contains(err.Error(), want) {
+					t.Errorf("Run() error = %q, want it to say %q", err, want)
+				}
+			}
+			if strings.Contains(err.Error(), "resuming continues this run") {
+				t.Errorf("Run() error = %q repeats a candidate's own advice, which is about the candidate, not this run", err)
+			}
+			if res.Patch.Candidates != nil {
+				t.Errorf("a fanout stopped at a limit recorded candidates: %v", *res.Patch.Candidates)
+			}
+			var want float64
+			for _, o := range tt.outcomes {
+				want += o.Spent.USD
+			}
+			if diff := cmp.Diff(want, res.Usage.USD, cmpopts.EquateApprox(0, 1e-9)); diff != "" {
+				t.Errorf("Usage.USD mismatch, want what the candidates spent (-want +got):\n%s", diff)
 			}
 		})
 	}
@@ -804,21 +958,55 @@ func TestFanoutSettlesWhenEveryCandidateIsRefused(t *testing.T) {
 	}
 }
 
-// The runner reporting that it could not carry the fanout out at all is not
-// a verdict about the run's code: ADR-0002 makes that an error, and the
-// candidates' own spend stays where it is durable, in their own journals.
-func TestFanoutReportsARunnerFailure(t *testing.T) {
-	boom := errors.New("claim cand-01: candidate run directory is not one belay created")
-	cfg := enabledConfig(3)
-	layout, _ := newLayout(t)
-	rc := newRunContext(cfg, layout, &recordingRunner{err: boom}, state.Budget{LimitUSD: 10, SpentUSD: 1})
-
-	res, err := fanout.New().Run(context.Background(), rc)
-	if !errors.Is(err, boom) {
-		t.Fatalf("Run() error = %v, want it to wrap %v", err, boom)
+// The runner failing to carry the fanout out at all, because it could not
+// read the parent run it claims against, is a machine fault, and a machine
+// fault pauses: ADR-0002 keeps a verdict for something the node understands,
+// and ending the run for an unreadable file put every candidate the run had
+// paid for out of reach for good. The fanout pauses with no Patch and the
+// fault in its note, and a resume tries again. Only the caller's own
+// cancellation stays an error, because the dispatcher decides what that is.
+func TestFanoutPausesOnAMachineFault(t *testing.T) {
+	boom := errors.New("graph: load the parent manifest before claiming candidates: input/output error")
+	tests := []struct {
+		name   string
+		runner *recordingRunner
+	}{
+		{name: "the runner could not read the parent run", runner: &recordingRunner{err: boom}},
+		{name: "the runner could not tell whether candidates are claimed", runner: &recordingRunner{claimErr: boom}},
 	}
-	if res.Patch.Candidates != nil {
-		t.Errorf("Patch.Candidates = %v, want nil when no verdict was reached", *res.Patch.Candidates)
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			layout, _ := newLayout(t)
+			rc := newRunContext(enabledConfig(3), layout, tt.runner, state.Budget{LimitUSD: 10, SpentUSD: 1})
+
+			res, err := fanout.New().Run(context.Background(), rc)
+			if err != nil {
+				t.Fatalf("Run() error = %v, want a paused Result: a machine fault is no verdict", err)
+			}
+			if res.Status != journal.StatusPaused || res.Patch.Candidates != nil {
+				t.Errorf("Result = {%v, candidates %v}, want paused with no Patch", res.Status, res.Patch.Candidates)
+			}
+			if !strings.Contains(res.Note, "input/output error") {
+				t.Errorf("Note = %q, want the fault", res.Note)
+			}
+		})
+	}
+}
+
+// A cancellation of the caller's own context is not a fault of the fanout's:
+// it is returned as the error it is, so the dispatcher pauses the run as
+// interrupted.
+func TestFanoutReturnsTheCallersCancellation(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	runs := &recordingRunner{answer: func([]graph.CandidateSpec) ([]graph.CandidateOutcome, error) {
+		cancel()
+		return nil, fmt.Errorf("graph: the candidate runs were interrupted: %w", context.Canceled)
+	}}
+	layout, _ := newLayout(t)
+	rc := newRunContext(enabledConfig(3), layout, runs, state.Budget{LimitUSD: 10, SpentUSD: 1})
+
+	if _, err := fanout.New().Run(ctx, rc); !errors.Is(err, context.Canceled) {
+		t.Fatalf("Run() error = %v, want one wrapping context.Canceled", err)
 	}
 }
 
@@ -918,5 +1106,28 @@ func TestFanoutRecordsEachCandidatesPolicyViolations(t *testing.T) {
 	}
 	if got[1].PolicyViolations != 0 {
 		t.Errorf("cand-02 PolicyViolations = %d, want 0: its gate recorded nothing", got[1].PolicyViolations)
+	}
+}
+
+// A fanout run resumed after budget.max_usd was set to zero has no ceiling to
+// divide. That is a setting to change, not a failure: the error wraps
+// budget.ErrNoCeiling, which the dispatcher pauses the run over, and says
+// what to set, because it is the line a person reads.
+func TestFanoutWithNoCeilingSaysWhatToSet(t *testing.T) {
+	cfg := enabledConfig(2)
+	cfg.Budget.MaxUSD = 0
+	layout, _ := newLayout(t)
+	runs := &recordingRunner{claimed: true}
+	rc := newRunContext(cfg, layout, runs, state.Budget{SpentUSD: 0.10})
+
+	_, err := fanout.New().Run(context.Background(), rc)
+	if !errors.Is(err, budget.ErrNoCeiling) {
+		t.Fatalf("Run() error = %v, want one wrapping budget.ErrNoCeiling", err)
+	}
+	if !strings.Contains(err.Error(), "set budget.max_usd above zero") {
+		t.Errorf("Run() error = %q, want it to say what to set", err)
+	}
+	if runs.callCount() != 0 {
+		t.Errorf("the runner was called %d time(s) with no ceiling to divide", runs.callCount())
 	}
 }
