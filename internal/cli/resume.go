@@ -810,6 +810,7 @@ func announceContinue(u *ui, plan *runPlan, chosen resumableRun, layout state.La
 	u.say("  state:  %s", layout.RunDir())
 	u.say("  route:  %s", routeLine(plan.route))
 	u.say("")
+	sayWarnings(u, plan)
 }
 
 // orUnrecorded fills in for a manifest that never recorded what was asked for.

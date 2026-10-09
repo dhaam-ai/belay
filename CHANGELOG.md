@@ -381,6 +381,13 @@ that only `pkg/belay` carries a compatibility promise. Everything under
   nothing. A fork of such a fix now gets one more round, and says so with the
   other differences before it spends anything; nothing in `belay.yaml` needs
   to change.
+- **belay says what it warns about on real runs, not only under `--dry-run`.**
+  Uncommitted work a branch run leaves out, a resumed run's settings
+  disagreeing with `belay.yaml`, a credential belay cannot see: each was
+  collected for every run and printed only by `--dry-run`, so the run itself
+  said none of it. `belay run`, `belay resume`, `belay fork` and each queued
+  goal now print them on stderr, after the announcement and before anything
+  is spent.
 - **A repair's file list is checked against the disk, not taken on trust.**
   The fix step routed straight back to the tests, so a repair was the one
   change in a run that nothing verified: no claimed path was proven to be a

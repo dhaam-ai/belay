@@ -1022,6 +1022,7 @@ func (d *queueDriver) Drive(ctx context.Context, e queue.Entry) (queue.Outcome, 
 	d.u.say("")
 	d.u.say("goal %d: %s", e.ID, e.Goal)
 	d.u.say("  run:   %s, in %s", e.RunID, e.Dir)
+	sayWarnings(d.u, plan)
 	view, err := dispatchOnce(ctx, plan, store, true, pauseOnCancel)
 	if err != nil {
 		return queue.Outcome{}, err

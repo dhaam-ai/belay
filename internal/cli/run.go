@@ -666,6 +666,24 @@ func announceStart(u *ui, plan *runPlan, layout state.Layout, want string) {
 	}
 	u.say("  route:  %s", routeLine(plan.route))
 	u.say("")
+	sayWarnings(u, plan)
+}
+
+// sayWarnings writes, on stderr, everything belay collected about a run that
+// a person should know and need not stop for: uncommitted work a branch run
+// leaves out, a resumed run's pins disagreeing with belay.yaml, a credential
+// it cannot see.
+//
+// --dry-run lists them, and until now nothing else did, so a run said none of
+// them at the one moment they matter: before it spends. Every announcement
+// belay makes before a dispatch ends with them -- a run's, a resume's, a
+// fork's, a queued goal's -- and a dry run, which announces nothing, keeps its
+// own section. They go to stderr, as every note about belay itself does, so a
+// piped transcript of the run is the run.
+func sayWarnings(u *ui, plan *runPlan) {
+	for _, w := range plan.warnings {
+		u.note("worth knowing: %s", w)
+	}
 }
 
 // outcomeView is everything belay's closing report reads about how one

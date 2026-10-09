@@ -415,6 +415,7 @@ func announceFork(u *ui, plan *runPlan, chosen resumableRun, spec *fork.Spec, tr
 		u.say("%s%s", label, d)
 	}
 	u.say("")
+	sayWarnings(u, plan)
 }
 
 // describeFork is `belay fork --dry-run`: everything a fork would do, from

@@ -1255,3 +1255,81 @@ func TestAfterCompletionCannotChangeTheExitStatus(t *testing.T) {
 		t.Errorf("the run was not reported after the failed save; stdout:\n%s", out.String())
 	}
 }
+
+// TestWarningsAreSaidBeforeARealRunSpends: what belay collects for a person
+// to know, and need not stop for -- uncommitted work a branch run leaves out,
+// a resumed run's pin disagreeing with belay.yaml, a credential it cannot see
+// -- was printed by --dry-run alone, so the run itself, where it matters,
+// said none of it. Every announcement belay makes before it spends anything
+// now says it, on stderr, where it stays out of a piped transcript: a run's,
+// a resume's, a fork's, and each queued goal's.
+func TestWarningsAreSaidBeforeARealRunSpends(t *testing.T) {
+	t.Setenv(anthropicKeyEnv, "")
+	t.Setenv(claudeOAuthTokenEnv, "")
+	const signIn = "neither ANTHROPIC_API_KEY nor CLAUDE_CODE_OAUTH_TOKEN is set"
+
+	resolved := func(t *testing.T, u *ui) (*runPlan, *state.Store) {
+		t.Helper()
+		ws := goWorkspace(t)
+		plan, err := resolve(resolveRequest{workspace: ws, logger: newLogger(u)})
+		if err != nil {
+			t.Fatalf("resolve: %v", err)
+		}
+		if !anyContains(plan.warnings, signIn) {
+			t.Fatalf("warnings = %q, want this test's premise: the sign-in warning", plan.warnings)
+		}
+		return plan, seedRunDir(t, plan, "add tests")
+	}
+	check := func(t *testing.T, stdout, stderr string) {
+		t.Helper()
+		if !strings.Contains(stderr, "worth knowing: "+signIn) {
+			t.Errorf("stderr never says the warning:\n%s", stderr)
+		}
+		if strings.Contains(stdout, signIn) {
+			t.Errorf("stdout carries the warning, into a piped transcript:\n%s", stdout)
+		}
+	}
+
+	t.Run("belay run", func(t *testing.T) {
+		var out, errOut bytes.Buffer
+		u := &ui{out: &out, err: &errOut}
+		plan, store := resolved(t, u)
+		announceStart(u, plan, store.Layout(), "add tests")
+		check(t, out.String(), errOut.String())
+	})
+	t.Run("belay resume", func(t *testing.T) {
+		var out, errOut bytes.Buffer
+		u := &ui{out: &out, err: &errOut}
+		plan, store := resolved(t, u)
+		chosen := resumableRun{id: store.Layout().RunID(), goal: "add tests", status: state.RunStatusPaused, node: graph.NodeApprove}
+		announceContinue(u, plan, chosen, store.Layout(), false)
+		check(t, out.String(), errOut.String())
+	})
+	t.Run("belay fork", func(t *testing.T) {
+		ws, id := forkSource(t)
+		var out, errOut bytes.Buffer
+		u := &ui{out: &out, err: &errOut}
+		req := forkRequest{runID: id, node: graph.NodeTest}
+		plan, err := resolve(resolveRequest{workspace: ws, logger: newLogger(u), override: req.configure})
+		if err != nil {
+			t.Fatalf("resolve: %v", err)
+		}
+		plan.registry, _ = forkScript()
+		if err := makeFork(cmdWithContext(), u, plan, req); err != nil {
+			t.Fatalf("makeFork: %v\n%s%s", err, out.String(), errOut.String())
+		}
+		check(t, out.String(), errOut.String())
+	})
+	t.Run("a queued goal", func(t *testing.T) {
+		ws := goWorkspace(t)
+		queueAdd(t, ws, "--no-approval", "add docs")
+		var reached []string
+		out, err := startQueue(t.Context(), t, ws, fakeGoals(reaches{goals: &reached}))
+		if err != nil {
+			t.Fatalf("start: %v", err)
+		}
+		if !strings.Contains(out, "worth knowing: "+signIn) {
+			t.Errorf("the start never says the goal's warning:\n%s", out)
+		}
+	})
+}
