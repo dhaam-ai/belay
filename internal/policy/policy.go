@@ -5,7 +5,10 @@
 // acceptable". A change that passes every test can still edit the deployment
 // pipeline, add a dependency nobody vetted, grow by four thousand lines, or
 // leave a credential in a source file. belay points a coding agent at a
-// repository and walks away; the rules here are what makes that safe to do.
+// repository and walks away; the rules here are what a person writes down
+// about the change that run may deliver. What they judge is the caller's to
+// supply: internal/nodes/policy hands them what the workspace says changed,
+// not only what the agent reports, and they see nothing outside it.
 //
 // # This package decides nothing about the run
 //
@@ -260,6 +263,10 @@ type Change struct {
 	// slash-separated, as the write node verified them against disk. A path
 	// that is not on disk is a deletion.
 	Files []string
+	// FoldCase matches every rule's globs without regard to case, for a
+	// workspace on a disk where two names that differ only in case are one
+	// file (see glob.Pattern.Fold).
+	FoldCase bool
 }
 
 // Violation is one way a change breaks a policy.
@@ -409,7 +416,7 @@ func Evaluate(ctx context.Context, p Policy, base Baseline, ch Change) (Report, 
 	files := slices.Compact(slices.Sorted(slices.Values(ch.Files)))
 	report := Report{Violations: []Violation{}}
 
-	forbidden, err := compileSet("policy.forbidden_paths", p.ForbiddenPaths)
+	forbidden, err := compileSet("policy.forbidden_paths", p.ForbiddenPaths, ch.FoldCase)
 	if err != nil {
 		return Report{}, err
 	}
@@ -451,7 +458,7 @@ func Evaluate(ctx context.Context, p Policy, base Baseline, ch Change) (Report, 
 	}
 
 	for _, rule := range p.RequiredTests {
-		v, err := requiredTest(rule, files)
+		v, err := requiredTest(rule, files, ch.FoldCase)
 		if err != nil {
 			return Report{}, err
 		}
@@ -478,12 +485,12 @@ func (r *Report) add(rule Rule, path string, line int, message string) {
 // changes of a kind this change did not make. The violation names one file
 // that triggered it rather than all of them, because the repair is the same
 // whichever triggered it and the agent needs an example, not an inventory.
-func requiredTest(rule TestRule, files []string) (*Violation, error) {
-	when, err := compileOne("policy.required_tests.when", rule.When)
+func requiredTest(rule TestRule, files []string, fold bool) (*Violation, error) {
+	when, err := compileOne("policy.required_tests.when", rule.When, fold)
 	if err != nil {
 		return nil, err
 	}
-	require, err := compileOne("policy.required_tests.require", rule.Require)
+	require, err := compileOne("policy.required_tests.require", rule.Require, fold)
 	if err != nil {
 		return nil, err
 	}
@@ -514,19 +521,28 @@ func requiredTest(rule TestRule, files []string) (*Violation, error) {
 // belay that allowed it, or edited by hand. Either way the honest answer is
 // no verdict rather than a pass: a rule belay cannot evaluate has not been
 // satisfied, it has been skipped.
-func compileSet(setting string, patterns []string) (glob.Set, error) {
+//
+// fold returns the set folded, for a workspace whose disk folds case.
+func compileSet(setting string, patterns []string, fold bool) (glob.Set, error) {
 	set, err := glob.CompileAll(patterns)
 	if err != nil {
 		return glob.Set{}, fmt.Errorf("policy: %s: %w", setting, err)
 	}
+	if fold {
+		return set.Fold(), nil
+	}
 	return set, nil
 }
 
-// compileOne compiles one glob, naming the setting it came from.
-func compileOne(setting, pattern string) (glob.Pattern, error) {
+// compileOne compiles one glob, naming the setting it came from, and folds
+// it when fold is set.
+func compileOne(setting, pattern string, fold bool) (glob.Pattern, error) {
 	p, err := glob.Compile(pattern)
 	if err != nil {
 		return glob.Pattern{}, fmt.Errorf("policy: %s: %w", setting, err)
+	}
+	if fold {
+		return p.Fold(), nil
 	}
 	return p, nil
 }

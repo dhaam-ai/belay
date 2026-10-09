@@ -34,6 +34,7 @@ type (
 	rcReviewer struct{ belay.Reviewer }
 	rcIsolator struct{ belay.Isolator }
 	rcVCS      struct{ vcs.Repository }
+	rcChanges  struct{ ChangeSource }
 )
 
 // rcIdle exists because NewDispatcher refuses an empty registry.
@@ -182,6 +183,8 @@ func TestRunContextCarriesEverythingANodeIsAllowedToSee(t *testing.T) {
 	cfg := config.Default()
 	agent, runner, linter := &rcAgent{}, &rcRunner{}, &rcLinter{}
 	reviewer, isolator, repo := &rcReviewer{}, &rcIsolator{}, &rcVCS{}
+	changes := &rcChanges{}
+	var changesAsked *state.Manifest
 	reg := NewRegistry()
 	reg.MustRegister(rcIdle{})
 	d, err := NewDispatcher(Options{
@@ -189,6 +192,15 @@ func TestRunContextCarriesEverythingANodeIsAllowedToSee(t *testing.T) {
 		Logger: slog.New(slog.NewJSONHandler(&logs, nil)),
 		Agent:  agent, Runner: runner, Linter: linter, Reviewer: reviewer, Isolator: isolator,
 		VCS: repo,
+		// Built from the manifest of the run being driven, so a candidate
+		// run's nodes read their own workspace's change and not the parent's.
+		Changes: func(m *state.Manifest, l state.Layout) ChangeSource {
+			changesAsked = m
+			if l != layout {
+				t.Errorf("Options.Changes was given layout %+v, want the run's own", l)
+			}
+			return changes
+		},
 	})
 	if err != nil {
 		t.Fatalf("NewDispatcher: %v", err)
@@ -247,10 +259,15 @@ func TestRunContextCarriesEverythingANodeIsAllowedToSee(t *testing.T) {
 		{"ArchiveDir", rc.ArchiveDir, "notes/plans"},
 		{"Policy", rc.Policy, man.Policy},
 		{"VCS", rc.VCS, repo},
+		{"Changes", rc.Changes, changes},
 	} {
 		if !reflect.DeepEqual(tc.got, tc.want) {
 			t.Errorf("RunContext.%s = %#v, want %#v", tc.field, tc.got, tc.want)
 		}
+	}
+
+	if changesAsked != &man {
+		t.Errorf("Options.Changes was asked about %p, want the run's own manifest %p", changesAsked, &man)
 	}
 
 	// A field added to RunContext without a source here reaches every node

@@ -318,6 +318,49 @@ that only `pkg/belay` carries a compatibility promise. Everything under
 
 ### Fixed
 
+- **The policy gate judges what the workspace says changed, not what the
+  agent says it changed.** It judged the agent's own report, so an agent
+  that edited `infra/main.tf` and rewrote `belay.yaml` to `policy: {}` while
+  reporting only `src/app.py` passed every rule ("1 file checked"), and a
+  branch run committed both edits; a report spelled `Infra/main.tf` dodged
+  `infra/**` too. belay now reads the change off the workspace: in a git
+  repository, every file git says differs from the run's starting commit,
+  committed, staged, edited, deleted or new, in its true name; in place in a
+  git checkout, less what you had already changed before the run; with no
+  git (including a queued goal's copy and an in-place run's candidates),
+  every file that differs from a record of the workspace taken when the run
+  starts. Files the agent changed and did not report are judged like the
+  rest and named in the gate's verdict, `belay timeline` and the commit. On
+  a disk that folds case, as macOS's does, rules match without regard to
+  case. A fork, whose copy cannot say where its source's change began, is
+  judged on the agent's report and says so in every verdict and in its dry
+  run. `belay run --dry-run` says what the gate will judge.
+- **A branch run commits exactly what was recorded and judged.** promote
+  committed everything in the run's worktree, so an edit made there while a
+  run was paused, or a file the test command wrote, went into the commit
+  unjudged while the timeline said fewer files were verified. promote now
+  pauses, naming the files, when the worktree holds anything the run's
+  steps did not record, and in a guarded run judges the change against the
+  policy once more before committing; remove what does not belong and
+  `belay resume`. A run started in a subdirectory pauses the same way over
+  a change above that directory.
+- **A repository's `belay.yaml` can no longer drop your own guardrails.**
+  Policy rules from a later configuration file replaced the earlier ones
+  outright, so a project `belay.yaml` forbidding `secrets/**` silently
+  discarded the `.github/workflows/**` and `infra/**` your
+  `~/.config/belay/config.yaml` forbade, and the dry run showed only the
+  project's rule. Policy now combines across files to the most restrictive
+  result: forbidden paths, required tests and forbidden content are joined,
+  each ceiling is the smallest any file sets (a later `0` does not lift
+  one), and `no_new_dependencies` holds if any file sets it. Every other
+  setting still takes the later file's value.
+- **A policy pattern that describes a secret is no longer redacted as one.**
+  `belay run` printed "redacted secret-shaped config values" on every run
+  whose `policy.forbidden_content` held a pattern like the documented
+  `AKIA[0-9A-Z]{16}`, or whose `policy.forbidden_paths` held a long path,
+  and the manifest's record of the settings showed `REDACTED` where the rule
+  should be. The rules are kept now; a value shaped like a credential under
+  any other setting is still redacted.
 - **belay starts on a Claude model its price table does not list.** It
   refused, before spending anything, any model outside the table it ships
   with: `claude-sonnet-4-5`, `claude-opus-4-1`, a dated identifier such as

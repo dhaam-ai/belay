@@ -62,21 +62,23 @@ policy:
 	}
 }
 
-// A later layer wins a whole field, as every other setting does. A policy
-// merged list by list would be a rule set nobody could read out of either
-// file: the project's belay.yaml would silently inherit forbidden paths from
-// a personal config that nobody else on the team has.
-func TestALaterLayerReplacesAPolicyListOutright(t *testing.T) {
+// A later layer adds to a policy list and never replaces it, unlike every
+// other setting (ADR-0014). Replacing let a project's belay.yaml, the file a
+// coding agent can edit, drop the forbidden paths a person's own
+// configuration declared. The combined set is what the run is held to, and
+// `belay run --dry-run` prints every rule in it, so nobody has to read it out
+// of two files.
+func TestALaterLayerAddsToAPolicyListAndNeverReplacesIt(t *testing.T) {
 	t.Parallel()
 
 	var cfg Config
 	if err := cfg.Merge([]byte("version: 1\npolicy:\n  forbidden_paths: [\"a/**\", \"b/**\", \"c/**\"]\n"), "user"); err != nil {
 		t.Fatalf("merge the user layer: %v", err)
 	}
-	if err := cfg.Merge([]byte("policy:\n  forbidden_paths: [\"z/**\"]\n"), "project"); err != nil {
+	if err := cfg.Merge([]byte("policy:\n  forbidden_paths: [\"z/**\", \"b/**\"]\n"), "project"); err != nil {
 		t.Fatalf("merge the project layer: %v", err)
 	}
-	if diff := cmp.Diff([]string{"z/**"}, cfg.Policy.ForbiddenPaths); diff != "" {
+	if diff := cmp.Diff([]string{"a/**", "b/**", "c/**", "z/**"}, cfg.Policy.ForbiddenPaths); diff != "" {
 		t.Errorf("forbidden_paths after merging (-want +got):\n%s", diff)
 	}
 }
@@ -221,5 +223,101 @@ policy:
 	}
 	if Default().Snapshot()["policy.forbidden_paths"] != "" {
 		t.Error("a run with no policy must snapshot an empty value, so its digest is what it always was")
+	}
+}
+
+// A guardrail is a promise somebody relies on, so a later configuration
+// layer can add to the rules and tighten them but never take one away. The
+// repository's belay.yaml is exactly the file a coding agent can edit, and
+// under the per-field rule every other setting follows, a project file
+// naming one forbidden path silently dropped the person's own: the user
+// layer below forbade .github/workflows/** and infra/** and allowed five
+// files, and the run that read it was held to secrets/** alone.
+func TestLoadPolicyLayersCombineToTheMostRestrictive(t *testing.T) {
+	xdg := t.TempDir()
+	project := t.TempDir()
+	explicit := t.TempDir()
+
+	writeFile(t, xdg, UserFile, `
+agent:
+  model: user-model
+policy:
+  forbidden_paths: [".github/workflows/**", "infra/**"]
+  max_changed_files: 5
+  max_changed_lines: 300
+  no_new_dependencies: true
+  required_tests:
+    - {when: "**/*.go", require: "**/*_test.go"}
+  forbidden_content:
+    - {pattern: "AKIA[0-9A-Z]{16}", reason: "an AWS access key id"}
+`)
+	writeFile(t, project, ProjectFile, `
+agent:
+  model: project-model
+policy:
+  forbidden_paths: ["secrets/**", "infra/**"]
+  max_changed_files: 25
+  max_changed_lines: 100
+  no_new_dependencies: false
+  required_tests:
+    - {when: "**/*.py", require: "tests/**"}
+  forbidden_content:
+    - {pattern: "AKIA[0-9A-Z]{16}", reason: "an AWS access key id"}
+    - {pattern: "BEGIN RSA PRIVATE KEY", paths: ["config/**"]}
+`)
+	// --config is the highest layer, and still cannot lift a ceiling or
+	// empty the lists: zero means "no ceiling", which is not a tightening.
+	path := writeFile(t, explicit, "ci.yaml", `
+policy:
+  forbidden_paths: []
+  max_changed_files: 0
+`)
+
+	got, err := Load(Options{Path: path, Dir: project, XDGConfigHome: xdg})
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+
+	want := Policy{
+		ForbiddenPaths:    []string{".github/workflows/**", "infra/**", "secrets/**"},
+		MaxChangedFiles:   5,
+		MaxChangedLines:   100,
+		NoNewDependencies: true,
+		RequiredTests: []TestRule{
+			{When: "**/*.go", Require: "**/*_test.go"},
+			{When: "**/*.py", Require: "tests/**"},
+		},
+		ForbiddenContent: []ContentRule{
+			{Pattern: "AKIA[0-9A-Z]{16}", Reason: "an AWS access key id"},
+			{Pattern: "BEGIN RSA PRIVATE KEY", Paths: []string{"config/**"}},
+		},
+	}
+	if diff := cmp.Diff(want, got.Policy); diff != "" {
+		t.Errorf("combined policy (-want +got):\n%s", diff)
+	}
+	// Every other setting keeps the per-field rule: the highest layer that
+	// sets it wins.
+	if got.Agent.Model != "project-model" {
+		t.Errorf("agent.model = %q, want %q: only policy combines across layers", got.Agent.Model, "project-model")
+	}
+}
+
+// A layer that writes the policy section empty, or as null, is a layer that
+// adds nothing, not one that clears the rules below it.
+func TestLoadPolicyALaterEmptySectionClearsNothing(t *testing.T) {
+	for _, section := range []string{"policy: {}\n", "policy:\n", "policy: null\n"} {
+		xdg := t.TempDir()
+		project := t.TempDir()
+		writeFile(t, xdg, UserFile, "policy:\n  forbidden_paths: [\"infra/**\"]\n  max_changed_files: 5\n")
+		writeFile(t, project, ProjectFile, "version: 1\n"+section)
+
+		got, err := Load(Options{Dir: project, XDGConfigHome: xdg})
+		if err != nil {
+			t.Fatalf("Load with a project %q: %v", section, err)
+		}
+		want := Policy{ForbiddenPaths: []string{"infra/**"}, MaxChangedFiles: 5}
+		if diff := cmp.Diff(want, got.Policy); diff != "" {
+			t.Errorf("a project file with %q (-want +got):\n%s", section, diff)
+		}
 	}
 }

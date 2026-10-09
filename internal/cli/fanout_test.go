@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"reflect"
 	"slices"
 	"strings"
 	"testing"
@@ -689,7 +690,7 @@ func TestWinnerOfReadsTheBlackboardAfterTheDispatch(t *testing.T) {
 	if got := winnerOf(store, true); got.ID != "cand-02" || got.Dir != "/w/cand-02" {
 		t.Errorf("winnerOf = %+v, want cand-02 in /w/cand-02", got)
 	}
-	if got := winnerOf(store, false); got != (state.Candidate{}) {
+	if got := winnerOf(store, false); !reflect.DeepEqual(got, state.Candidate{}) {
 		t.Errorf("winnerOf a run that does not fan out = %+v, want the zero Candidate", got)
 	}
 

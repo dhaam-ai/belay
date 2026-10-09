@@ -257,6 +257,12 @@ type Manifest struct {
 	// visit it re-runs, and what the history it inherited cost. Nil for every
 	// run a person started. It is a record, not a pin; see Origin.
 	Origin *Origin `json:"origin,omitempty"`
+	// Changes is where this run learns what its workspace changed, pinned
+	// when the run was created: git against a base commit, a file record in
+	// the run directory, or only the agent's report. Nil for a run created
+	// before belay recorded it, which is read as the agent's report. Set it
+	// with SetChanges.
+	Changes *Changes `json:"changes,omitempty"`
 }
 
 // ArchivedPlan is where a run files its approved plan once it completes
@@ -544,6 +550,29 @@ var secretValuePattern = regexp.MustCompile(
 // redactedValue replaces any snapshot value RedactSnapshot flags.
 const redactedValue = "REDACTED"
 
+// rulesAboutSecrets are the snapshot keys whose values are policy rules: a
+// path glob, or a pattern for content a change may not contain. They are
+// exempt from the value-shape check, and only from that one.
+//
+// A rule that describes a secret is not a secret. The documented
+// forbidden_content example, AKIA[0-9A-Z]{16}, begins exactly the way an AWS
+// key id does, and a long forbidden path is a run of the very characters a
+// token is made of. Redacting them hid the rules from whoever reads the
+// manifest and printed a "redacted secret" warning on every guarded run,
+// which teaches people to ignore the warning that matters. It also protected
+// nothing: the run's policy pin (Manifest.Policy) records the same rules
+// verbatim, because the gate has to read them back, so a person who wrote a
+// literal key into a pattern has written it into the manifest either way.
+//
+// The list names keys rather than exempting the policy section, so a later
+// policy key that does name a credential is still caught by its name, and
+// its value is still checked.
+var rulesAboutSecrets = map[string]bool{
+	"policy.forbidden_paths":   true,
+	"policy.required_tests":    true,
+	"policy.forbidden_content": true,
+}
+
 // RedactSnapshot returns a copy of snap with every value that looks like a
 // secret — by its key name or by the value's own shape — replaced with
 // "REDACTED", together with the sorted list of keys it touched.
@@ -556,11 +585,14 @@ const redactedValue = "REDACTED"
 // assuming upstream got it right — a hand-built config.Snapshot (in a test,
 // or a future caller) has no way to smuggle a real token into a committed
 // run directory.
+//
+// The policy rules are the exception to the value check, and only to it: see
+// rulesAboutSecrets for why a rule that describes a secret is kept.
 func RedactSnapshot(snap config.Snapshot) (config.Snapshot, []string) {
 	out := make(config.Snapshot, len(snap))
 	var redacted []string
 	for k, v := range snap {
-		if looksLikeSecretKey(k) || looksLikeSecretValue(v) {
+		if looksLikeSecretKey(k) || (!rulesAboutSecrets[k] && looksLikeSecretValue(v)) {
 			out[k] = redactedValue
 			redacted = append(redacted, k)
 			continue

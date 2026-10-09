@@ -168,6 +168,9 @@ func (p *runPlan) resumePreflight(ctx context.Context, store *state.Store) error
 	p.bindOutput(ctx, manifest)
 	p.bindPolicy(manifest)
 	p.bindFanout(manifest)
+	// What the gate judges is the run's pin too: a dry run of a resume
+	// describes the ground truth the run was created with.
+	p.changes, p.changesRepo = manifest.Changes, nil
 	return nil
 }
 

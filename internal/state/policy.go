@@ -37,6 +37,11 @@ type PolicyPin struct {
 	Policy policy.Policy `json:"policy"`
 	// Baseline is what the workspace declared when the run was created.
 	Baseline policy.Baseline `json:"baseline"`
+	// FoldCase says the workspace's file system treats two names that
+	// differ only in case as one file, as macOS does by default, so the
+	// rules match paths without regard to case. It is decided when the run
+	// is created, by asking the file system the run directory is on.
+	FoldCase bool `json:"fold_case,omitempty"`
 }
 
 // SetPolicy pins the guardrails this run's change must obey, and records the

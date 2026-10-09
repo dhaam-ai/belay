@@ -31,6 +31,7 @@ var allowedImports = map[string]bool{
 	"log/slog":      true,
 	"os":            true,
 	"path/filepath": true,
+	"slices":        true,
 	"sort":          true,
 	"strings":       true,
 	"unicode":       true,

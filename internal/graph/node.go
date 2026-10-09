@@ -301,7 +301,46 @@ type RunContext struct {
 	// and finds it nil refuses with ErrNoCandidateRunner, like any other
 	// missing adapter.
 	CandidateRuns CandidateRunner
+
+	// Changes reads what this run's workspace really changed, from the
+	// workspace rather than from the agent's report: git against the run's
+	// base commit, or the record of its files taken when the workspace was
+	// handed to the run. The write node records its answer beside the
+	// report, and the policy gate judges the two together, so an agent
+	// cannot walk past a guardrail by leaving an edit out of its report.
+	//
+	// It is built per run from the manifest's pin (state.Manifest.Changes),
+	// by the factory the dispatcher was given in Options.Changes, so a
+	// candidate run reads its own workspace and not its parent's. It is nil
+	// when no factory was given, and a run whose pin says there is no ground
+	// truth gets one that answers ErrUnrecorded; a node treats both as
+	// "only the agent's report", and says so.
+	Changes ChangeSource
 }
+
+// ChangeSource reads what a workspace changed since its run began.
+//
+// It is an interface rather than a git type for the reason VCS is: this
+// package has no build tag, and the git implementation runs git through
+// internal/exec, which builds only on unix. internal/filerecord's Source is
+// the other implementation.
+type ChangeSource interface {
+	// Changes returns every path under dir, relative to it, sorted and
+	// slash-separated, that differs from where the run began: created,
+	// altered, deleted or renamed (both names), whoever reported what.
+	//
+	// An error wrapping ErrUnrecorded means this run keeps no record to
+	// measure against, and says why. Any other error means the question
+	// could not be answered, and a node must reach no verdict rather than
+	// fall back to the agent's report: an answer an agent could make fail
+	// on purpose must not turn into the agent's own word.
+	Changes(ctx context.Context, dir string) ([]string, error)
+}
+
+// ErrUnrecorded reports a run that keeps no record of where its workspace
+// began, so what it changed can only be taken from its agent's report. The
+// error wrapping it says why.
+var ErrUnrecorded = errors.New("graph: this run keeps no record of what its workspace held when it began")
 
 // WriteArtifact writes a run artifact — plan.md, review.json, a diff — and
 // returns its path relative to the run directory, suitable for storing in

@@ -439,7 +439,11 @@ func (n writesAFile) Run(_ context.Context, rc *graph.RunContext) (graph.Result,
 	if err := os.WriteFile(path, []byte(n.body), 0o600); err != nil {
 		return graph.Result{Status: journal.StatusFailed}, err
 	}
-	return graph.Result{Status: journal.StatusOK, Next: n.next, Note: "gate passed"}, nil
+	// Recorded as the write step records a change, because promote commits
+	// only what the run's steps recorded.
+	code := rc.State.Code
+	code.ChangedFiles = []string{n.rel}
+	return graph.Result{Status: journal.StatusOK, Next: n.next, Note: "gate passed", Patch: state.Patch{Code: &code}}, nil
 }
 
 // This is the assertion the whole slice exists for: a real run in branch

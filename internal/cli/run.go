@@ -236,6 +236,13 @@ func createRun(ctx context.Context, plan *runPlan, spec runSpec) (*state.Store, 
 	if err := plan.prepareWorkspace(ctx, layout, &manifest); err != nil {
 		return nil, err
 	}
+	// Where the run's change is read from, and the record it needs, before
+	// the agent has touched anything. After prepareWorkspace for the reason
+	// the baseline below is.
+	if err := plan.pinChanges(ctx, layout, &manifest); err != nil {
+		plan.unwindWorkspace(ctx, manifest.Output)
+		return nil, err
+	}
 	// After prepareWorkspace, because the baseline is a survey of the tree
 	// this run's nodes will work in, and for a branch run that tree does not
 	// exist until the worktree has been made. Before the manifest, so the pin
@@ -296,7 +303,12 @@ func (p *runPlan) pinPolicy(ctx context.Context, layout state.Layout, manifest *
 	// Through SetPolicy, never by assigning Manifest.Policy: the field and
 	// the capability an older belay would have to refuse are one decision
 	// (ADR-0011, and state.CapabilityPolicyGate).
-	manifest.SetPolicy(state.PolicyPin{Policy: p.policy.Policy, Baseline: baseline})
+	// FoldCase is asked of the disk the run works on, through its own run
+	// directory, which createRun has just made: on a disk where Infra and
+	// infra are one directory, a rule about one is a rule about the other.
+	manifest.SetPolicy(state.PolicyPin{
+		Policy: p.policy.Policy, Baseline: baseline, FoldCase: foldsCase(layout.ArtifactsDir()),
+	})
 	return nil
 }
 
@@ -1397,8 +1409,12 @@ func dryRunPolicy(plan *runPlan) dryRunSection {
 		}
 		add(false, "%s", line)
 	}
-	lines = append(lines, "belay records these rules and this workspace's dependencies when the run starts, and "+
-		"holds the run to them even if belay.yaml changes")
+	lines = append(lines,
+		"belay records these rules and this workspace's dependencies when the run starts, and "+
+			"holds the run to them even if belay.yaml changes",
+		changesLine(plan),
+		"belay does not sandbox the agent, and the gate judges only the workspace: nothing the agent writes "+
+			"outside the workspace is checked")
 	return dryRunSection{title: "the guardrails its change must obey", lines: lines}
 }
 

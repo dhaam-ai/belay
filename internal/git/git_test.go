@@ -471,6 +471,10 @@ func hardenedCalls(t *testing.T, f *fixture, dir string) []hardenedCall {
 			_, err := r.Changed(t.Context(), "HEAD~1", "HEAD")
 			return err
 		}},
+		{name: "Changes", call: func(r *Repo) error {
+			_, err := r.Changes(t.Context(), dir, f.git(dir, "rev-parse", "HEAD~1"))
+			return err
+		}},
 		{name: "Tip", call: func(r *Repo) error { _, err := r.Tip(t.Context(), dir); return err }},
 		{name: "Carries", call: func(r *Repo) error {
 			_, err := r.Carries(t.Context(), dir, vcs.Trailer{Key: "Belay-Run", Value: "hardening"})

@@ -444,6 +444,7 @@ type pool struct {
 	concurrency   int
 	agentFor      func(string) belay.AgentBackend
 	pauseOnCancel bool
+	changes       func(*state.Manifest, state.Layout) graph.ChangeSource
 }
 
 // poolDispatcher builds the parent dispatcher for a run whose fanout node
@@ -464,6 +465,7 @@ func (h *harness) poolDispatcher(t *testing.T, p pool, nodes ...graph.Node) *gra
 		CandidateAgent:    p.agentFor,
 		Concurrency:       p.concurrency,
 		PauseOnCancel:     p.pauseOnCancel,
+		Changes:           p.changes,
 	})
 	if err != nil {
 		t.Fatalf("NewDispatcher() error = %v", err)

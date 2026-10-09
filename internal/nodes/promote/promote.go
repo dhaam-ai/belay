@@ -175,6 +175,7 @@ import (
 	"github.com/dhaam-ai/belay/internal/graph"
 	"github.com/dhaam-ai/belay/internal/journal"
 	"github.com/dhaam-ai/belay/internal/planarchive"
+	rules "github.com/dhaam-ai/belay/internal/policy"
 	"github.com/dhaam-ai/belay/internal/state"
 	"github.com/dhaam-ai/belay/internal/vcs"
 	"github.com/dhaam-ai/belay/pkg/belay"
@@ -346,8 +347,11 @@ func checkOutput(rc *graph.RunContext) error {
 
 // promoteRun commits the run's own gated change.
 func promoteRun(ctx context.Context, rc *graph.RunContext) (graph.Result, error) {
+	if res, stop, err := accountFor(ctx, rc, rc.Output.WorkTree, rc.Workspace, rc.State.Code.ChangedFiles); err != nil || stop {
+		return res, err
+	}
 	archive(ctx, rc, rc.Workspace, rc.Output.WorkTree, trailers(rc.RunID, ""))
-	tip, err := rc.VCS.Commit(ctx, rc.Output.WorkTree, workMessage(rc, ""))
+	tip, err := rc.VCS.Commit(ctx, rc.Output.WorkTree, workMessage(rc, "", rc.State.Code.Unreported))
 	if err != nil {
 		if res, ok := unfinished(rc, err); ok {
 			return res, nil
@@ -387,8 +391,11 @@ func promoteWinner(ctx context.Context, rc *graph.RunContext) (graph.Result, err
 		if err := present(rc, winner); err != nil {
 			return failed(), err
 		}
+		if res, stop, err := accountFor(ctx, rc, worktreeTop(winner.Dir, rc.Output.Prefix), winner.Dir, winner.ChangedFiles); err != nil || stop {
+			return res, err
+		}
 		archive(ctx, rc, winner.Dir, winner.Dir, mark)
-		if _, err := rc.VCS.Commit(ctx, winner.Dir, workMessage(rc, winner.ID)); err != nil {
+		if _, err := rc.VCS.Commit(ctx, winner.Dir, workMessage(rc, winner.ID, winner.Unreported)); err != nil {
 			if res, ok := unfinished(rc, err); ok {
 				return res, nil
 			}
@@ -644,10 +651,143 @@ func unfinished(rc *graph.RunContext, err error) (graph.Result, bool) {
 }
 
 // workMessage is the message of a commit that records work: the run's own
-// change, or, given a candidate, that candidate's.
-func workMessage(rc *graph.RunContext, candidate string) vcs.Message {
+// change, or, given a candidate, that candidate's. unreported are the files
+// in it that changed without the agent reporting them, whoever changed them
+// (a person editing a paused run's worktree is one way); the body names them, because
+// the commit is what a pull request's reader sees, and they should not have
+// to open the run's journal to learn which files the agent left out of its
+// account.
+func workMessage(rc *graph.RunContext, candidate string, unreported []string) vcs.Message {
 	subject, body := describe(rc.Goal, rc.RunID)
+	if len(unreported) > 0 {
+		body = strings.TrimSpace(body + "\n\nThese files changed during the run and the agent did not report " +
+			"them; belay recorded and judged them with the rest: " + strings.Join(unreported, ", ") + ".")
+	}
 	return vcs.Message{Subject: subject, Body: body, Trailers: trailers(rc.RunID, candidate)}
+}
+
+// accountFor stands between a tree and its commit: it returns a pause, and
+// true, when the tree at top holds anything beyond what the run's steps
+// recorded and judged, or, for a guarded run, when what it is about to
+// commit breaks the run's policy now.
+//
+// The set the gate judged and the set promote commits must be one set. A
+// commit carries everything git says the tree changed since the run's base
+// (vcs.Repository.Commit curates nothing), and between the gate and here the
+// test step runs code the agent wrote, the review step runs linters, and a
+// paused run's worktree is open to a person. Any of them can change a file.
+// A file no step recorded (recorded is the run's, or the winner's, own
+// Code.ChangedFiles, relative to workspace) is named and the run pauses:
+// committing it would ship something no gate judged while the run reports
+// what it verified, and a person can say whether it belongs far more cheaply
+// than belay can guess. The approved plan promote itself writes is the one
+// file it accounts for on its own.
+//
+// It pauses rather than fails because nothing is lost: nothing has been
+// committed, and `belay resume` asks again once the file is dealt with.
+// Including the file and naming it instead was considered and rejected, as
+// the less safe of the two: by then it is on the branch a pull request
+// proposes.
+//
+// For a guarded run, the change about to be committed is judged against the
+// pinned policy once more, because a file the gate passed can have been
+// rewritten since. A violation pauses for the same reason; a rule that
+// cannot be evaluated is no verdict, an error.
+//
+// It converges: a re-run after the commit finds the same change committed
+// and the plan beside it, and reaches the same answer.
+func accountFor(ctx context.Context, rc *graph.RunContext, top, workspace string, recorded []string) (graph.Result, bool, error) {
+	changed, err := rc.VCS.Changes(ctx, top, rc.Output.Base)
+	if err != nil {
+		return failed(), false, fmt.Errorf("promote: read what %s changed since %s: %w", top, short(rc.Output.Base), err)
+	}
+	prefix := rc.Output.Prefix
+	plan := ""
+	if rc.ArchiveDir != "" {
+		plan = prefix + planarchive.Rel(rc.ArchiveDir, rc.RunID, rc.Goal)
+	}
+	var stray, outside, inside []string
+	for _, p := range changed {
+		if p == plan {
+			continue
+		}
+		rel, within := strings.CutPrefix(p, prefix)
+		switch {
+		case !within:
+			outside = append(outside, p)
+		case !slices.Contains(recorded, rel):
+			stray = append(stray, p)
+		default:
+			inside = append(inside, rel)
+		}
+	}
+	if len(stray)+len(outside) > 0 {
+		logger(rc).Warn("promote: the tree holds changes no step of the run recorded; pausing",
+			slog.String("tree", top), slog.Any("files", slices.Concat(stray, outside)))
+		return graph.Result{Status: journal.StatusPaused, Note: unaccountedNote(rc, top, prefix, stray, outside)}, true, nil
+	}
+	if rc.Policy == nil {
+		return graph.Result{}, false, nil
+	}
+	report, err := rules.Evaluate(ctx, rc.Policy.Policy, rc.Policy.Baseline, rules.Change{
+		Workspace: workspace, Files: inside, FoldCase: rc.Policy.FoldCase,
+	})
+	if err != nil {
+		return failed(), false, fmt.Errorf("promote: judge the change about to be committed: %w", err)
+	}
+	if report.Clean() {
+		return graph.Result{}, false, nil
+	}
+	var fired []string
+	for _, v := range report.Violations {
+		if !slices.Contains(fired, string(v.Rule)) {
+			fired = append(fired, string(v.Rule))
+		}
+	}
+	logger(rc).Warn("promote: the change about to be committed breaks the run's policy; pausing",
+		slog.String("rules", strings.Join(fired, ", ")))
+	return graph.Result{
+		Status: journal.StatusPaused,
+		Note: fmt.Sprintf("the change about to be committed breaks this run's policy (%s: %s), though it passed the "+
+			"gate: something changed it since. Undo that in %s, then `belay resume %s`",
+			report.Summary(), strings.Join(fired, ", "), top, rc.RunID),
+	}, true, nil
+}
+
+// unaccountedNote tells a person what accountFor found and how to go on.
+//
+// A change outside the directory a run was started in gets a sentence of
+// its own, because undoing it is not always the answer: an agent that added
+// a dependency in a subdirectory may have had to touch the go.mod above it.
+// No step of such a run records or judges anything outside its directory,
+// so the remedy for a change that must reach above it is to run from the
+// repository's top.
+func unaccountedNote(rc *graph.RunContext, top, prefix string, stray, outside []string) string {
+	var parts []string
+	if len(stray) > 0 {
+		parts = append(parts, fmt.Sprintf("changes no step of this run recorded or judged (%s)", fileList(stray)))
+	}
+	if len(outside) > 0 {
+		parts = append(parts, fmt.Sprintf("changes outside %s, the directory this run was started in, which no step "+
+			"of it records or judges (%s)", strings.TrimSuffix(prefix, "/"), fileList(outside)))
+	}
+	note := fmt.Sprintf("%s holds %s, and belay commits only what its steps recorded: undo them in %s "+
+		"(`git -C %s status` lists them), then `belay resume %s`; a change you want can be made after the run",
+		top, strings.Join(parts, ", and "), top, top, rc.RunID)
+	if len(outside) > 0 {
+		note += ", and one that has to reach above " + strings.TrimSuffix(prefix, "/") +
+			" needs a run started at the repository's top"
+	}
+	return note
+}
+
+// worktreeTop returns the top of the worktree holding dir, a workspace at
+// prefix inside it.
+func worktreeTop(dir, prefix string) string {
+	if prefix == "" {
+		return dir
+	}
+	return strings.TrimSuffix(filepath.Clean(dir), string(filepath.Separator)+filepath.FromSlash(strings.TrimSuffix(prefix, "/")))
 }
 
 // mergeMessage is the message of the merge commit that brings a winner in.

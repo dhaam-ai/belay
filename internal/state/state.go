@@ -307,9 +307,19 @@ type Code struct {
 	// LastDiff is where the most recent diff was archived, typically under
 	// Layout.ArtifactPath (for example "diff-0007.patch").
 	LastDiff string `json:"last_diff"`
-	// ChangedFiles lists the paths, relative to the workspace root, the
-	// code node reported changing.
+	// ChangedFiles lists the paths, relative to the workspace root, the run
+	// has changed so far: what the agent reported, and, in a run whose
+	// workspace can say what really changed (Manifest.Changes), everything
+	// the workspace says changed as well, as the write node verified it.
 	ChangedFiles []string `json:"changed_files"`
+	// Unreported is the part of ChangedFiles that changed during the run
+	// without the agent reporting it, as the write node found it, sorted:
+	// the agent's own unreported edits, and anything else that changed the
+	// workspace, such as a person editing a paused run's files. It is judged like every
+	// other changed file; it is kept apart so that a run cannot hide an
+	// edit by leaving it out of its report, and so that every place the run
+	// is shown can say which files those were.
+	Unreported []string `json:"unreported,omitempty"`
 }
 
 // Test is the blackboard's projection of a belay.TestReport: the fields
@@ -497,6 +507,14 @@ type Candidate struct {
 	// ended, for the cases a reader would otherwise have to open a journal to
 	// understand — a refused workspace, a spent envelope. May be empty.
 	Note string `json:"note"`
+	// ChangedFiles is the candidate's recorded change, from its own
+	// blackboard (Code.ChangedFiles), relative to its workspace: what its
+	// write step recorded and its policy gate judged. promote commits a
+	// winner's work only when its worktree holds nothing beyond it.
+	ChangedFiles []string `json:"changed_files,omitempty"`
+	// Unreported is the part of ChangedFiles the candidate's agent did not
+	// report (Code.Unreported), which promote names in the commit.
+	Unreported []string `json:"unreported,omitempty"`
 }
 
 // Promotion is what a run's promote node put on its branch: the record a

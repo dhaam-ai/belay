@@ -60,8 +60,8 @@ Only the budget ledger is recomputed from the journal. On resume the dispatcher 
 - `Runner belay.TestRunner`: test execution
 - `Linter belay.Linter`: static analysis (golangci-lint, eslint, etc.)
 - `Reviewer belay.Reviewer`: quality gates (SonarQube, AI review, etc.)
-- `Isolator belay.Isolator`: workspace isolation, used only by the fanout node; the CLI injects none
-- `VCS vcs.Repository`: commits and merges, used only by the promote node of a run whose output is a branch; the CLI injects none yet, because nothing selects branch output. It is an `internal/vcs` interface, not a `pkg/belay` one, because git is its only implementation.
+- `Isolator belay.Isolator`: workspace isolation for fanout. The dispatcher's candidate runner makes each candidate's workspace with it, and `promote` asks it for a winner's branch and destroys the candidates through it. The CLI injects a git worktree isolator for a run whose output is a branch and a directory copy otherwise (`fanout.isolator`), built per run because both are rooted at that run's `candidates/` directory
+- `VCS vcs.Repository`: commits and merges, used only by the promote node. The CLI injects the run's git repository for a run whose output is a branch, which `output.mode: auto` chooses for any git repository with a commit, git 2.38 or newer and no submodules, and none for a run that edits its workspace in place. It is an `internal/vcs` interface, not a `pkg/belay` one, because git is its only implementation.
 
 Beside the adapters, RunContext carries `Output`, how the run delivers its result. It is read from the run's manifest, where it was pinned when the run was created, never from live configuration.
 
@@ -167,12 +167,14 @@ The run progresses through a directed graph of nodes (see `internal/graph/node.g
 - **plan** (Agent): Uses the agent to propose a plan from the goal. Returns a plan summary and branches to approve, or, when `graph.approval` is false, straight to code — or to fanout, in a run that fans out.
 - **approve** (Human Gate): Awaits human approval before proceeding. Returns paused if not approved, or continues to code, or to fanout in a run that fans out.
 - **code** (Agent): Uses the agent to implement the plan. Branches to write.
-- **write**: Checks the files the agent reported changing against the workspace, refusing any path outside it, and records them in state.Code.ChangedFiles with a diff artifact. It never modifies the workspace: the agent has already edited the files in place. Branches to test.
+- **write**: Records what the run changed: the files the agent reported, together with every file the workspace itself says changed (git against the run's base commit, or a record of the workspace's files taken when the run began, through `RunContext.Changes`). It checks each against the workspace, refusing any path outside it, records them in state.Code.ChangedFiles with a diff artifact, and keeps the ones the agent did not report in state.Code.Unreported. It never modifies the workspace: the agent has already edited the files in place. Branches to test, or to policy in a guarded run.
+- **policy** (guarded runs only): Judges the recorded change, and the workspace's answer asked again, against the rules the run's manifest pinned, naming every file the agent did not report. A fail-class violation ends the run; a fix-class one goes to fix. A run with no record to measure against (a fork) is judged on the agent's report, and the verdict says so.
 - **test** (TestRunner): Executes the test suite. If all tests pass, branches to review; if any fail, branches to fix.
 - **fix** (Agent): Uses the agent to fix failing tests, and adds the files the repair reports changing to the run's list of changed files (state.Code.ChangedFiles). Branches back to test. Reached again after `graph.give_up` repairs, it fails the run instead of repairing, so the loop cannot run forever.
 - **review** (Linter or Reviewer): Runs the quality gate, a linter or a SonarQube scan. If gate passes, branches to END; if gate fails, branches to fix.
 - **fanout** (candidate runs): Divides the remaining budget between the candidates and runs each as a candidate run of its own, through the pool the dispatcher provides. Branches to join once every candidate has an end state; pauses when a candidate could not be finished for a reason a resume can fix.
 - **join**: Picks a winner among the eligible candidates, by `fanout.select`, and records it in state.Winner. Branches to promote in a branch run, to END in an in-place run, and fails the run when no candidate is eligible.
+- **promote** (branch runs only): Commits the run's change on its branch, or merges the winner. It first compares the tree with what the run's steps recorded and pauses, naming the files, on anything else, and in a guarded run judges the change against the policy once more, so what it commits is what was judged.
 
 **Terminal States**:
 - StatusOK with Next="END": run completed successfully

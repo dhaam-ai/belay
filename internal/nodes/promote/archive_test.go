@@ -73,6 +73,9 @@ func TestPromoteCommitsTheApprovedPlanWithTheChange(t *testing.T) {
 			f := newRun(t, t.TempDir(), tc.prefix+"cmd/runs.go")
 			f.rc.Output.Prefix = tc.prefix
 			f.rc.Workspace = filepath.Join(f.worktree, filepath.FromSlash(tc.prefix))
+			// Recorded relative to the run's directory, as the write step
+			// records it.
+			f.rc.State.Code.ChangedFiles = []string{"cmd/runs.go"}
 			// A worktree is a checkout, so the directory the run started in
 			// is there in it.
 			if err := os.MkdirAll(f.rc.Workspace, 0o750); err != nil {

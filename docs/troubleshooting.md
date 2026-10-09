@@ -1,12 +1,5 @@
 # Troubleshooting
 
-<!--
-Insertion markers. Each "slice:NAME" comment below marks where the work in
-flight for that slice adds its text: insert directly above the marker and
-leave the marker in place, so changes built in parallel land on different
-lines. Delete a marker once its slice has merged.
--->
-
 This document covers common failure modes, their symptoms, and remedies.
 
 ## The Agent Edited Nothing
@@ -383,13 +376,32 @@ The run has ended, and `belay resume` will not continue it. Change belay.yaml or
 - Then `belay resume <run-id>`. promote asks the repository what is already merged, finds your merge, and finishes
 - If you stop part way — conflicts resolved, nothing committed — resuming pauses again and says so. `git status`, `git commit`, then resume
 
-## A Run Paused Because Its Worktree Has Uncommitted Changes
+## A Run Paused Because Its Worktree Has Changes No Step Recorded
 
-**Symptom**: A branch run pauses at `promote` with a note saying the branch "has changes belay did not commit".
+**Symptom**: A branch run pauses at `promote` with a note saying the worktree "holds changes no step of this run recorded or judged", naming the files; or, for a run whose fanout winner is being merged, that the branch "has changes belay did not commit".
 
-**Cause**: Something changed files in the run's worktree that belay did not make, usually a merge finished part way by hand. belay will not sweep them into its own commit.
+**Cause**: promote commits exactly what the run's steps recorded and the policy gate judged, and nothing else. Something changed a file in the worktree after the last check: a person editing it while the run was paused, a merge finished part way by hand, or the test command writing a file your `.gitignore` does not exclude (a coverage report, a build output). belay will not sweep such a change into its own commit, because no step of the run recorded it and no gate judged it, while the run would report the files it verified.
 
-**Remedy**: `cd` to the run's worktree, `git status` to see what is uncommitted, `git commit` what belongs, then `belay resume <run-id>`.
+The same pause names a change outside the directory a run was started in (`changes outside sub, the directory this run was started in`): a run started in a subdirectory records and judges that directory only.
+
+**Diagnosis**:
+1. The note names the files and the worktree
+2. `git -C <worktree> status` shows what is uncommitted there
+
+**Remedy**:
+- Undo what does not belong to the run (`git -C <worktree> checkout -- <file>`, or delete a new file), then `belay resume <run-id>`. promote asks again and commits
+- A build output the test command writes every time belongs in your `.gitignore`, or in the repository's `.git/info/exclude`, which is not part of the tree
+- A change you want can be made on the branch after the run completes
+- A change that has to reach above the directory the run was started in (a `go.mod` at the repository's top, say) needs a run started at the top
+- When the note names a merge (a fanout winner), finish it: `git status`, `git commit` what belongs, then `belay resume <run-id>`
+
+## A Run Paused Because the Change Breaks Its Policy at `promote`
+
+**Symptom**: A guarded branch run pauses at `promote` with a note saying "the change about to be committed breaks this run's policy ... though it passed the gate".
+
+**Cause**: promote judges the change once more, against the run's pinned policy, immediately before it commits. A file the gate passed was changed afterwards, by the test command or by hand while the run was paused.
+
+**Remedy**: undo the change the note points to in the worktree, then `belay resume <run-id>`.
 
 ## `belay resume` Says the Run's Worktree Is Gone
 
@@ -445,8 +457,6 @@ The run has ended, and `belay resume` will not continue it. Change belay.yaml or
 - Remove a branch once you are sure it holds nothing you want: `git log <base>..belay/<run-id>` first, then `git branch -D belay/<run-id>`
 - Remove a whole finished run: `git worktree remove .belay/runs/<run-id>/worktree`, then `rm -rf .belay/runs/<run-id>`
 
-<!-- slice:output -->
-
 ## The Plan Did Not Move Into the Repository
 
 **Symptom**: A run finished, but its plan is still at `.belay/runs/<run-id>/artifacts/plan.md` and there is nothing in `docs/plans/`. belay said so on stderr, starting "the plan stays in the run directory".
@@ -481,8 +491,6 @@ A run stopped between finishing and moving its plan leaves it in the run directo
 - Or commit that one file with `git add -f .belay/cassette.json`
 - A `.belay/.gitignore` you wrote yourself is never replaced, so you can also write your own rules there
 
-<!-- slice:plan -->
-
 ## belay fork Says Your Files Have Changed Since the Step Ran
 
 **Symptom**: `belay fork <run-id> <node>` refuses, saying the files in your workspace "have changed since <node> #N ran", that belay "recorded no fingerprint" of them, or that they "were fingerprinted by a different belay".
@@ -512,8 +520,6 @@ A run stopped between finishing and moving its plan leaves it in the run directo
 **Remedy**:
 - Point belay at the copy: `belay --workspace .belay/forks/<fork-id> resume <fork-id>`. `belay runs` in the original repository lists every fork with that command
 - `rm -rf .belay/forks/<fork-id>` deletes a fork you no longer want; the run it was forked from never refers to it
-
-<!-- slice:fork -->
 
 ## Another `belay queue start` Is Already Working Through This Queue
 
@@ -587,8 +593,6 @@ A run stopped between finishing and moving its plan leaves it in the run directo
 - Move the file aside (`mv .belay/queue/queue.ndjson .belay/queue/queue.ndjson.broken`) and add the goals you still want again. The runs the old queue made are untouched, in `.belay/queue/work/`
 - Look at the line the error names first: it says which goal and which change
 
-<!-- slice:queue -->
-
 ## A Run Stopped on a Policy Rule
 
 **Symptom**: A run ended at the `policy` step, with a note naming a rule such as `policy:forbidden_path` or `policy:max_changed_files`.
@@ -615,5 +619,3 @@ A run stopped between finishing and moving its plan leaves it in the run directo
 - Start a fresh run; it picks the policy up.
 - The reverse holds too: a run started **with** a policy keeps it even if you delete the rules before resuming, and belay warns about that as well.
 
-
-<!-- slice:backend -->

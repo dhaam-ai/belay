@@ -4,8 +4,10 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io/fs"
 	"log/slog"
 	"os"
+	"slices"
 	"strings"
 	"unicode"
 	"unicode/utf8"
@@ -135,7 +137,15 @@ func (n *Node) Run(ctx context.Context, rc *graph.RunContext) (graph.Result, err
 	defer func() { _ = root.Close() }()
 	log := n.logger(rc).With(slog.String("workspace", rootPath))
 
-	changes, patch, err := n.materialize(ctx, root, rootPath, rc.State.Code.ChangedFiles)
+	reported := rc.State.Code.ChangedFiles
+	truth, unrecorded, err := groundTruth(ctx, rc)
+	if err != nil {
+		return graph.Result{}, err
+	}
+	kept, aliased := withoutAliases(root, reported, truth)
+	claimed := append(slices.Clone(truth), kept...)
+
+	changes, patch, err := n.materialize(ctx, root, rootPath, claimed)
 	if err != nil {
 		if errors.Is(err, ErrRefused) {
 			log.Warn("write: refused the change set", slog.String("error", err.Error()))
@@ -159,6 +169,7 @@ func (n *Node) Run(ctx context.Context, rc *graph.RunContext) (graph.Result, err
 	code := rc.State.Code
 	code.LastDiff = rel
 	code.ChangedFiles = paths(changes)
+	code.Unreported = unreported(truth, reported, aliased, rc.State.Code.Unreported)
 
 	present, absent := tally(changes)
 	log.Info("write: recorded the change set",
@@ -172,8 +183,109 @@ func (n *Node) Run(ctx context.Context, rc *graph.RunContext) (graph.Result, err
 		Next:   n.next(),
 		Status: journal.StatusOK,
 		Patch:  state.Patch{Code: &code},
-		Note:   sanitizeNote(note(present, absent, rel)),
+		Note:   sanitizeNote(note(present, absent, rel) + truthNote(code.Unreported, unrecorded)),
 	}, nil
+}
+
+// groundTruth asks the run's workspace what it really changed (see
+// graph.RunContext.Changes). It returns the paths, or, for a run that keeps
+// no record to measure against, none and the reason. Any other failure is
+// returned: a change that could not be checked has not been verified, and an
+// answer the agent could make fail on purpose must never turn into its own
+// report.
+func groundTruth(ctx context.Context, rc *graph.RunContext) ([]string, string, error) {
+	if rc.Changes == nil {
+		return nil, "nothing checks it against the workspace", nil
+	}
+	truth, err := rc.Changes.Changes(ctx, rc.Workspace)
+	switch {
+	case errors.Is(err, graph.ErrUnrecorded):
+		return nil, strings.TrimPrefix(err.Error(), graph.ErrUnrecorded.Error()+": "), nil
+	case err != nil:
+		return nil, "", fmt.Errorf("write: read what the workspace changed: %w", err)
+	}
+	return truth, "", nil
+}
+
+// withoutAliases returns the reported paths that are not another spelling of
+// a path in truth, and the true names that were reported under another
+// spelling.
+//
+// truth holds the file system's own names. On a disk that folds case, an
+// agent that reported "Infra/main.tf" for infra/main.tf has reported that
+// file, and recording both would count one change twice. A reported path is
+// an alias when it differs from a true name only in case and names the same
+// file on disk, or when both are absent: a deletion reported in the wrong
+// case. On a disk that does not fold case the two are different files, and
+// the report is kept as the claim it is.
+func withoutAliases(root *os.Root, reported, truth []string) ([]string, map[string]bool) {
+	kept := make([]string, 0, len(reported))
+	aliased := map[string]bool{}
+	for _, r := range reported {
+		i := slices.IndexFunc(truth, func(t string) bool { return t != r && strings.EqualFold(t, r) && sameFile(root, t, r) })
+		if i < 0 {
+			kept = append(kept, r)
+			continue
+		}
+		aliased[truth[i]] = true
+	}
+	return kept, aliased
+}
+
+// sameFile reports whether a and b name one file under root, or are both
+// absent.
+func sameFile(root *os.Root, a, b string) bool {
+	ai, aErr := root.Lstat(a)
+	bi, bErr := root.Lstat(b)
+	switch {
+	case errors.Is(aErr, fs.ErrNotExist) && errors.Is(bErr, fs.ErrNotExist):
+		return true
+	case aErr != nil || bErr != nil:
+		return false
+	default:
+		return os.SameFile(ai, bi)
+	}
+}
+
+// unreported is what the workspace says changed that the agent never
+// reported, sorted: the paths in truth the report named neither exactly nor
+// in another case (aliased), and every path an earlier pass already found
+// unreported that is still part of the change. The second half matters
+// because the fix loop carries the recorded files into the report it hands
+// on, and the record of what the agent left out must not shrink as the loop
+// goes round.
+func unreported(truth, reported []string, aliased map[string]bool, before []string) []string {
+	var out []string
+	for _, t := range truth {
+		if !slices.Contains(reported, t) && !aliased[t] {
+			out = append(out, t)
+		}
+	}
+	for _, b := range before {
+		if slices.Contains(truth, b) {
+			out = append(out, b)
+		}
+	}
+	slices.Sort(out)
+	return slices.Compact(out)
+}
+
+// truthNote says what the workspace's own answer added to the report: the
+// files the agent did not report, or that there was nothing to check the
+// report against, and why.
+func truthNote(missed []string, unrecorded string) string {
+	switch {
+	case unrecorded != "":
+		return "; this is only the agent's report: " + unrecorded
+	case len(missed) == 0:
+		return ""
+	}
+	const named = 5
+	list := strings.Join(missed[:min(len(missed), named)], ", ")
+	if len(missed) > named {
+		list += fmt.Sprintf(" and %d more", len(missed)-named)
+	}
+	return fmt.Sprintf("; %d the agent did not report: %s", len(missed), list)
 }
 
 // next returns where a verified change set goes: the node WithOnVerified

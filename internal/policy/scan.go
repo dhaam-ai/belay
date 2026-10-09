@@ -69,7 +69,7 @@ func (m contentMatcher) reason() string {
 // following a symbolic link out of the workspace would let a rule be
 // satisfied, or a secret be read, from a file the run has nothing to do with.
 func scanChange(ctx context.Context, p Policy, ch Change, files []string) (scanned, error) {
-	matchers, err := compileContent(p.ForbiddenContent)
+	matchers, err := compileContent(p.ForbiddenContent, ch.FoldCase)
 	if err != nil {
 		return scanned{}, err
 	}
@@ -101,7 +101,7 @@ func scanChange(ctx context.Context, p Policy, ch Change, files []string) (scann
 
 // compileContent compiles every content rule, naming the setting a bad one
 // came from.
-func compileContent(rules []ContentRule) ([]contentMatcher, error) {
+func compileContent(rules []ContentRule, fold bool) ([]contentMatcher, error) {
 	out := make([]contentMatcher, 0, len(rules))
 	for _, rule := range rules {
 		re, err := regexp.Compile(rule.Pattern)
@@ -109,7 +109,7 @@ func compileContent(rules []ContentRule) ([]contentMatcher, error) {
 			return nil, fmt.Errorf("policy: policy.forbidden_content: %q is not a valid regular expression: %w",
 				rule.Pattern, err)
 		}
-		paths, err := compileSet("policy.forbidden_content.paths", rule.Paths)
+		paths, err := compileSet("policy.forbidden_content.paths", rule.Paths, fold)
 		if err != nil {
 			return nil, err
 		}

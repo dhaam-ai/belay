@@ -57,6 +57,10 @@ func newRun(t *testing.T, root string, uncommitted ...string) *fixture {
 	repo := newFakeRepo(log, base)
 	repo.branch(worktree, runBranch, base, uncommitted...)
 	iso := newBranchingIsolator(runBranch, repo, log)
+	// What the run's write step recorded and its gate judged, as the real
+	// graph always has by the time it reaches promote: the change itself.
+	st := state.NewState(goal)
+	st.Code.ChangedFiles = slices.Clone(uncommitted)
 	return &fixture{
 		log:      log,
 		repo:     repo,
@@ -65,7 +69,7 @@ func newRun(t *testing.T, root string, uncommitted ...string) *fixture {
 		worktree: worktree,
 		rc: &graph.RunContext{
 			Goal:      goal,
-			State:     state.NewState(goal),
+			State:     st,
 			Config:    config.Default(),
 			Workspace: worktree,
 			RunID:     runID,
@@ -99,7 +103,9 @@ func (f *fixture) withCandidates(t *testing.T, winner string, ids ...string) *fi
 			t.Fatalf("create candidate %s: %v", id, err)
 		}
 		f.repo.branch(dir, f.candidateBranch(id), base, id+".go")
-		candidates = append(candidates, state.Candidate{ID: id, Dir: dir, TestPassed: true, Ephemeral: true})
+		candidates = append(candidates, state.Candidate{
+			ID: id, Dir: dir, TestPassed: true, Ephemeral: true, ChangedFiles: []string{id + ".go"},
+		})
 	}
 	f.rc.State.Candidates = candidates
 	f.rc.State.Winner = winner
@@ -201,20 +207,50 @@ func TestPromoteCommitsTheRunsGatedResult(t *testing.T) {
 
 // TestPromoteCommitsTheWholeWorkTree covers a run started in a subdirectory
 // of its repository. Its workspace is that subdirectory of the run's
-// worktree, but the change it is promoting is the whole worktree's: an agent
-// that also edited go.mod at the top has changed go.mod, and a commit made
-// from the subdirectory could leave it out. The fake repository knows only
-// the worktree's top, so a commit asked for anywhere else fails.
+// worktree, and the commit is made from the worktree's top, so nothing in
+// the tree is left out of it: the fake repository knows only the top, and a
+// commit asked for anywhere else fails.
+//
+// What the commit may carry is what the run's steps recorded and judged,
+// and they record and judge the run's own directory, by paths relative to
+// it. An agent that also edited go.mod above that directory used to have it
+// swept into the commit unjudged; now the run pauses, names the file, and
+// says that a change which has to reach above the directory needs a run
+// started at the repository's top.
 func TestPromoteCommitsTheWholeWorkTree(t *testing.T) {
-	f := newRun(t, t.TempDir(), "go.mod", "sub/main.go")
-	f.rc.Output.Prefix = "sub/"
-	f.rc.Workspace = filepath.Join(f.worktree, "sub")
+	t.Run("a change inside the run's directory is committed from the top", func(t *testing.T) {
+		f := newRun(t, t.TempDir(), "sub/main.go", "sub/main_test.go")
+		f.rc.Output.Prefix = "sub/"
+		f.rc.Workspace = filepath.Join(f.worktree, "sub")
+		f.rc.State.Code.ChangedFiles = []string{"main.go", "main_test.go"}
 
-	res := f.mustRun(t)
+		res := f.mustRun(t)
 
-	if got := res.Patch.Promotion; got == nil || got.Files != 2 {
-		t.Errorf("Promotion = %+v, want both files committed", got)
-	}
+		if got := res.Patch.Promotion; got == nil || got.Files != 2 {
+			t.Errorf("Promotion = %+v, want both files committed (note %q)", got, res.Note)
+		}
+	})
+	t.Run("a change above the run's directory pauses the run", func(t *testing.T) {
+		f := newRun(t, t.TempDir(), "go.mod", "sub/main.go")
+		f.rc.Output.Prefix = "sub/"
+		f.rc.Workspace = filepath.Join(f.worktree, "sub")
+		f.rc.State.Code.ChangedFiles = []string{"main.go"}
+
+		res := f.mustRun(t)
+
+		if res.Status != journal.StatusPaused {
+			t.Fatalf("Status = %s, want %s: go.mod is outside the run's directory, unrecorded and unjudged (note %q)",
+				res.Status, journal.StatusPaused, res.Note)
+		}
+		for _, fragment := range []string{"go.mod", "outside sub", "started at the repository's top"} {
+			if !strings.Contains(res.Note, fragment) {
+				t.Errorf("Note %q never says %q", res.Note, fragment)
+			}
+		}
+		if tip := f.repo.tipOf(runBranch); tip != base {
+			t.Errorf("%s moved to %s; nothing may be committed", runBranch, tip)
+		}
+	})
 }
 
 // TestPromoteWritesACommitMessageAPersonCanRead: the goal is the commit's

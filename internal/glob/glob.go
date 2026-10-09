@@ -55,6 +55,8 @@ var ErrBadPattern = errors.New("glob: bad pattern")
 type Pattern struct {
 	raw  string
 	segs []string
+	// fold matches without regard to case: see Fold.
+	fold bool
 }
 
 // Compile returns the compiled form of pattern, or an error wrapping
@@ -115,6 +117,26 @@ func MustCompile(pattern string) Pattern {
 	return p
 }
 
+// Fold returns p matching without regard to case, and still quoting itself
+// as it was written.
+//
+// It is for a workspace on a disk that folds case, as macOS's does by
+// default, where infra/main.tf and Infra/main.tf are one file. There, a rule
+// about one is a rule about the other, and a pattern that told them apart
+// would let a change through by its spelling. On a disk that does not fold
+// case they are two files and the exact pattern is the right one, which is
+// why folding is chosen by the caller, from the disk, and never by default.
+//
+// Both sides are lower-cased with Unicode's simple case mapping before they
+// are matched, so a character class folds too: "[A-C]" matches "b".
+func (p Pattern) Fold() Pattern {
+	segs := make([]string, len(p.segs))
+	for i, seg := range p.segs {
+		segs[i] = strings.ToLower(seg)
+	}
+	return Pattern{raw: p.raw, segs: segs, fold: true}
+}
+
 // String returns the pattern as it was written, which is what a violation
 // quotes back to the person who wrote it.
 func (p Pattern) String() string { return p.raw }
@@ -131,6 +153,9 @@ func (p Pattern) Match(name string) bool {
 	clean := strings.TrimSuffix(strings.TrimPrefix(path.Clean(strings.TrimSpace(name)), "./"), "/")
 	if clean == "" || clean == "." {
 		return false
+	}
+	if p.fold {
+		clean = strings.ToLower(clean)
 	}
 	return match(p.segs, strings.Split(clean, "/"))
 }
@@ -191,6 +216,15 @@ func CompileAll(patterns []string) (Set, error) {
 		out = append(out, p)
 	}
 	return Set{patterns: out}, nil
+}
+
+// Fold returns s with every pattern folded: see Pattern.Fold.
+func (s Set) Fold() Set {
+	out := make([]Pattern, len(s.patterns))
+	for i, p := range s.patterns {
+		out[i] = p.Fold()
+	}
+	return Set{patterns: out}
 }
 
 // Len returns how many patterns s holds.

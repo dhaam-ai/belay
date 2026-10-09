@@ -36,7 +36,9 @@
 //     which is the trade ADR-0004 already accepted"), so a git-based write
 //     node would be broken for every best-of-N candidate. Nothing in this
 //     package shells out, so internal/exec is not needed and
-//     belay.ErrToolchainMissing can never arise.
+//     belay.ErrToolchainMissing can never arise. Where git is there, its
+//     answer arrives through graph.RunContext.Changes instead (below), and
+//     a directory copy is answered from a file record.
 //
 // The cost of the choice is stated plainly: because belay keeps no pre-change
 // baseline of file contents, this node cannot compute a minimal delta. The
@@ -44,6 +46,28 @@
 // rendered as a unified diff against /dev/null — which is a truthful account
 // of what is on disk rather than a delta it would have to invent. See
 // [renderPatch].
+//
+// # What the agent reports, and what the workspace says
+//
+// The agent's report of what it changed is a claim, and a claim can be
+// wrong, by accident or on purpose: an agent that edited infra/main.tf and
+// belay.yaml and reported only src/app.py walked past every guardrail the
+// policy gate held, because the gate judged the report. So in a run whose
+// workspace can say what really changed — git against the run's base
+// commit, or a record of its files taken when the run began, both behind
+// [graph.RunContext.Changes] — this node records the workspace's answer
+// beside the report. Every path in either is verified and rendered alike;
+// [state.Code.Unreported] keeps the ones the agent left out, so the gate,
+// the timeline and the commit can name them.
+//
+// This package still starts no process: the git half of the answer runs
+// behind the interface, in the CLI. A source that cannot answer is an error
+// and no verdict, never a fall back to the agent's word; only a run that
+// keeps no record at all records the report alone, and the Note says so.
+//
+// The workspace's answer uses the file system's own names. On a disk that
+// folds case, a report spelled "Infra/main.tf" for infra/main.tf names the
+// same file, and is folded into the true name rather than recorded twice.
 //
 // # Threat model
 //
@@ -87,6 +111,7 @@
 // [state.Code] whose LastDiff names the artifact it just wrote — numbered by
 // [graph.RunContext.Step], so a fix-loop retry cannot overwrite the record of
 // the attempt before it — and whose ChangedFiles is the verified,
-// deduplicated, sorted change set. An empty change set is a valid outcome,
+// deduplicated, sorted change set: the report and the workspace's own
+// answer together. An empty change set is a valid outcome,
 // not an error; see [Node.Run].
 package write

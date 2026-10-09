@@ -295,6 +295,15 @@ type Options struct {
 	// mode itself is not an option: the dispatcher reads it from the
 	// manifest it already loads, which is where a run's pins live.
 	VCS vcs.Repository
+
+	// Changes builds the RunContext.Changes a run's nodes are handed, from
+	// the manifest of the run being driven and its Layout. The CLI passes
+	// one that answers from git or from a file record, as the manifest's
+	// pin says. The dispatcher hands it on to every candidate run, called
+	// with the candidate's own manifest and Layout. Nil leaves
+	// RunContext.Changes nil, which a node reads as "only the agent's
+	// report".
+	Changes func(man *state.Manifest, layout state.Layout) ChangeSource
 }
 
 // Dispatcher drives one run's node graph: it resolves where to start, executes
@@ -454,6 +463,7 @@ type Dispatcher struct {
 	// held as the interface rather than as the implementation so that the
 	// nil a node checks for is a nil interface and not a typed nil.
 	candidates CandidateRunner
+	changes    func(man *state.Manifest, layout state.Layout) ChangeSource
 }
 
 // NewDispatcher returns a Dispatcher for the run described by opts. It does not
@@ -493,6 +503,7 @@ func NewDispatcher(opts Options) (*Dispatcher, error) {
 		linter:   opts.Linter,
 		reviewer: opts.Reviewer,
 		isolator: opts.Isolator,
+		changes:  opts.Changes,
 		vcs:      opts.VCS,
 	}
 	if d.logger == nil {
@@ -1224,7 +1235,17 @@ func (d *Dispatcher) runContext(
 		VCS:        d.vcs,
 		// Nil for every run that does not fan out; see Options.CandidateRegistry.
 		CandidateRuns: d.candidates,
+		Changes:       d.changeSource(man, layout),
 	}
+}
+
+// changeSource builds this run's RunContext.Changes from its manifest, or
+// returns nil when the dispatcher was given no factory.
+func (d *Dispatcher) changeSource(man *state.Manifest, layout state.Layout) ChangeSource {
+	if d.changes == nil {
+		return nil
+	}
+	return d.changes(man, layout)
 }
 
 // blackboardFor returns the blackboard the execution rc describes must be
