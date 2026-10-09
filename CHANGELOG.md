@@ -304,6 +304,13 @@ that only `pkg/belay` carries a compatibility promise. Everything under
 
 ### Fixed
 
+- **A crash inside `join`, `promote` or the fanout itself is no longer billed
+  as the run's costliest step.** Resuming after a kill charges the step that
+  died an estimate of what its agent may have spent, but these steps call no
+  agent of their own: after a fanout the costliest step was the whole
+  fanout, so a kill inside promote's merge reported $2.10 against $1.10
+  spent, and a kill mid-fanout charged the plan again. They are now charged
+  nothing; a candidate's own steps are still charged as before.
 - **A step stopped by Ctrl-C or `graph.node_timeout` is charged for, so
   interrupting and resuming can no longer spend past `budget.max_usd`.** The
   agent CLI prints its bill only when it finishes, so a call belay stopped

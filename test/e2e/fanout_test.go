@@ -265,7 +265,7 @@ func TestFanoutCrashWithThreeOfFiveInFlightConverges(t *testing.T) {
 
 	controlTotal := control.manifest(t).Budget
 	if !out.Usage.Estimated {
-		t.Error("Outcome.Usage.Estimated = false, want true: the interrupted fanout attempt was charged an estimate")
+		t.Error("Outcome.Usage.Estimated = false, want true: the candidates' killed attempts were charged an estimate")
 	}
 	if out.Usage.USD < controlTotal.SpentUSD-1e-9 {
 		t.Errorf("Outcome.Usage.USD = %v, less than the control's %v: a crash must never make a run look cheaper",

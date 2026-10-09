@@ -655,7 +655,8 @@ func attemptOneSeq(records []journal.Record, node string) uint64 {
 //     on its first crash. heal closes it as aborted, naming the same node in
 //     Next so that a crash during recovery itself still resolves back here,
 //     at the attempt after the one it closed (journal.Record.Interrupted),
-//     and charges ledger for it: see interruptedCharge. It also kills whatever
+//     and charges ledger for it: see interruptedCharge, and estimable for
+//     the nodes it charges nothing. It also kills whatever
 //     the dead process left running, because the agent and the test suite
 //     outlive a belay killed with SIGKILL: see reap.
 //
@@ -685,9 +686,18 @@ func (d *Dispatcher) heal(
 		// would ever look for, because the journal would no longer end in an
 		// attempt nothing closed.
 		killed := d.reap()
-		charge := d.interruptedCharge(ledger)
-		note := fmt.Sprintf("interrupted: no completion record for attempt %d (the process died inside this node); "+
-			"charged $%.2f, estimated, since what it spent is unknown", last.Attempt, charge.USD)
+		// A node whose spend is not its own is charged nothing: join and
+		// promote call no agent, and the fanout node's spend is its
+		// candidates', each recorded in its own journal (see estimable).
+		var charge belay.Usage
+		note := fmt.Sprintf("interrupted: no completion record for attempt %d (the process died inside this node)",
+			last.Attempt)
+		if d.estimable(last.Node) {
+			charge = d.interruptedCharge(ledger)
+			note += fmt.Sprintf("; charged $%.2f, estimated, since what it spent is unknown", charge.USD)
+		} else {
+			note += "; charged nothing, since this node spends nothing of its own"
+		}
 		if killed > 0 {
 			groups := "process group"
 			if killed != 1 {

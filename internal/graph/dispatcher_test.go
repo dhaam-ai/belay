@@ -654,6 +654,67 @@ func TestDispatcher_HealChargesAnAttemptItNeverSawFinish(t *testing.T) {
 	}
 }
 
+// TestDispatcher_HealChargesNothingForANodeWhoseSpendIsNotItsOwn: the
+// estimate heal charges an attempt a kill left open stands in for what an
+// agent may have spent before the kill. A node that calls no agent (join,
+// promote) can have spent nothing, and a node that supervises candidate runs
+// spends only through them, each of which records its own spend in its own
+// journal. Charging either the run's costliest step, which after a fanout is
+// the whole fanout, billed money nobody spent: a kill inside promote's git
+// merge reported $2.10 against $1.10 really spent, and a kill mid-fanout
+// charged the plan a second time and pushed the resume over its ceiling.
+func TestDispatcher_HealChargesNothingForANodeWhoseSpendIsNotItsOwn(t *testing.T) {
+	planSpend := journal.Usage{InputTokens: 1000, OutputTokens: 200, USD: 1.00}
+	tests := []struct {
+		name string
+		node graph.Node
+	}{
+		{
+			name: "a node that calls no agent",
+			node: unpricedNode{ok(graph.NodePromote, graph.End)},
+		},
+		{
+			name: "a node that supervises candidate runs",
+			node: supervisingNode{ok(graph.NodeFanout, graph.End)},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			h := newRun(t, budgetCfg(100.00, 0), "charge only what could have been spent")
+			h.seedJournal(t,
+				journal.Record{Event: journal.EventRunStarted},
+				journal.Record{Event: journal.EventNodeStarted, Node: graph.NodePlan, Attempt: 1},
+				journal.Record{
+					Event: journal.EventNodeFinished, Node: graph.NodePlan, Attempt: 1,
+					Status: journal.StatusOK, Next: tt.node.Name(), Usage: &planSpend,
+				},
+				journal.Record{Event: journal.EventNodeStarted, Node: tt.node.Name(), Attempt: 1},
+			)
+
+			out, err := h.dispatcher(t, ok(graph.NodePlan, graph.NodeCode), tt.node).Run(context.Background())
+			if err != nil {
+				t.Fatalf("Run() error = %v, want nil", err)
+			}
+			var healed *journal.Record
+			recs := h.records(t)
+			for i := range recs {
+				if recs[i].Interrupted() {
+					healed = &recs[i]
+				}
+			}
+			if healed == nil || healed.Usage == nil {
+				t.Fatalf("no healed attempt with a usage block: %v", h.timeline(t))
+			}
+			if *healed.Usage != (journal.Usage{}) {
+				t.Errorf("the killed %s attempt was charged %+v, want nothing", tt.node.Name(), *healed.Usage)
+			}
+			if !closeTo(out.Usage.USD, planSpend.USD) || out.Usage.Estimated {
+				t.Errorf("Outcome.Usage = %+v, want the plan's $%.2f and nothing estimated", out.Usage, planSpend.USD)
+			}
+		})
+	}
+}
+
 // TestDispatcher_GivesANodeItsEvidenceDirectoryToRecordProcessesIn: every
 // process a node starts goes through internal/exec, which records it in the
 // directory on its context so that a belay killed with SIGKILL can find the
