@@ -215,6 +215,13 @@ func makeFork(cmd *cobra.Command, u *ui, plan *runPlan, req forkRequest) error {
 	case err != nil:
 		return &ExitError{Code: graph.ExitFailed, Message: "belay: " + err.Error(), Err: err}
 	}
+	// The fork runs under the configuration Prepare decided, which can
+	// differ from the one it was given: a fix loop that gave up gets one
+	// more round (fork.Spec.Config), and the difference is in the
+	// deviations announced below.
+	if spec != nil {
+		plan.config = spec.Config
+	}
 	// The guardrails a fork is held to are its source's, as a resume's are,
 	// whatever belay.yaml says now: the baseline they judge against is the
 	// source's, taken before its change began.

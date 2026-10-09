@@ -374,6 +374,13 @@ that only `pkg/belay` carries a compatibility promise. Everything under
   was still registered, and git takes the path back only with `worktree add
   -f`. belay now prints `-f` when git still has the worktree registered, a
   plain `worktree add` when it does not, and quotes the paths.
+- **Forking a fix loop that gave up calls the model.** `belay fork <run-id>
+  fix --model opus`, the README's own example, re-runs the last fix — the one
+  that gave up — whose state had every round of `graph.give_up` used, so the
+  fix step gave up again without calling anything, and `--model` changed
+  nothing. A fork of such a fix now gets one more round, and says so with the
+  other differences before it spends anything; nothing in `belay.yaml` needs
+  to change.
 - **A repair's file list is checked against the disk, not taken on trust.**
   The fix step routed straight back to the tests, so a repair was the one
   change in a run that nothing verified: no claimed path was proven to be a

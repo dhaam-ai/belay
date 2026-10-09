@@ -7,6 +7,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -23,6 +24,7 @@ import (
 	"github.com/dhaam-ai/belay/internal/nodes/approve"
 	"github.com/dhaam-ai/belay/internal/state"
 	"github.com/dhaam-ai/belay/pkg/belay"
+	"github.com/dhaam-ai/belay/pkg/belay/belaytest"
 )
 
 // TestResolveAppliesAnOverrideBeforeItResolvesAnything: a command that
@@ -615,5 +617,77 @@ func TestAForkResumesFromItsCopyWhateverOutputModeSays(t *testing.T) {
 		if !strings.Contains(stdout, phrase) {
 			t.Errorf("the resume's dry run never says %q", phrase)
 		}
+	}
+}
+
+// TestForkingAFixLoopThatGaveUpCallsTheStrongerModel is the README's own fork
+// example, end to end over belay's real graph: a run's fix loop gives up, and
+// the person types `belay fork <run-id> fix --model opus`. That forks the
+// last fix visit -- the one that gave up -- whose blackboard has every round
+// used, so the fix node gave up again without calling anything and --model
+// changed nothing. The fork gets one more round instead, says so before it
+// spends anything, and calls the agent exactly once, with opus.
+func TestForkingAFixLoopThatGaveUpCallsTheStrongerModel(t *testing.T) {
+	ws := goWorkspace(t)
+	writeConfig(t, ws, "version: 1\noutput:\n  mode: in_place\ngraph:\n  approval: false\n  give_up: 2\n")
+	if err := os.WriteFile(filepath.Join(ws, "main.go"), []byte("package main\n"), 0o600); err != nil {
+		t.Fatalf("write main.go: %v", err)
+	}
+	const planText = "## Summary\nAdd an Add helper to main.go.\n\n## Context\nmain.go is the only file.\n\n" +
+		"## Steps\n1. Add `Add(a, b int) int` to main.go.\n\n## Tests\nCover it in main_test.go.\n\n" +
+		"## Risks\nNone.\n\n## Out of scope\nEverything else.\n"
+	failing := &belaytest.FakeRunner{Responses: []belay.TestReport{{Total: 1, Failed: 1,
+		Failures: []belay.TestFailure{{Name: "TestAdd", File: "main_test.go", Line: 3, Message: "Add(2, 2) = 3, want 4"}}}}}
+	passingGate := &belaytest.FakeLinter{Responses: []belay.QualityReport{{Source: "fake", Gate: belay.GatePass,
+		Issues: []belay.Issue{}, Summary: "no issues"}}}
+	repair := func(n int) belay.AgentResponse {
+		return belay.AgentResponse{Text: fmt.Sprintf("Fix attempt %d.", n), SessionID: "sess-1", Usage: belay.Usage{USD: 0.03}}
+	}
+
+	// The source: plan, code, two repairs, and then fix gives up.
+	source, err := resolve(resolveRequest{workspace: ws, logger: quietLogger()})
+	if err != nil {
+		t.Fatalf("resolve: %v", err)
+	}
+	source.agent = &belaytest.FakeAgent{Responses: []belay.AgentResponse{
+		{Text: planText, Usage: belay.Usage{USD: 0.02}},
+		{Text: "Added it.\n\n```changed-files\nmain.go\n```\n", SessionID: "sess-1", Usage: belay.Usage{USD: 0.05}},
+		repair(1), repair(2),
+	}}
+	source.runner, source.linter = failing, passingGate
+	store, err := createRun(t.Context(), source, runSpec{Workspace: ws, RunID: "20260101T000000Z-6a7e0b000000", Goal: "add Add"})
+	if err != nil {
+		t.Fatalf("createRun: %v", err)
+	}
+	gaveUp, err := dispatchOnce(t.Context(), source, store, false)
+	if err != nil || gaveUp.outcome.Status != state.RunStatusFailed || gaveUp.outcome.Node != graph.NodeFix {
+		t.Fatalf("the source = %v at %q, %v (%q); want this test's premise, a run whose fix loop gave up",
+			gaveUp.outcome.Status, gaveUp.outcome.Node, err, gaveUp.outcome.Note)
+	}
+
+	// The fork, as the README types it.
+	var out bytes.Buffer
+	u := &ui{out: &out, err: &out}
+	req := forkRequest{runID: store.Layout().RunID(), node: graph.NodeFix, model: "opus"}
+	plan, err := resolve(resolveRequest{workspace: ws, logger: newLogger(u), override: req.configure})
+	if err != nil {
+		t.Fatalf("resolve: %v", err)
+	}
+	stronger := &belaytest.FakeAgent{Responses: []belay.AgentResponse{repair(3)}}
+	plan.agent, plan.runner, plan.linter = stronger, failing, passingGate
+	err = makeFork(cmdWithContext(), u, plan, req)
+	t.Logf("verbatim output:\n%s", out.String())
+	if err != nil {
+		t.Fatalf("makeFork: %v", err)
+	}
+	calls := stronger.Calls()
+	if len(calls) != 1 {
+		t.Fatalf("the fork called the agent %d times, want once, for the fix it re-ran", len(calls))
+	}
+	if calls[0].Model != "opus" {
+		t.Errorf("the fork's fix was sent model %q, want opus", calls[0].Model)
+	}
+	if !strings.Contains(out.String(), "graph.give_up") {
+		t.Errorf("the fork never says it gave the fix loop another round")
 	}
 }

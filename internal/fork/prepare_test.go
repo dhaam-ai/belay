@@ -7,6 +7,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -428,3 +429,57 @@ func TestPrepareInheritsTheHistoryWithoutItsSpend(t *testing.T) {
 }
 
 func ptr(s string) *string { return &s }
+
+// TestPrepareGivesAFixThatGaveUpOneMoreRound: the fix node gives up, without
+// calling the agent, once the blackboard's Fix.Attempts reaches
+// graph.give_up. The visit a fix loop gave up on was given a blackboard with
+// every round used, and it is the one a fork re-runs by default, so forking
+// it as it was re-ran the giving up: `belay fork <run> fix --model opus`
+// called no model at all. A fork of such a visit runs under graph.give_up one
+// above the rounds used, and says so; a fork of a visit with rounds left
+// runs under the configuration it was given, and says nothing about it.
+func TestPrepareGivesAFixThatGaveUpOneMoreRound(t *testing.T) {
+	tests := []struct {
+		name       string
+		attempts   int
+		wantGiveUp int
+		wantNote   bool
+	}{
+		{name: "every round used", attempts: 3, wantGiveUp: 4, wantNote: true},
+		{name: "more rounds used than the cap allows now", attempts: 5, wantGiveUp: 6, wantNote: true},
+		{name: "rounds left", attempts: 1, wantGiveUp: 3},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			src := newSource(t)
+			src.rewriteSnapshot(t, graph.NodeFix, 2, func(s *state.Snapshot) { s.State.Fix.Attempts = tt.attempts })
+			req := src.request(graph.NodeFix, 0)
+			req.AcceptCurrentFiles = true
+			spec, err := fork.Prepare(context.Background(), req)
+			if err != nil {
+				t.Fatalf("Prepare: %v", err)
+			}
+			if spec.Visit.Ordinal != 2 {
+				t.Fatalf("forked fix #%d, want the last, #2", spec.Visit.Ordinal)
+			}
+			if got := spec.Config.Graph.GiveUp; got != tt.wantGiveUp {
+				t.Errorf("the fork runs under graph.give_up %d, want %d", got, tt.wantGiveUp)
+			}
+			if req.Config.Graph.GiveUp != 3 {
+				t.Errorf("Prepare changed the caller's configuration to graph.give_up %d", req.Config.Graph.GiveUp)
+			}
+			noted := false
+			for _, d := range spec.Deviations {
+				if strings.Contains(d, "graph.give_up") {
+					noted = true
+					if !strings.Contains(d, strconv.Itoa(tt.wantGiveUp)) {
+						t.Errorf("the deviation %q does not say the fork's graph.give_up, %d", d, tt.wantGiveUp)
+					}
+				}
+			}
+			if noted != tt.wantNote {
+				t.Errorf("a deviation names graph.give_up = %v, want %v: %q", noted, tt.wantNote, spec.Deviations)
+			}
+		})
+	}
+}
