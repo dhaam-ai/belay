@@ -2,7 +2,6 @@ package cli
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -333,14 +332,10 @@ func listQueue(cmd *cobra.Command) error {
 	return nil
 }
 
-// writeQueueJSON writes the listing as indented JSON.
+// writeQueueJSON writes the listing as indented JSON, the goals exactly as
+// they were added and escaped so the document is safe to print (writeJSON).
 func writeQueueJSON(w io.Writer, listing QueueListing) error {
-	enc := json.NewEncoder(w)
-	enc.SetIndent("", "  ")
-	if err := enc.Encode(listing); err != nil {
-		return fmt.Errorf("cli: write queue JSON: %w", err)
-	}
-	return nil
+	return writeJSON(w, listing, "queue")
 }
 
 // visibleGoals leaves out the goals a person took back.

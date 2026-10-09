@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"bytes"
 	"cmp"
 	"encoding/json"
 	"errors"
@@ -12,7 +13,6 @@ import (
 	"slices"
 	"strings"
 	"time"
-	"unicode"
 	"unicode/utf8"
 
 	"github.com/spf13/cobra"
@@ -354,35 +354,18 @@ func runsWhere(status state.RunStatus, node string, layout state.Layout) string 
 }
 
 // sanitizeRunsText makes an arbitrary string safe and tidy to print in a
-// table: control characters are dropped and every run of whitespace becomes
-// a single space.
+// table cell: it is termsafe.Line, under the name the listing has always
+// used. Every run of whitespace becomes a single space, so a goal stays on
+// its row, and every other control character becomes a visible stand-in.
 //
-// Dropping control characters is a correctness requirement, not tidiness.
-// A goal, a node name and a run directory name are all attacker- or
-// accident-supplied, and any of them can carry an ESC. Printed raw, that
-// rewrites the user's terminal -- including when belay has otherwise
-// disabled color because NO_COLOR is set or output is piped to a file.
-func sanitizeRunsText(s string) string {
-	var b strings.Builder
-	b.Grow(len(s))
-	pendingSpace := false
-	for _, r := range s {
-		switch {
-		case unicode.IsSpace(r):
-			pendingSpace = b.Len() > 0
-		case unicode.IsControl(r):
-			// Dropped entirely, and deliberately not treated as a space:
-			// an ESC is not whitespace and should leave no trace.
-		default:
-			if pendingSpace {
-				b.WriteRune(' ')
-				pendingSpace = false
-			}
-			b.WriteRune(r)
-		}
-	}
-	return b.String()
-}
+// That is a correctness requirement, not tidiness. A goal, a node name and a
+// run directory name are all attacker- or accident-supplied, and any of them
+// can carry an ESC. Printed raw, that rewrites the user's terminal --
+// including when belay has otherwise disabled color because NO_COLOR is set
+// or output is piped to a file. It used to drop control characters instead;
+// a stand-in shows the reader something odd is there, and a name with a
+// byte silently missing can read as a different, innocent one (ADR-0015).
+func sanitizeRunsText(s string) string { return termsafe.Line(s) }
 
 // Table geometry.
 const (
@@ -803,10 +786,21 @@ func writeRunsJSON(w io.Writer, listing RunsListing) error {
 	if listing.Runs == nil {
 		listing.Runs = []RunSummary{}
 	}
-	enc := json.NewEncoder(w)
+	return writeJSON(w, listing, "runs")
+}
+
+// writeJSON writes v to w as indented JSON, escaped by termsafe.JSON so a
+// document a script reads exactly is also safe to print: encoding/json
+// writes a DEL or a C1 control in a goal or a note through as it is.
+func writeJSON(w io.Writer, v any, what string) error {
+	var buf bytes.Buffer
+	enc := json.NewEncoder(&buf)
 	enc.SetIndent("", "  ")
-	if err := enc.Encode(listing); err != nil {
-		return fmt.Errorf("cli: write runs JSON: %w", err)
+	if err := enc.Encode(v); err != nil {
+		return fmt.Errorf("cli: write %s JSON: %w", what, err)
+	}
+	if _, err := w.Write(termsafe.JSON(buf.Bytes())); err != nil {
+		return fmt.Errorf("cli: write %s JSON: %w", what, err)
 	}
 	return nil
 }

@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -244,5 +245,34 @@ func TestTimelineJSONIsExactAndPrintable(t *testing.T) {
 	}
 	if len(doc.Candidates) != 1 || doc.Candidates[0].ID != "cand"+hostile || doc.Candidates[0].Note != hostileNote {
 		t.Errorf("--json changed a candidate: %+v", doc.Candidates)
+	}
+}
+
+// TestRunsAndQueueShowWhatTheyReadAsStandIns: `belay runs` and `belay
+// queue list` dropped a goal's control characters, so the table was safe but
+// a goal could read as another; their --json documents carried a C1 control
+// or a DEL in a goal raw, which encoding/json does not escape.
+func TestRunsAndQueueShowWhatTheyReadAsStandIns(t *testing.T) {
+	ws := goWorkspace(t)
+	p, err := resolve(resolveRequest{workspace: ws, logger: quietLogger()})
+	if err != nil {
+		t.Fatalf("resolve: %v", err)
+	}
+	seedRunDir(t, p, hostileGoal)
+	queueAdd(t, ws, hostileGoal)
+
+	for _, args := range [][]string{
+		{"runs"}, {"runs", "--json"}, {"queue", "list"}, {"queue", "list", "--json"}, {"queue", "status"},
+	} {
+		out, errOut, err := runCLI(t, append(args, "--workspace", ws)...)
+		if err != nil {
+			t.Fatalf("belay %v: %v\n%s%s", args, err, out, errOut)
+		}
+		label := "belay " + strings.Join(args, " ")
+		assertTerminalSafe(t, label, out)
+		assertTerminalSafe(t, label+" (stderr)", errOut)
+		if !slices.Contains(args, "--json") && !strings.Contains(out, "add a helper␛]0;PWNED-TITLE␇") {
+			t.Errorf("%s does not show the goal's escape as a stand-in:\n%s", label, out)
+		}
 	}
 }
