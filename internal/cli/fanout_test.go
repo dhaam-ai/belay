@@ -485,9 +485,15 @@ func TestDryRunShowsEachCandidatesEnvelope(t *testing.T) {
 				"3 candidates, 3 at a time, up to $1.00 and 666,666 tokens each",
 				"each walks code → write → test → fix → review → done, in a workspace of its own",
 				"the winner is the candidate with the fewest review issues",
-				"up to one step per candidate over budget.max_usd",
+				"so the run can end up to one step per candidate over budget.max_usd; a step cut short by " +
+					"Ctrl-C, a timeout or a crash is charged the costliest step before it, so it adds to that only " +
+					"when it cost more than any step before it",
 				"each candidate gives up after 3 rounds of its test-and-fix loop, or 60 steps of its own",
 			},
+			// An interruption does not double the bound: a step cut short is
+			// charged the costliest step before it (ADR-0007's 2026-10-09
+			// amendment), and the dry run once said otherwise.
+			absent: []string{"two, if every candidate"},
 		},
 		{
 			name:   "one at a time, and never more at a time than there are candidates",
