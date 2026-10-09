@@ -720,9 +720,10 @@ func (d *Dispatcher) heal(
 //
 // usage is what the attempt is charged, and the two callers know different
 // things. pauseInsideNode passes the node's own report, because a node cut
-// short by a cancellation has still spent whatever its backend said it spent.
-// heal has no report at all, because the process that could have made one
-// died, and passes interruptedCharge.
+// short by a cancellation has still spent whatever its backend said it spent,
+// or interruptedCharge when the report was empty (cutShortCharge). heal has no
+// report at all, because the process that could have made one died, and
+// passes interruptedCharge.
 func interruptedAttempt(node string, attempt int, elapsed time.Duration, usage belay.Usage, note string) journal.Record {
 	return journal.Record{
 		Event: journal.EventNodeFinished, Node: node, Attempt: attempt,
@@ -791,11 +792,59 @@ func (d *Dispatcher) reap() int {
 // during its first paid step can go past its ceiling by what that step cost.
 func interruptedCharge(ledger *budget.Ledger) belay.Usage {
 	charge := ledger.Largest()
-	if charge.InputTokens == 0 && charge.OutputTokens == 0 && charge.USD == 0 {
+	if isZeroUsage(charge) {
 		return belay.Usage{}
 	}
 	charge.Estimated = true
 	return charge
+}
+
+// cutShortCharge is what an attempt a cancellation or graph.node_timeout cut
+// short is charged, and the clause its note carries when the figure is an
+// estimate.
+//
+// What the node reported comes first: a backend that says what it spent
+// before it was stopped has said the one thing belay cannot know otherwise.
+// A report of nothing is not evidence of nothing spent, though. The agent
+// CLI prints its bill when it finishes, so the one that was killed printed
+// none, and the zero is the silence of a dead process, the same silence heal
+// meets after a kill. So the attempt is charged what heal charges
+// (interruptedCharge), and a Ctrl-C, a timeout and a SIGKILL at the same
+// moment now cost a run the same.
+//
+// A node that cannot spend (Unpriced), or whose spend is its candidate
+// runs' and recorded in their own journals (Supervisor), is charged its
+// report and nothing more: an estimate there would be money nobody spent.
+func (d *Dispatcher) cutShortCharge(ledger *budget.Ledger, node string, reported belay.Usage) (belay.Usage, string) {
+	if !isZeroUsage(reported) || !d.estimable(node) {
+		return reported, ""
+	}
+	charge := interruptedCharge(ledger)
+	if isZeroUsage(charge) {
+		return charge, ""
+	}
+	return charge, fmt.Sprintf("; charged $%.2f, estimated, since a step cut short reports nothing of what it spent",
+		charge.USD)
+}
+
+// estimable reports whether an attempt of node whose spend is unknown should
+// be charged an estimate: false for a node that cannot spend and for a node
+// whose spend belongs to the runs it supervises (see cutShortCharge).
+func (d *Dispatcher) estimable(node string) bool {
+	n, err := d.registry.Get(node)
+	if err != nil {
+		// A node this registry does not know is charged as one that could
+		// spend: leaning high is the direction that keeps the ceiling.
+		return true
+	}
+	_, unpriced := n.(Unpriced)
+	_, supervises := n.(Supervisor)
+	return !unpriced && !supervises
+}
+
+// isZeroUsage reports whether u records nothing spent in any dimension.
+func isZeroUsage(u belay.Usage) bool {
+	return u.InputTokens == 0 && u.OutputTokens == 0 && u.USD == 0
 }
 
 // owedRunMarker maps a node_finished that ended the run onto the run-level
@@ -1244,27 +1293,34 @@ func (d *Dispatcher) settle(
 	// interrupted run resumable through an ordinary Ctrl-C, spend the whole
 	// ceiling over again on the resume (ADR-0007).
 	//
-	// A node cut off part-way often has nothing to report, and then this
-	// records the zero it reported. That is a separate case from an attempt
-	// belay never saw finish at all, which heal closes.
+	// A node cut off part-way, by a cancellation or by graph.node_timeout,
+	// usually has nothing to report: the agent CLI that was killed never
+	// printed its bill. It is charged what heal charges an attempt a kill
+	// left open instead (see cutShortCharge), because recording the zero it
+	// reported made an interrupted paid call free, and interrupting and
+	// resuming a way to spend past the ceiling.
 	//
 	// The timeout is checked first. It is the dispatcher's own guard, and a
 	// node that outlived it is not excused by a cancellation that arrived
 	// while it did.
 	switch {
 	case exec.timedOut:
+		usage, charged := d.cutShortCharge(ledger, node, exec.res.Usage)
 		err := fmt.Errorf("%w: %q exceeded graph.node_timeout=%s", ErrNodeTimeout, node, d.cfg.Graph.NodeTimeout)
-		return d.pauseInsideNode(jrnl, man, ledger, node, attempt, steps, exec.elapsed, exec.res.Usage,
-			d.limitNote(err, "graph.node_timeout"), err, logger)
+		return d.pauseInsideNode(jrnl, man, ledger, node, attempt, steps, exec.elapsed, usage,
+			d.limitNote(err, "graph.node_timeout")+charged, err, logger)
 	case exec.canceled && d.pauseOnCancel:
-		return d.pauseInsideNode(jrnl, man, ledger, node, attempt, steps, exec.elapsed, exec.res.Usage,
-			fmt.Sprintf("interrupted: belay was asked to stop while attempt %d was running; resuming re-runs it", attempt),
+		usage, charged := d.cutShortCharge(ledger, node, exec.res.Usage)
+		return d.pauseInsideNode(jrnl, man, ledger, node, attempt, steps, exec.elapsed, usage,
+			fmt.Sprintf("interrupted: belay was asked to stop while attempt %d was running%s; resuming re-runs it",
+				attempt, charged),
 			fmt.Errorf("%w: at %q: %w", ErrInterrupted, node, context.Canceled), logger)
 	case exec.canceled:
+		usage, charged := d.cutShortCharge(ledger, node, exec.res.Usage)
 		err := fmt.Errorf("%w: %q canceled: %w", ErrNodeAborted, node, context.Canceled)
-		return d.terminal(jrnl, man, ledger, node, attempt, steps, exec.elapsed, exec.res.Usage,
+		return d.terminal(jrnl, man, ledger, node, attempt, steps, exec.elapsed, usage,
 			journal.StatusAborted, journal.EventRunAborted, state.RunStatusAborted, ExitAborted,
-			d.note(err.Error()), err, logger)
+			d.note(err.Error())+charged, err, logger)
 	case errors.Is(exec.err, belay.ErrBudgetExceeded):
 		// A node that refuses because of the ceiling is reporting one of
 		// the dispatcher's own limits, not a verdict on the work: the

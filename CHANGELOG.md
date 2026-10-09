@@ -304,6 +304,14 @@ that only `pkg/belay` carries a compatibility promise. Everything under
 
 ### Fixed
 
+- **A step stopped by Ctrl-C or `graph.node_timeout` is charged for, so
+  interrupting and resuming can no longer spend past `budget.max_usd`.** The
+  agent CLI prints its bill only when it finishes, so a call belay stopped
+  reported nothing and was recorded as free: four Ctrl-C and resume cycles of
+  a fanout started ten $0.40 calls and reported $0.90, and a step that kept
+  timing out was never stopped by the ceiling. Such a step is now charged
+  what a kill at the same moment is charged — the costliest step the run has
+  paid for, marked as an estimate — unless it reported its own spend.
 - **A Ctrl-C just after a candidate's workspace is made no longer loses that
   candidate.** A candidate whose run had been interrupted, or killed, before
   its first step resumed at "plan", a step a candidate does not have, and

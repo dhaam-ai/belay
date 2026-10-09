@@ -1342,6 +1342,144 @@ func TestDispatcher_RecordsWhatARejectedNodeSpent(t *testing.T) {
 	}
 }
 
+// TestDispatcher_ChargesAnAttemptCutShortThatReportedNothing is the other
+// half of the budget-integrity contract: a node a Ctrl-C or graph.node_timeout
+// stops part-way usually has nothing to report, because the agent CLI that
+// was killed never printed its bill. Recording the zero it reported let an
+// interrupted paid call cost nothing, so interrupting and resuming spent past
+// the ceiling with the ledger none the wiser, where a kill at the same moment
+// was charged an estimate by heal. Both now charge the same estimate: the
+// costliest step the run has paid for, marked estimated.
+func TestDispatcher_ChargesAnAttemptCutShortThatReportedNothing(t *testing.T) {
+	planSpend := belay.Usage{InputTokens: 1000, OutputTokens: 200, USD: 0.40}
+	timeoutCfg := func() config.Config {
+		cfg := config.Default()
+		cfg.Graph.NodeTimeout = config.NewDuration(20 * time.Millisecond)
+		return cfg
+	}
+	tests := []struct {
+		name  string
+		cfg   config.Config
+		pause bool
+		node  func(cancel context.CancelFunc) graph.Node
+	}{
+		{
+			name: "the node outlived graph.node_timeout and reported nothing",
+			cfg:  timeoutCfg(),
+			node: func(context.CancelFunc) graph.Node {
+				return &fakeNode{name: graph.NodeCode, steps: []nodeStep{{sleep: time.Minute}}}
+			},
+		},
+		{
+			name:  "a Ctrl-C paused the run and the node reported nothing",
+			cfg:   config.Default(),
+			pause: true,
+			node: func(cancel context.CancelFunc) graph.Node {
+				return &interruptingNode{name: graph.NodeCode, cancel: cancel}
+			},
+		},
+		{
+			name: "a cancellation ended the run and the node reported nothing",
+			cfg:  config.Default(),
+			node: func(cancel context.CancelFunc) graph.Node {
+				return &interruptingNode{name: graph.NodeCode, cancel: cancel}
+			},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			h := newRun(t, tt.cfg, "pay for what a killed call spent")
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			plan := &fakeNode{name: graph.NodePlan, steps: []nodeStep{{
+				res: Result{Next: graph.NodeCode, Status: journal.StatusOK, Usage: planSpend},
+			}}}
+
+			out, _ := h.pausingDispatcher(t, tt.pause, plan, tt.node(cancel)).Run(ctx)
+
+			rec := h.lastNodeFinished(t)
+			want := journal.Usage{
+				InputTokens: planSpend.InputTokens, OutputTokens: planSpend.OutputTokens,
+				USD: planSpend.USD, Estimated: true,
+			}
+			if rec.Node != graph.NodeCode || rec.Usage == nil || *rec.Usage != want {
+				t.Errorf("the cut-short attempt of %q was journalled with usage %+v, want %+v", rec.Node, rec.Usage, want)
+			}
+			if !closeTo(out.Usage.USD, 2*planSpend.USD) || !out.Usage.Estimated {
+				t.Errorf("Outcome.Usage = %+v, want USD %v marked estimated", out.Usage, 2*planSpend.USD)
+			}
+			if !strings.Contains(rec.Note, "estimated") {
+				t.Errorf("the attempt's note %q does not say its charge is an estimate", rec.Note)
+			}
+		})
+	}
+}
+
+// TestDispatcher_InterruptingAndResumingCannotSpendPastTheCeiling is the
+// scenario the charge exists for: a paid step that is cut short every time,
+// by a person pressing Ctrl-C and resuming, or by graph.node_timeout and a
+// person resuming without raising it. Each cut is charged what the run's
+// costliest step cost, so the budget guard stops the loop once the charges
+// reach the ceiling, instead of it running for ever on a ledger that only
+// ever saw the plan.
+func TestDispatcher_InterruptingAndResumingCannotSpendPastTheCeiling(t *testing.T) {
+	planSpend := belay.Usage{InputTokens: 1000, OutputTokens: 200, USD: 0.40}
+	tests := []struct {
+		name    string
+		timeout bool
+	}{
+		{name: "a step a Ctrl-C keeps interrupting"},
+		{name: "a step that keeps timing out", timeout: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := budgetCfg(1.00, 0)
+			if tt.timeout {
+				cfg.Graph.NodeTimeout = config.NewDuration(20 * time.Millisecond)
+			}
+			h := newRun(t, cfg, "spend no more than the ceiling, however often interrupted")
+			plan := &fakeNode{name: graph.NodePlan, steps: []nodeStep{{
+				res: Result{Next: graph.NodeCode, Status: journal.StatusOK, Usage: planSpend},
+			}}}
+
+			codeRuns := 0
+			var lastErr error
+			for i := range 10 {
+				ctx, cancel := context.WithCancel(context.Background())
+				var code graph.Node = &interruptingNode{name: graph.NodeCode, cancel: cancel}
+				if tt.timeout {
+					code = &fakeNode{name: graph.NodeCode, steps: []nodeStep{{sleep: time.Minute}}}
+				}
+				d := h.pausingDispatcher(t, true, plan, code)
+				if i == 0 {
+					_, lastErr = d.Run(ctx)
+				} else {
+					_, lastErr = d.Resume(ctx)
+				}
+				cancel()
+				switch n := code.(type) {
+				case *interruptingNode:
+					codeRuns += n.calls
+				case *fakeNode:
+					codeRuns += n.calls
+				}
+				if errors.Is(lastErr, belay.ErrBudgetExceeded) {
+					break
+				}
+			}
+
+			if !errors.Is(lastErr, belay.ErrBudgetExceeded) {
+				t.Fatalf("after 10 dispatches the last error is %v, want the budget ceiling to have stopped the run", lastErr)
+			}
+			// $0.40 for the plan, then $0.40 for each cut: the guard lets a
+			// second cut start at $0.80 and stops the third at $1.20.
+			if codeRuns != 2 {
+				t.Errorf("the cut-short step started %d times, want 2 before the ceiling stopped it", codeRuns)
+			}
+		})
+	}
+}
+
 // ---------------------------------------------------------------------------
 // Guards: steps, timeout, node failure.
 // ---------------------------------------------------------------------------
