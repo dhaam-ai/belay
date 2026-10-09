@@ -307,9 +307,17 @@ type Code struct {
 	// LastDiff is where the most recent diff was archived, typically under
 	// Layout.ArtifactPath (for example "diff-0007.patch").
 	LastDiff string `json:"last_diff"`
-	// ChangedFiles lists the paths, relative to the workspace root, the
-	// code node reported changing.
+	// ChangedFiles lists the paths, relative to the workspace root, the run
+	// has changed so far: what the agent reported, and, in a run whose
+	// workspace can say what really changed (Manifest.Changes), everything
+	// the workspace says changed as well, as the write node verified it.
 	ChangedFiles []string `json:"changed_files"`
+	// Unreported is the part of ChangedFiles the agent changed and never
+	// reported, as the write node found it, sorted. It is judged like every
+	// other changed file; it is kept apart so that a run cannot hide an
+	// edit by leaving it out of its report, and so that every place the run
+	// is shown can say which files those were.
+	Unreported []string `json:"unreported,omitempty"`
 }
 
 // Test is the blackboard's projection of a belay.TestReport: the fields

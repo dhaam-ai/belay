@@ -257,6 +257,12 @@ type Manifest struct {
 	// visit it re-runs, and what the history it inherited cost. Nil for every
 	// run a person started. It is a record, not a pin; see Origin.
 	Origin *Origin `json:"origin,omitempty"`
+	// Changes is where this run learns what its workspace changed, pinned
+	// when the run was created: git against a base commit, a file record in
+	// the run directory, or only the agent's report. Nil for a run created
+	// before belay recorded it, which is read as the agent's report. Set it
+	// with SetChanges.
+	Changes *Changes `json:"changes,omitempty"`
 }
 
 // ArchivedPlan is where a run files its approved plan once it completes
