@@ -6,6 +6,8 @@ import (
 
 	tea "charm.land/bubbletea/v2"
 	"github.com/charmbracelet/x/ansi"
+
+	"github.com/dhaam-ai/belay/internal/termsafe"
 )
 
 // Size limits. Below minWidth by minHeight the plan cannot be read usefully,
@@ -68,13 +70,15 @@ type line struct {
 const tabWidth = 4
 
 // clean makes text from outside belay safe to draw: the plan, the goal, and
-// anything an error quotes. Every control character becomes a visible
-// stand-in rather than reaching the terminal, where an ESC or a C1 byte
-// starts a sequence the terminal acts on — writing the clipboard (OSC 52),
-// clearing the screen — and a plan can quote such text from the repository
-// it was written about. A C0 control or DEL becomes its Unicode control
-// picture (ESC is ␛), a C1 control its code in angle brackets, and a tab
-// spaces.
+// anything an error quotes. Every control character becomes the visible
+// stand-in internal/termsafe gives it rather than reaching the terminal,
+// where an ESC or a C1 byte starts a sequence the terminal acts on —
+// writing the clipboard (OSC 52), clearing the screen — and a plan can quote
+// such text from the repository it was written about. A C0 control or DEL
+// becomes its Unicode control picture (ESC is ␛), a C1 control its code in
+// angle brackets, and a tab spaces. The rule is termsafe's, shared with
+// every other place belay prints text it did not write, so the viewer and
+// `belay plan --no-input` show a plan the same way.
 //
 // Outside a UTF-8 locale the stand-ins are ASCII — caret notation, ^[ for
 // ESC — and every letter beyond ASCII is drawn as ?, for the reason
@@ -82,19 +86,12 @@ const tabWidth = 4
 func (g glyphs) clean(s string) string {
 	var b strings.Builder
 	for _, r := range s {
+		stand, control := termsafe.StandIn(r, g.ascii)
 		switch {
 		case r == '\t':
 			b.WriteString(strings.Repeat(" ", tabWidth))
-		case r < 0x20 && g.ascii:
-			b.WriteString("^" + string(r+'@'))
-		case r < 0x20:
-			b.WriteRune(0x2400 + r)
-		case r == 0x7f && g.ascii:
-			b.WriteString("^?")
-		case r == 0x7f:
-			b.WriteRune(0x2421)
-		case r >= 0x80 && r < 0xa0:
-			fmt.Fprintf(&b, "<%02X>", r)
+		case control:
+			b.WriteString(stand)
 		case r >= 0x80 && g.ascii:
 			b.WriteByte('?')
 		default:

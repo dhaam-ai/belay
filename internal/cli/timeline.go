@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -13,11 +14,11 @@ import (
 	"strconv"
 	"strings"
 	"time"
-	"unicode"
 	"unicode/utf8"
 
 	"github.com/dhaam-ai/belay/internal/journal"
 	"github.com/dhaam-ai/belay/internal/state"
+	"github.com/dhaam-ai/belay/internal/termsafe"
 	"github.com/spf13/cobra"
 )
 
@@ -941,11 +942,13 @@ func (s timelineStyle) outcome(o TimelineOutcome, text string) string {
 // TimelineColorEnabled reports whether w should receive terminal color.
 //
 // Color is on only for a character device — an actual terminal — and only
-// when NO_COLOR is unset. Per the NO_COLOR convention the variable's mere
-// presence disables color regardless of its value, and a TERM of "dumb"
-// declares a terminal that cannot render it.
+// when NO_COLOR is unset or empty. no-color.org asks for color off when the
+// variable is "present and not an empty string", and every other command
+// reads it that way (colorEnabled), so an exported-but-empty NO_COLOR must
+// not turn the timeline plain while `belay runs` beside it stays colored. A
+// TERM of "dumb" declares a terminal that cannot render color.
 func TimelineColorEnabled(w io.Writer) bool {
-	if _, ok := os.LookupEnv("NO_COLOR"); ok {
+	if os.Getenv("NO_COLOR") != "" {
 		return false
 	}
 	if os.Getenv("TERM") == "dumb" {
@@ -1022,9 +1025,12 @@ func timelinePadLeft(s string, width int) string {
 //
 // color must be false whenever w is not a terminal; see TimelineColorEnabled.
 // With color off the output contains no escape sequences of any kind, so a
-// redirected timeline is clean text.
+// redirected timeline is clean text. With it on, the only ones are the
+// timeline's own colors: every string read from the run is drawn through
+// Timeline.printable, so none of them can carry a sequence of its own.
 func RenderTimeline(w io.Writer, tl Timeline, color bool) error {
 	s := timelineStyle{enabled: color}
+	tl = tl.printable()
 	var b strings.Builder
 
 	timelineWriteHeader(&b, s, tl)
@@ -1055,26 +1061,69 @@ func RenderTimeline(w io.Writer, tl Timeline, color bool) error {
 // section, rather than a heading over an empty list.
 //
 // The paths are an agent's report, which belay checks for escaping the
-// repository but not for control characters, so those are dropped here: a
-// path must not be able to rewrite the terminal it is printed to.
+// repository but not for control characters; RenderTimeline has already
+// made them printable (see Timeline.printable).
 func timelineWriteChangedFiles(b *strings.Builder, s timelineStyle, tl Timeline) {
 	if len(tl.ChangedFiles) == 0 {
 		return
 	}
 	fmt.Fprintf(b, "\n%s\n", s.paint(timelineDim, "Files changed:"))
 	for _, path := range tl.ChangedFiles {
-		fmt.Fprintf(b, "  %s\n", timelineDropControl(path))
+		fmt.Fprintf(b, "  %s\n", path)
 	}
 }
 
-// timelineDropControl removes every control character from s.
-func timelineDropControl(s string) string {
-	return strings.Map(func(r rune) rune {
-		if unicode.IsControl(r) {
-			return -1
-		}
-		return r
-	}, s)
+// printable returns a copy of t with every string read from the run's files
+// made safe to print on one line (termsafe.Line): ids, the goal, node names,
+// notes, file names and the candidates' fields.
+//
+// Every one of them is text belay did not write. A goal is what a person
+// typed, a note quotes what an error was about, a file name and a candidate
+// id are an agent's choice -- and in a run that edits its workspace in place
+// the agent can rewrite the manifest, the journal and the blackboard
+// themselves. So the whole value is cleaned once, before anything is drawn,
+// rather than field by field where each is printed: the columns are then
+// measured on the text that is actually drawn, and a field added later is
+// cleaned by adding it here, which TestTimelineShowsWhatItReadAsStandIns
+// sweeps.
+//
+// It is a copy, and only the text view uses it. The --json document carries
+// what the run recorded exactly, and is made safe by escaping instead
+// (RenderTimelineJSON).
+func (t Timeline) printable() Timeline {
+	clean := termsafe.Line
+	t.Run.RunID, t.Run.Dir, t.Run.Workspace = clean(t.Run.RunID), clean(t.Run.Dir), clean(t.Run.Workspace)
+	t.Run.Candidate, t.Run.ParentRunID = clean(t.Run.Candidate), clean(t.Run.ParentRunID)
+	t.Goal, t.Status, t.Next = clean(t.Goal), clean(t.Status), clean(t.Next)
+	t.InterruptedNode, t.Winner = clean(t.InterruptedNode), clean(t.Winner)
+
+	t.Entries = slices.Clone(t.Entries)
+	for i := range t.Entries {
+		e := &t.Entries[i]
+		e.Node, e.Next, e.Note = clean(e.Node), clean(e.Next), clean(e.Note)
+		e.Outcome = TimelineOutcome(clean(string(e.Outcome)))
+	}
+	t.Markers = slices.Clone(t.Markers)
+	for i := range t.Markers {
+		t.Markers[i].Kind = clean(t.Markers[i].Kind)
+	}
+	t.Loops = slices.Clone(t.Loops)
+	for i := range t.Loops {
+		t.Loops[i].Node = clean(t.Loops[i].Node)
+	}
+	t.Candidates = slices.Clone(t.Candidates)
+	for i := range t.Candidates {
+		c := &t.Candidates[i]
+		c.ID, c.RunID, c.RunDir, c.WorkspaceDir = clean(c.ID), clean(c.RunID), clean(c.RunDir), clean(c.WorkspaceDir)
+		c.ProvisionNote, c.Note = clean(c.ProvisionNote), clean(c.Note)
+		c.Outcome = TimelineCandidateOutcome(clean(string(c.Outcome)))
+		c.Provision = state.Provision(clean(string(c.Provision)))
+	}
+	t.ChangedFiles = slices.Clone(t.ChangedFiles)
+	for i := range t.ChangedFiles {
+		t.ChangedFiles[i] = clean(t.ChangedFiles[i])
+	}
+	return t
 }
 
 // timelineWriteHeader writes the identity block: which run this is, how it
@@ -1089,10 +1138,9 @@ func timelineWriteHeader(b *strings.Builder, s timelineStyle, tl Timeline) {
 		// timelines are nearly indistinguishable.
 		of := ""
 		if tl.Run.ParentRunID != "" {
-			of = " of " + timelineDropControl(tl.Run.ParentRunID)
+			of = " of " + tl.Run.ParentRunID
 		}
-		fmt.Fprintf(b, "%s%s\n", label(""), s.paint(timelineDim,
-			"candidate "+timelineDropControl(tl.Run.Candidate)+of))
+		fmt.Fprintf(b, "%s%s\n", label(""), s.paint(timelineDim, "candidate "+tl.Run.Candidate+of))
 	}
 	if tl.Run.Implicit {
 		// Never act on an implicit target without saying which one was
@@ -1463,15 +1511,15 @@ func timelineToJSON(tl Timeline) timelineJSONDoc {
 	// nothing to say about them, so that a consumer can tell "this is not a
 	// candidate timeline" from "this candidate has no id".
 	if tl.Run.Candidate != "" {
-		cand := timelineDropControl(tl.Run.Candidate)
+		cand := tl.Run.Candidate
 		doc.Candidate = &cand
 	}
 	if tl.Run.ParentRunID != "" {
-		parent := timelineDropControl(tl.Run.ParentRunID)
+		parent := tl.Run.ParentRunID
 		doc.ParentRunID = &parent
 	}
 	if tl.Winner != "" {
-		winner := timelineDropControl(tl.Winner)
+		winner := tl.Winner
 		doc.Winner = &winner
 	}
 	if tl.Interrupted {
@@ -1515,11 +1563,20 @@ func timelineToJSON(tl Timeline) timelineJSONDoc {
 
 // RenderTimelineJSON writes tl to w as the documented, versioned JSON
 // document — the scriptable form of exactly what the text view shows.
+//
+// Every string is what the run recorded, exactly, because a script must be
+// able to rely on it; termsafe.JSON escapes the DEL and C1 controls
+// encoding/json leaves raw, so the document is also safe to print, as
+// `belay timeline --json` in a terminal does.
 func RenderTimelineJSON(w io.Writer, tl Timeline) error {
-	enc := json.NewEncoder(w)
+	var buf bytes.Buffer
+	enc := json.NewEncoder(&buf)
 	enc.SetIndent("", "  ")
 	if err := enc.Encode(timelineToJSON(tl)); err != nil {
 		return fmt.Errorf("cli: encode timeline as json: %w", err)
+	}
+	if _, err := w.Write(termsafe.JSON(buf.Bytes())); err != nil {
+		return fmt.Errorf("cli: write the timeline: %w", err)
 	}
 	return nil
 }

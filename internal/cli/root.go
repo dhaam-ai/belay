@@ -17,6 +17,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"sync"
 
@@ -24,6 +25,7 @@ import (
 
 	"github.com/dhaam-ai/belay/internal/graph"
 	"github.com/dhaam-ai/belay/internal/planview"
+	"github.com/dhaam-ai/belay/internal/termsafe"
 )
 
 // Version information, injected via ldflags during build.
@@ -155,8 +157,19 @@ func Execute() error {
 	if err == nil {
 		return nil
 	}
+	os.Exit(exitReport(rootCmd.ErrOrStderr(), err))
+	return nil
+}
 
-	out := rootCmd.ErrOrStderr()
+// exitReport writes what a command that failed has left to say to out, and
+// returns the exit status to end with.
+//
+// What it writes is made printable (termsafe.Text) like everything say and
+// note print, and for the same reason: the message is usually an error, and
+// an error quotes whatever it was about -- a file an agent named, a goal, a
+// line of a tool's output. It is the last line a person reads, so it is the
+// one a hidden line would be hidden above.
+func exitReport(out io.Writer, err error) int {
 	var exit *ExitError
 	if errors.As(err, &exit) {
 		// A command that already printed its explanation carries neither a
@@ -164,18 +177,29 @@ func Execute() error {
 		// exited with status 1" under a refusal a person has just read
 		// undoes the work of writing the refusal.
 		if msg := strings.TrimSpace(exit.said()); msg != "" {
-			_, _ = fmt.Fprintln(out, msg)
+			_, _ = fmt.Fprintln(out, termsafe.Text(msg))
 		}
-		os.Exit(exit.Code)
+		return exit.Code
 	}
 
-	_, _ = fmt.Fprintf(out, "belay: %s\nRun \"belay --help\" to see the commands and flags belay accepts.\n", err)
-	os.Exit(graph.ExitFailed)
-	return nil
+	_, _ = fmt.Fprintf(out, "belay: %s\nRun \"belay --help\" to see the commands and flags belay accepts.\n",
+		termsafe.Text(err.Error()))
+	return graph.ExitFailed
 }
 
 // ui is one command invocation's output surface: the two streams it writes to
 // and whether they may carry colour.
+//
+// Everything say and note are given to print is text belay did not write
+// until shown otherwise, and is made safe for a terminal before it is
+// formatted (printable): a goal, a plan, a note an agent's error left in the
+// journal, a path, an error quoting any of those. The decision is made here,
+// at the sink, rather than at each of the couple of hundred calls, because a
+// call that forgot is exactly how a plan's escape sequences reached the
+// terminal through `belay plan --no-input` while the viewer beside it kept
+// them out. The one exception is belay's own emphasis, which is a type of
+// its own (styled) so it cannot be mistaken for text from outside, and which
+// emph makes safe before it decorates it.
 //
 // Writes are serialized. The signal handler that announces "stopping" runs on
 // its own goroutine while the dispatcher is still narrating from the main
@@ -217,7 +241,7 @@ func newUI(cmd *cobra.Command) *ui {
 func (u *ui) say(format string, a ...any) {
 	u.mu.Lock()
 	defer u.mu.Unlock()
-	_, _ = fmt.Fprintf(u.out, format+"\n", a...)
+	_, _ = fmt.Fprintf(u.out, format+"\n", printable(a)...)
 }
 
 // note writes one line about belay itself to stderr, where it cannot
@@ -225,17 +249,58 @@ func (u *ui) say(format string, a ...any) {
 func (u *ui) note(format string, a ...any) {
 	u.mu.Lock()
 	defer u.mu.Unlock()
-	_, _ = fmt.Fprintf(u.err, format+"\n", a...)
+	_, _ = fmt.Fprintf(u.err, format+"\n", printable(a)...)
+}
+
+// styled is text belay has made safe and decorated itself, which say and
+// note print as it is. emph is what makes one; anything else that returns a
+// styled must have made every part of it safe first (runsLine does).
+type styled string
+
+// printable returns say's and note's arguments ready to format: every text
+// among them made safe for a terminal by termsafe.Text, which keeps the
+// newlines and tabs a plan is laid out with and shows every other control
+// character as a stand-in.
+//
+// Text is anything that formats as a string -- a string or a named string
+// type, an error, a fmt.Stringer -- because each of those can carry an agent's
+// words, and a status read back from a file an agent can rewrite is no
+// different. A number cannot carry an escape sequence and is left alone, and
+// so is a styled value, whose escapes are belay's own.
+func printable(a []any) []any {
+	out := make([]any, len(a))
+	for i, v := range a {
+		switch v := v.(type) {
+		case styled:
+			out[i] = string(v)
+		case error:
+			out[i] = termsafe.Text(v.Error())
+		case fmt.Stringer:
+			out[i] = termsafe.Text(v.String())
+		default:
+			if rv := reflect.ValueOf(v); rv.Kind() == reflect.String {
+				out[i] = termsafe.Text(rv.String())
+			} else {
+				out[i] = v
+			}
+		}
+	}
+	return out
 }
 
 // emph marks the only two things belay emphasises: what it is doing now, and
 // what it has cost. Everything else is plain, because an interface that
 // shouts everywhere shouts nowhere.
-func (u *ui) emph(s string) string {
+//
+// s is made safe before it is wrapped, since what comes back is printed as
+// it is: the narrator's line names a node and a candidate it read off the
+// dispatcher's log.
+func (u *ui) emph(s string) styled {
+	s = termsafe.Text(s)
 	if !u.color || s == "" {
-		return s
+		return styled(s)
 	}
-	return "\x1b[1m" + s + "\x1b[0m"
+	return styled("\x1b[1m" + s + "\x1b[0m")
 }
 
 // colorEnabled reports whether w may carry ANSI escape sequences.

@@ -12,6 +12,7 @@ import (
 	"math"
 	"os"
 	"path/filepath"
+	"strings"
 	"syscall"
 	"time"
 )
@@ -48,8 +49,9 @@ type Stats struct {
 	// copied.
 	Skipped int
 	// SkippedSymlinks is the number of symlinks not recreated: under the
-	// default SymlinkInternal policy, those whose target escapes the
-	// workspace. A non-zero value here on an unexpected tree is worth
+	// default SymlinkInternal policy, those that lead out of the workspace,
+	// by their own text or through another link, and those that loop. A
+	// non-zero value here on an unexpected tree is worth
 	// looking at, since it means the source relies on links this workspace
 	// does not have.
 	SkippedSymlinks int
@@ -76,6 +78,9 @@ type copier struct {
 	policy  SymlinkPolicy
 	log     *slog.Logger
 	stats   Stats
+	// links are the symlinks recreated under SymlinkInternal, by their path
+	// in the copy, for confine to follow once the copy is built.
+	links []string
 }
 
 // estimate sums the size of every regular file the copy would write, using
@@ -296,11 +301,15 @@ func (c *copier) copySymlink(src, target string) error {
 		return fmt.Errorf("create link %q: %w", target, err)
 	}
 	c.stats.Symlinks++
+	if c.policy == SymlinkInternal {
+		c.links = append(c.links, target)
+	}
 	return nil
 }
 
 // escapes reports whether a symlink placed at target, pointing at link,
-// would refer to something outside the workspace.
+// would refer to something outside the workspace, judging the link text
+// alone.
 //
 // The decision is lexical, from the link text and the link's own location in
 // the copy, because the tree is still being built and the target need not
@@ -308,15 +317,101 @@ func (c *copier) copySymlink(src, target string) error {
 // against the link's directory and must land inside the workspace, or on the
 // workspace root itself.
 //
-// Because every preserved link is individually contained this way, no chain
-// of them can leave the workspace either: a link that would have provided
-// the escaping hop was itself omitted when it was reached.
+// It is the first of two checks, and not enough alone: a link's text is
+// read as if every name in it were a directory, and a name that is itself a
+// link is not. "up -> ../../.." placed in a/b/c reads as the root, and is
+// the root; but then "esc -> a/b/c/up/../../../.." also reads as the root,
+// while the kernel climbs those four ".." from wherever up really goes. So
+// confine follows every recreated link once the copy is built.
 func (c *copier) escapes(target, link string) bool {
 	if filepath.IsAbs(link) {
 		return true
 	}
 	resolved := filepath.Clean(filepath.Join(filepath.Dir(target), link))
 	return resolved != c.dst && !isAncestorOf(c.dst, resolved)
+}
+
+// maxLinkHops is how many links confine follows for one path before it
+// gives up on it. It is at least what either kernel belay builds for will
+// follow (32 on Darwin, 40 on Linux), so a path confine gives up on is one
+// no process could follow to its end either.
+const maxLinkHops = 40
+
+// confine removes every link the copy recreated that, followed through
+// every link along its way in the copy as built, does not end inside the
+// copy: one that leads out, and one that can never be followed to an end (a
+// loop), which gains a person nothing and is not worth proving harmless.
+// Each one removed is counted as skipped, like a link escapes refused.
+//
+// It runs once the copy is built because only then do the links a chain
+// passes through exist, and it judges every link before removing any, so
+// each is judged against the same tree. Removing them cannot make a link it
+// kept lead out: a path that went through a removed link now stops at a name
+// that is not there, which leads nowhere.
+func (c *copier) confine() error {
+	var out []string
+	for _, link := range c.links {
+		if !c.endsInside(link) {
+			out = append(out, link)
+		}
+	}
+	for _, link := range out {
+		if err := os.Remove(link); err != nil {
+			return fmt.Errorf("remove link %q: %w", link, err)
+		}
+		c.stats.Symlinks--
+		c.stats.SkippedSymlinks++
+		c.log.Debug("dircopy omitted a symlink that leads outside the workspace through another link",
+			"path", link)
+	}
+	return nil
+}
+
+// endsInside reports whether path, an absolute path in the copy, ends inside
+// the copy once every symbolic link along it is followed the way the kernel
+// follows it: a name that is a link is replaced by its text, and ".." climbs
+// from where the path has really got to, not from where it reads as being.
+//
+// A name that does not exist ends the walk there: nothing below it can be a
+// link, so the rest is resolved by its text and judged as escapes judges a
+// link's text. A path still unresolved after maxLinkHops links is a loop,
+// and does not end inside.
+func (c *copier) endsInside(path string) bool {
+	at := string(filepath.Separator)
+	rest := strings.Split(path, string(filepath.Separator))
+	for hops := 0; len(rest) > 0; {
+		name := rest[0]
+		rest = rest[1:]
+		switch name {
+		case "", ".":
+			continue
+		case "..":
+			at = filepath.Dir(at)
+			continue
+		}
+		next := filepath.Join(at, name)
+		info, err := os.Lstat(next)
+		if err != nil {
+			end := filepath.Join(append([]string{next}, rest...)...)
+			return end == c.dst || isAncestorOf(c.dst, end)
+		}
+		if info.Mode()&fs.ModeSymlink == 0 {
+			at = next
+			continue
+		}
+		if hops++; hops > maxLinkHops {
+			return false
+		}
+		text, err := os.Readlink(next)
+		if err != nil {
+			return false
+		}
+		if filepath.IsAbs(text) {
+			at = string(filepath.Separator)
+		}
+		rest = append(strings.Split(text, string(filepath.Separator)), rest...)
+	}
+	return at == c.dst || isAncestorOf(c.dst, at)
 }
 
 // copyContents streams from in to out, checking ctx every chunk so a

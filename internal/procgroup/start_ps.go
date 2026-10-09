@@ -46,6 +46,29 @@ func startTime(pid int) (string, error) {
 	return start, nil
 }
 
+// commandLine returns what `ps -ww -o command=` prints for pid: the
+// process's arguments as it now reports them, joined by spaces, uncut.
+func commandLine(pid int) (string, error) {
+	ps, err := findPS()
+	if err != nil {
+		return "", err
+	}
+	// #nosec G204 -- ps is one of the fixed psPaths and every argument is a
+	// constant or a formatted integer; no shell is involved.
+	cmd := osexec.Command(ps, "-ww", "-o", "command=", "-p", strconv.Itoa(pid))
+	cmd.Env = []string{"LC_ALL=C"}
+	out, err := cmd.Output()
+	line := strings.TrimSpace(string(out))
+	var exit *osexec.ExitError
+	switch {
+	case errors.As(err, &exit) && line == "":
+		return "", errNoProcess
+	case err != nil:
+		return "", fmt.Errorf("procgroup: %s -ww -o command= -p %d: %w", ps, pid, err)
+	}
+	return line, nil
+}
+
 // findPS returns the first of psPaths that exists.
 func findPS() (string, error) {
 	for _, p := range psPaths {

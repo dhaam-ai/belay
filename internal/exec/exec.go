@@ -36,8 +36,11 @@
 // running, because the group is not the terminal's and the kernel hands it to
 // init. So when the context carries a directory (internal/procgroup's
 // WithDir, which the dispatcher sets to the node's evidence directory), Run
-// records the process there before starting it, fills in its group once it
-// has started, and removes the record once it has reaped it. A record that
+// records the process for that node execution before starting it, fills in
+// its group once it has started, and removes the record once it has reaped
+// it. The record is kept under belay's own state directory rather than in the
+// evidence directory, where whatever runs in the workspace could forge one
+// (see procgroup.RecordDir). A record that
 // outlives belay is how the next resume finds the group and kills it
 // (procgroup.Reap). Run refuses to start a process it cannot record, since it
 // could not stop that process after a crash.
@@ -52,7 +55,7 @@
 //   - Process-group termination happens on the timeout and cancellation paths,
 //     where the child has not yet been reaped and its group id is still
 //     unambiguously ours, and on the resume after belay was killed, where a
-//     record's start time proves the same thing. A child that exits cleanly
+//     record's start time, group and program prove the same thing. A child that exits cleanly
 //     while leaving descendants behind is not chased: after Wait reaps the
 //     child, the pid may be reused, and signalling a recycled group is worse
 //     than the leak it would prevent. Its record is removed with it. When

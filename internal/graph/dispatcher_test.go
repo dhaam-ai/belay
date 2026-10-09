@@ -22,6 +22,7 @@ import (
 	"github.com/dhaam-ai/belay/internal/procgroup"
 	"github.com/dhaam-ai/belay/internal/state"
 	"github.com/dhaam-ai/belay/pkg/belay"
+	"unicode"
 )
 
 // ---------------------------------------------------------------------------
@@ -764,6 +765,7 @@ func (n *contextReadingNode) Run(ctx context.Context, _ *graph.RunContext) (grap
 // closed, and a live process group recorded in that execution's evidence
 // directory.
 func TestDispatcher_HealKillsProcessGroupsAKilledRunLeftRunning(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir()) // where procgroup keeps the records
 	h := newRun(t, config.Default(), "clean up after a kill -9")
 	h.seedJournal(t,
 		journal.Record{Event: journal.EventRunStarted},
@@ -796,7 +798,9 @@ func TestDispatcher_HealKillsProcessGroupsAKilledRunLeftRunning(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NodeDir: %v", err)
 	}
-	tracked, err := procgroup.Track(nodeDir, []string{"go", "test", "./..."})
+	// The command it records is the one that runs: procgroup kills only a
+	// process still running the program its record names.
+	tracked, err := procgroup.Track(nodeDir, sleeper.Args)
 	if err != nil {
 		t.Fatalf("Track: %v", err)
 	}
@@ -2973,6 +2977,33 @@ func TestDispatcher_ASupervisorIsChargedItsCandidatesSpendAsItLearnsIt(t *testin
 	for i, spent := range fan.seen {
 		if !closeTo(spent, 0.10) {
 			t.Errorf("attempt %d of the supervisor was shown $%.2f spent, want the $0.10 spent before it", i+1, spent)
+		}
+	}
+}
+
+// TestDispatcher_NoteShowsAnErrorsControlCharactersAsStandIns: a note the
+// dispatcher composes from a node's error quotes whatever the error was
+// about, such as a file an agent named. note collapsed its whitespace onto
+// one line but let an ESC through, since an ESC is not whitespace, so a
+// policy scan error naming "x\x1b]52;c;...\x07y.txt" put an OSC 52
+// clipboard write into the journal, the Outcome and every report of them.
+func TestDispatcher_NoteShowsAnErrorsControlCharactersAsStandIns(t *testing.T) {
+	h := newRun(t, config.Default(), "quote a hostile file")
+	const hostile = "policy: x\x1b]52;c;cm0gLXJmIH4K\x07\x1b[1A\x1b[2K\u009b2J\x7fy.txt is too long"
+	plan := &fakeNode{name: graph.NodePlan, steps: []nodeStep{{err: errors.New(hostile)}}}
+
+	out, _ := h.dispatcher(t, plan).Run(context.Background())
+
+	const shown = "policy: x␛]52;c;cm0gLXJmIH4K␇␛[1A␛[2K<9B>2J␡y.txt is too long"
+	notes := map[string]string{"Outcome.Note": out.Note}
+	for _, r := range h.records(t) {
+		if r.Note != "" {
+			notes[r.Event.String()] = r.Note
+		}
+	}
+	for where, note := range notes {
+		if strings.IndexFunc(note, unicode.IsControl) >= 0 || !strings.Contains(note, shown) {
+			t.Errorf("%s = %q, want the error's control characters shown as stand-ins: %q", where, note, shown)
 		}
 	}
 }

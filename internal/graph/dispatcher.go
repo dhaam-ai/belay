@@ -14,6 +14,7 @@ import (
 	"github.com/dhaam-ai/belay/internal/journal"
 	"github.com/dhaam-ai/belay/internal/procgroup"
 	"github.com/dhaam-ai/belay/internal/state"
+	"github.com/dhaam-ai/belay/internal/termsafe"
 	"github.com/dhaam-ai/belay/internal/vcs"
 	"github.com/dhaam-ai/belay/pkg/belay"
 )
@@ -776,9 +777,10 @@ func interruptedAttempt(node string, attempt int, elapsed time.Duration, usage b
 // SIGKILL, or quit by a second Ctrl-C: it is in a process group of its own,
 // which the terminal's Ctrl-C never reaches, and the kernel gives it to init.
 // An agent CLI left that way keeps spending. internal/exec records every such
-// process in its node's evidence directory, and this is where the records are
-// acted on, on the one path that means the previous process died inside a
-// node.
+// process for its node execution (under belay's state directory, not in the
+// run's, where the agent could forge one; see procgroup.RecordDir), and this
+// is where the records are acted on, on the one path that means the previous
+// process died inside a node.
 //
 // It only ever reports. A record belay cannot act on is no reason to refuse to
 // continue a run, and procgroup.Reap never signals a process it cannot prove
@@ -1348,10 +1350,11 @@ type nodeOutcome struct {
 func (d *Dispatcher) execute(ctx context.Context, n Node, rc *RunContext) nodeOutcome {
 	nodeCtx := ctx
 	// Every process a node starts goes through internal/exec, which records
-	// it in this directory, so that a belay killed with SIGKILL can find the
-	// process again and heal can kill it (internal/procgroup). It is this
-	// execution's own evidence directory, the one the node writes its prompt
-	// and captured output into.
+	// it for this node execution, so that a belay killed with SIGKILL can find
+	// the process again and heal can kill it (internal/procgroup). The
+	// execution is named by its own evidence directory, the one the node
+	// writes its prompt and captured output into; the record itself is kept
+	// outside the run's directory (procgroup.RecordDir).
 	if dir, err := rc.Layout.NodeDir(rc.Step, rc.NodeName); err != nil {
 		rc.Logger.Warn("belay/graph: no evidence directory for this node, so the processes it starts are not recorded",
 			slog.String("error", err.Error()))
@@ -1750,9 +1753,18 @@ func (d *Dispatcher) persist(
 
 // note sanitizes text the dispatcher composes from an error it did not author:
 // it redacts through the configured Redactor, collapses whitespace onto one
-// line so a journal record stays one line, and truncates.
+// line so a journal record stays one line, shows every other control
+// character as a visible stand-in (termsafe.Line), and truncates.
+//
+// The stand-ins matter because an error quotes what it was about, and that
+// can be a file an agent named: an ESC is not whitespace, so collapsing
+// alone let a policy scan error carry an OSC 52 clipboard write into the
+// journal, the Outcome and every report of them. Everything that prints a
+// note makes it printable again, since a journal can be older than this or
+// rewritten by an agent working in place; this makes the dispatcher's own
+// record clean at the source as well.
 func (d *Dispatcher) note(s string) string {
-	s = strings.Join(strings.Fields(d.redact(s)), " ")
+	s = termsafe.Line(d.redact(s))
 	if r := []rune(s); len(r) > maxNoteRunes {
 		s = string(r[:maxNoteRunes]) + "..."
 	}

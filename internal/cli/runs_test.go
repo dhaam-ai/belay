@@ -243,7 +243,7 @@ func TestRunsScanListsDamagedRunsAsUnreadable(t *testing.T) {
 			name:       "requires several capabilities, one with an escape in its name",
 			id:         "run-several",
 			manifest:   requiring("run-several", "plan.telepathy", "from.the.future", "evil\x1b[2Jname"),
-			wantReason: "needs a newer belay (evil[2Jname, from.the.future, plan.telepathy)",
+			wantReason: "needs a newer belay (evil␛[2Jname, from.the.future, plan.telepathy)",
 		},
 		{
 			name:       "directory name is not a usable run id",
@@ -464,10 +464,10 @@ func TestRunsSanitizeText(t *testing.T) {
 		{name: "newlines collapse to spaces", in: "line one\nline two", want: "line one line two"},
 		{name: "tabs and runs of spaces collapse", in: "a\t\t  b", want: "a b"},
 		{name: "leading and trailing whitespace goes", in: "  hi  ", want: "hi"},
-		{name: "ansi escape sequence is removed", in: "goal\x1b[31mred\x1b[0m", want: "goal[31mred[0m"},
-		{name: "bare escape is removed", in: "a\x1bb", want: "ab"},
+		{name: "ansi escape sequence is shown, not sent", in: "goal\x1b[31mred\x1b[0m", want: "goal␛[31mred␛[0m"},
+		{name: "bare escape is shown as a stand-in", in: "a\x1bb", want: "a␛b"},
 		{name: "carriage return is removed", in: "overwrite\rme", want: "overwrite me"},
-		{name: "nul byte is removed", in: "a\x00b", want: "ab"},
+		{name: "nul byte is shown as a stand-in", in: "a\x00b", want: "a␀b"},
 		{name: "unicode is preserved", in: "café ☕", want: "café ☕"},
 		{name: "empty stays empty", in: "", want: ""},
 	}

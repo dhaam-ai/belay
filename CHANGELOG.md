@@ -771,11 +771,63 @@ that only `pkg/belay` carries a compatibility promise. Everything under
   belay is alive to do it. After a kill -9, or a second Ctrl-C, they were
   left running: your terminal's Ctrl-C never reaches them, so an agent could
   keep working, and keep spending, with nothing watching it. belay now
-  writes down every process it starts, in that step's directory under
-  `nodes/`, before the process starts, and `belay resume` kills whatever is
-  still running from the step that was interrupted. It checks each process's
-  start time first, so a process id that has since been given to something
-  else is never signalled.
+  writes down every process it starts, before the process starts, and
+  `belay resume` kills whatever is still running from the step that was
+  interrupted. It checks each process first — its start time, that it leads
+  its own process group, and that it still runs the program belay started —
+  so a process id that has since been given to something else is never
+  signalled.
+- **An empty `NO_COLOR` no longer turns `belay timeline` plain.** The
+  timeline switched colour off whenever `NO_COLOR` existed, even exported
+  empty, while every other command waits for a non-empty value, as
+  no-color.org asks. It now reads it the same way as the rest of belay.
+- **Ctrl-C while `belay fork` is copying your tree stops it cleanly.**
+  `belay fork` says to press Ctrl-C once to stop it, but until its step
+  started running, a Ctrl-C killed belay outright, part-way through copying
+  the tree, and left a half-made copy under `.belay/forks` that `belay runs`
+  listed as unreadable. A Ctrl-C during the copy now cancels it, removes
+  what was copied, and says nothing was kept or spent.
+
+### Security
+
+- **Text belay did not write can no longer drive your terminal.** A plan, a
+  goal, a note quoting an error, a file name and a directory name read off
+  disk could all carry escape sequences, and `belay plan --no-input`,
+  `belay timeline`, the narration and closing report of `belay run`,
+  `resume`, `fork` and `queue`, and the last line belay prints on failure
+  printed them as they were. A plan quoting a hostile repository could set
+  your window title, write your clipboard (OSC 52), or move the cursor up and
+  erase the line above it — even with colour off or output piped. Every
+  control character in such text is now shown as a visible stand-in (ESC as
+  ␛, a C1 control as `<9B>`), the way the plan viewer already showed it, by
+  one rule every command shares. `belay runs`, `belay queue` and the
+  timeline's file and candidate lists used to drop these characters instead,
+  which could make one name read as another; they show the stand-in too. The
+  `--json` output of `timeline`, `runs` and `queue list` keeps every string
+  exactly as recorded, and now escapes the DEL and C1 controls that
+  encoding/json left raw, so it is safe to print as well.
+- **A chain of symlinks can no longer lead out of a copy belay makes.** The
+  copy a queued goal, a fork or an in-place candidate works in left out any
+  symlink whose text pointed outside it, but judged each link's text alone.
+  So `a/b/c/up -> ../../..`, which lands on the copy's root, was kept, and
+  so was `esc -> a/b/c/up/../../../..`, which reads as the root too — yet
+  the system follows `up` first and then climbs four levels above the copy,
+  and in a queued goal's copy that is your own checkout. Once a copy is
+  built, belay now follows every link it recreated through every link along
+  the way and removes any that does not end inside the copy, loops included.
+- **A run's files can no longer make `belay resume` kill a process.**
+  `belay resume` kills the processes a killed belay left running, from
+  records it kept in the run's `nodes/` directory — which, in a run that edits
+  your workspace in place, is inside the workspace the agent writes. A
+  record written there naming any process of yours, with its real start
+  time, had belay send it SIGKILL. The records now live in belay's own state
+  directory, `$XDG_STATE_HOME/belay` or `~/.local/state/belay`, and a process
+  is killed only if it also leads its own process group and still runs the
+  program the record names. A record found in a run's `nodes/` directory is
+  reported and removed, never acted on: if you resume, with this belay, a run
+  a development build of belay was killed during, kill what it left running
+  yourself (`ps` lists it). belay now needs `HOME` or `XDG_STATE_HOME` set to
+  start a step's processes.
 
 - **A finding's path is relative to the workspace even when the workspace is
   reached through a symbolic link.** ruff reports a file by its resolved path,

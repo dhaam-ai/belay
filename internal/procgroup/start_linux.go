@@ -36,3 +36,18 @@ func startTime(pid int) (string, error) {
 	}
 	return strings.TrimSpace(string(boot)) + "/" + ticks, nil
 }
+
+// commandLine returns /proc/<pid>/cmdline with its NUL separators as spaces:
+// the process's arguments as it now reports them. A program that rewrites
+// them, as Node's process.title does, pads the old ones with NULs, which
+// trimming removes.
+func commandLine(pid int) (string, error) {
+	data, err := os.ReadFile("/proc/" + strconv.Itoa(pid) + "/cmdline")
+	if errors.Is(err, fs.ErrNotExist) {
+		return "", errNoProcess
+	}
+	if err != nil {
+		return "", fmt.Errorf("procgroup: read cmdline of %d: %w", pid, err)
+	}
+	return strings.TrimSpace(strings.ReplaceAll(string(data), "\x00", " ")), nil
+}

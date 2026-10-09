@@ -1119,11 +1119,7 @@ func describeDryRun(u *ui, plan *runPlan, want, resuming string) error {
 	u.say("")
 
 	for _, section := range dryRunSections(u, plan, want, resuming) {
-		u.say("%s", section.title)
-		for _, line := range section.lines {
-			u.say("  %s", line)
-		}
-		u.say("")
+		section.say(u)
 	}
 
 	if len(plan.blockers) > 0 {
@@ -1146,7 +1142,24 @@ func describeDryRun(u *ui, plan *runPlan, want, resuming string) error {
 // each indented under it.
 type dryRunSection struct {
 	title string
+	// lead is the line the section exists to give, emphasised and printed
+	// before lines, or empty. It is styled rather than one of lines because
+	// say prints every line as text from outside, which would show
+	// emphasis's escapes as stand-ins instead of acting on them.
+	lead  styled
 	lines []string
+}
+
+// say prints the section, and the blank line that ends it.
+func (s dryRunSection) say(u *ui) {
+	u.say("%s", s.title)
+	if s.lead != "" {
+		u.say("  %s", s.lead)
+	}
+	for _, line := range s.lines {
+		u.say("  %s", line)
+	}
+	u.say("")
 }
 
 // dryRunSections lists what a dry run describes, in the order it is printed.
@@ -1217,10 +1230,11 @@ func dryRunOutput(plan *runPlan) dryRunSection {
 
 // dryRunSpend is the ceiling a run is held to, and what reaching it does.
 func dryRunSpend(u *ui, plan *runPlan) dryRunSection {
-	return dryRunSection{title: "the most it could spend", lines: []string{
-		u.emph(budgetCeiling(plan.config.Budget)),
-		budgetOnExceed(plan.config.Budget),
-	}}
+	return dryRunSection{
+		title: "the most it could spend",
+		lead:  u.emph(budgetCeiling(plan.config.Budget)),
+		lines: []string{budgetOnExceed(plan.config.Budget)},
+	}
 }
 
 // dryRunFanout is how a fanout run divides its work and its money, and it
