@@ -13,6 +13,7 @@ import (
 	"syscall"
 	"testing"
 	"time"
+	"unicode"
 
 	"github.com/dhaam-ai/belay/internal/config"
 	"github.com/dhaam-ai/belay/internal/graph"
@@ -2564,4 +2565,31 @@ func TestDispatcher_AnInterruptedAttemptDoesNotConsumeAStep(t *testing.T) {
 			t.Errorf("the re-run after a kill ran at steps %v, want [2]", got)
 		}
 	})
+}
+
+// TestDispatcher_NoteShowsAnErrorsControlCharactersAsStandIns: a note the
+// dispatcher composes from a node's error quotes whatever the error was
+// about, such as a file an agent named. note collapsed its whitespace onto
+// one line but let an ESC through, since an ESC is not whitespace, so a
+// policy scan error naming "x\x1b]52;c;...\x07y.txt" put an OSC 52
+// clipboard write into the journal, the Outcome and every report of them.
+func TestDispatcher_NoteShowsAnErrorsControlCharactersAsStandIns(t *testing.T) {
+	h := newRun(t, config.Default(), "quote a hostile file")
+	const hostile = "policy: x\x1b]52;c;cm0gLXJmIH4K\x07\x1b[1A\x1b[2K\u009b2J\x7fy.txt is too long"
+	plan := &fakeNode{name: graph.NodePlan, steps: []nodeStep{{err: errors.New(hostile)}}}
+
+	out, _ := h.dispatcher(t, plan).Run(context.Background())
+
+	const shown = "policy: x␛]52;c;cm0gLXJmIH4K␇␛[1A␛[2K<9B>2J␡y.txt is too long"
+	notes := map[string]string{"Outcome.Note": out.Note}
+	for _, r := range h.records(t) {
+		if r.Note != "" {
+			notes[r.Event.String()] = r.Note
+		}
+	}
+	for where, note := range notes {
+		if strings.IndexFunc(note, unicode.IsControl) >= 0 || !strings.Contains(note, shown) {
+			t.Errorf("%s = %q, want the error's control characters shown as stand-ins: %q", where, note, shown)
+		}
+	}
 }

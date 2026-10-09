@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"io/fs"
 	"log/slog"
-	"strings"
 	"time"
 
 	"github.com/dhaam-ai/belay/internal/budget"
@@ -14,6 +13,7 @@ import (
 	"github.com/dhaam-ai/belay/internal/journal"
 	"github.com/dhaam-ai/belay/internal/procgroup"
 	"github.com/dhaam-ai/belay/internal/state"
+	"github.com/dhaam-ai/belay/internal/termsafe"
 	"github.com/dhaam-ai/belay/internal/vcs"
 	"github.com/dhaam-ai/belay/pkg/belay"
 )
@@ -1504,9 +1504,18 @@ func (d *Dispatcher) persist(
 
 // note sanitizes text the dispatcher composes from an error it did not author:
 // it redacts through the configured Redactor, collapses whitespace onto one
-// line so a journal record stays one line, and truncates.
+// line so a journal record stays one line, shows every other control
+// character as a visible stand-in (termsafe.Line), and truncates.
+//
+// The stand-ins matter because an error quotes what it was about, and that
+// can be a file an agent named: an ESC is not whitespace, so collapsing
+// alone let a policy scan error carry an OSC 52 clipboard write into the
+// journal, the Outcome and every report of them. Everything that prints a
+// note makes it printable again, since a journal can be older than this or
+// rewritten by an agent working in place; this makes the dispatcher's own
+// record clean at the source as well.
 func (d *Dispatcher) note(s string) string {
-	s = strings.Join(strings.Fields(d.redact(s)), " ")
+	s = termsafe.Line(d.redact(s))
 	if r := []rune(s); len(r) > maxNoteRunes {
 		s = string(r[:maxNoteRunes]) + "..."
 	}
