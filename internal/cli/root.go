@@ -17,6 +17,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"sync"
 
@@ -24,6 +25,7 @@ import (
 
 	"github.com/dhaam-ai/belay/internal/graph"
 	"github.com/dhaam-ai/belay/internal/planview"
+	"github.com/dhaam-ai/belay/internal/termsafe"
 )
 
 // Version information, injected via ldflags during build.
@@ -177,6 +179,17 @@ func Execute() error {
 // ui is one command invocation's output surface: the two streams it writes to
 // and whether they may carry colour.
 //
+// Everything say and note are given to print is text belay did not write
+// until shown otherwise, and is made safe for a terminal before it is
+// formatted (printable): a goal, a plan, a note an agent's error left in the
+// journal, a path, an error quoting any of those. The decision is made here,
+// at the sink, rather than at each of the couple of hundred calls, because a
+// call that forgot is exactly how a plan's escape sequences reached the
+// terminal through `belay plan --no-input` while the viewer beside it kept
+// them out. The one exception is belay's own emphasis, which is a type of
+// its own (styled) so it cannot be mistaken for text from outside, and which
+// emph makes safe before it decorates it.
+//
 // Writes are serialized. The signal handler that announces "stopping" runs on
 // its own goroutine while the dispatcher is still narrating from the main
 // one, and two goroutines interleaving inside a single Fprintf is how a
@@ -217,7 +230,7 @@ func newUI(cmd *cobra.Command) *ui {
 func (u *ui) say(format string, a ...any) {
 	u.mu.Lock()
 	defer u.mu.Unlock()
-	_, _ = fmt.Fprintf(u.out, format+"\n", a...)
+	_, _ = fmt.Fprintf(u.out, format+"\n", printable(a)...)
 }
 
 // note writes one line about belay itself to stderr, where it cannot
@@ -225,17 +238,58 @@ func (u *ui) say(format string, a ...any) {
 func (u *ui) note(format string, a ...any) {
 	u.mu.Lock()
 	defer u.mu.Unlock()
-	_, _ = fmt.Fprintf(u.err, format+"\n", a...)
+	_, _ = fmt.Fprintf(u.err, format+"\n", printable(a)...)
+}
+
+// styled is text belay has made safe and decorated itself, which say and
+// note print as it is. emph is what makes one; anything else that returns a
+// styled must have made every part of it safe first (runsLine does).
+type styled string
+
+// printable returns say's and note's arguments ready to format: every text
+// among them made safe for a terminal by termsafe.Text, which keeps the
+// newlines and tabs a plan is laid out with and shows every other control
+// character as a stand-in.
+//
+// Text is anything that formats as a string -- a string or a named string
+// type, an error, a fmt.Stringer -- because each of those can carry an agent's
+// words, and a status read back from a file an agent can rewrite is no
+// different. A number cannot carry an escape sequence and is left alone, and
+// so is a styled value, whose escapes are belay's own.
+func printable(a []any) []any {
+	out := make([]any, len(a))
+	for i, v := range a {
+		switch v := v.(type) {
+		case styled:
+			out[i] = string(v)
+		case error:
+			out[i] = termsafe.Text(v.Error())
+		case fmt.Stringer:
+			out[i] = termsafe.Text(v.String())
+		default:
+			if rv := reflect.ValueOf(v); rv.Kind() == reflect.String {
+				out[i] = termsafe.Text(rv.String())
+			} else {
+				out[i] = v
+			}
+		}
+	}
+	return out
 }
 
 // emph marks the only two things belay emphasises: what it is doing now, and
 // what it has cost. Everything else is plain, because an interface that
 // shouts everywhere shouts nowhere.
-func (u *ui) emph(s string) string {
+//
+// s is made safe before it is wrapped, since what comes back is printed as
+// it is: the narrator's line names a node and a candidate it read off the
+// dispatcher's log.
+func (u *ui) emph(s string) styled {
+	s = termsafe.Text(s)
 	if !u.color || s == "" {
-		return s
+		return styled(s)
 	}
-	return "\x1b[1m" + s + "\x1b[0m"
+	return styled("\x1b[1m" + s + "\x1b[0m")
 }
 
 // colorEnabled reports whether w may carry ANSI escape sequences.

@@ -76,7 +76,7 @@ func TestUIEmphIsPlainWithoutColor(t *testing.T) {
 	}
 
 	u.color = true
-	got := u.emph("$0.03 of $5.00")
+	got := string(u.emph("$0.03 of $5.00"))
 	if !strings.Contains(got, "\x1b[1m") || !strings.Contains(got, "\x1b[0m") {
 		t.Errorf("emph() with colour = %q, want it wrapped in bold escapes", got)
 	}

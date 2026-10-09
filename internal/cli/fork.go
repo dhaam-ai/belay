@@ -411,11 +411,7 @@ func describeFork(u *ui, plan *runPlan, chosen resumableRun, spec *fork.Spec, tr
 	u.say("This is a dry run. belay is only describing the work; none of it has happened.")
 	u.say("")
 	for _, section := range forkSections(u, plan, chosen, spec, treeNote) {
-		u.say("%s", section.title)
-		for _, line := range section.lines {
-			u.say("  %s", line)
-		}
-		u.say("")
+		section.say(u)
 	}
 
 	if len(plan.blockers) > 0 {

@@ -19,6 +19,7 @@ import (
 
 	"github.com/dhaam-ai/belay/internal/graph"
 	"github.com/dhaam-ai/belay/internal/state"
+	"github.com/dhaam-ai/belay/internal/termsafe"
 )
 
 // Status labels shown by "belay runs". They are deliberately the words a
@@ -511,16 +512,24 @@ func renderRunsTable(u *ui, rows []RunSummary, total int, now time.Time) {
 //
 // Emphasis is applied after padding is measured, never before, so an escape
 // sequence can never contribute to a column's width.
-func runsLine(u *ui, cols []runsColumn, widths []int, cells []string, style bool) string {
+//
+// The line is styled, so say prints it as it is, emphasis and all. That is
+// safe because every cell is made safe here, whatever its caller did: a cell
+// is a goal, a run directory's name or a note, all of which an agent can
+// write. termsafe.Text rather than Line, because a cell's own spaces are its
+// alignment (a cost is right-aligned inside its cell); folding a field onto
+// one line is the column builder's job, which knows what the field is.
+func runsLine(u *ui, cols []runsColumn, widths []int, cells []string, style bool) styled {
 	var b strings.Builder
 	for i, cell := range cells {
 		if i > 0 {
 			b.WriteString(runsGutter)
 		}
+		cell = termsafe.Text(cell)
 		pad := strings.Repeat(" ", max(0, widths[i]-runsRuneLen(cell)))
 		text := cell
 		if style && cols[i].emph {
-			text = u.emph(text)
+			text = string(u.emph(text))
 		}
 		if cols[i].right {
 			b.WriteString(pad)
@@ -532,7 +541,7 @@ func runsLine(u *ui, cols []runsColumn, widths []int, cells []string, style bool
 	}
 	// The last column is padded like the others above; trimming here keeps
 	// the file a pipe receives free of trailing whitespace.
-	return strings.TrimRight(b.String(), " ")
+	return styled(strings.TrimRight(b.String(), " "))
 }
 
 // runsFooter returns the lines that follow the table: what was hidden, what
