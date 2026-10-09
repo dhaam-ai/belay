@@ -513,6 +513,11 @@ func (r *candidateRunner) makeWorkspace(ctx context.Context, c *candidateClaim, 
 			out.Err = fmt.Errorf("graph: record the workspace of candidate %q: %w", c.spec.ID, err)
 			return false
 		}
+		// The candidate's own manifest says its run directory holds the
+		// record, which the parent's pin could not: the parent takes none.
+		recorded := *pin
+		recorded.Record = true
+		c.man.SetChanges(recorded)
 	}
 
 	c.man.Workspace = ws.Dir

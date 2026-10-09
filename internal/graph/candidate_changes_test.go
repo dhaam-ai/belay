@@ -91,8 +91,11 @@ func TestACandidateWithNoGitIsJudgedAgainstARecordOfItsWorkspace(t *testing.T) {
 		if want := []string{"agent.txt", "seed.txt"}; !reflect.DeepEqual(seen[id], want) {
 			t.Errorf("%s changed %q by its own record, want %q", id, seen[id], want)
 		}
-		if cm := candidateManifest(t, h, id); cm.Changes == nil || *cm.Changes != pin {
-			t.Errorf("%s manifest Changes = %+v, want its parent's %+v", id, cm.Changes, pin)
+		// The parent's pin, and the record the candidate's own run now holds.
+		want := pin
+		want.Record = true
+		if cm := candidateManifest(t, h, id); cm.Changes == nil || *cm.Changes != want {
+			t.Errorf("%s manifest Changes = %+v, want %+v", id, cm.Changes, want)
 		}
 	}
 }
