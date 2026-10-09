@@ -383,6 +383,9 @@ func TestListPriceAnswersForAModelTheBackendCanRun(t *testing.T) {
 				t.Errorf("ListPrice(%q) = %v per million, want input %v output %v",
 					tt.model, rate, tt.wantIn, tt.wantOut)
 			}
+			if rate.Assumed {
+				t.Errorf("ListPrice(%q).Assumed = true, want false: belay prices this model from its own table", tt.model)
+			}
 		})
 	}
 }
@@ -406,6 +409,10 @@ func TestListPriceChargesAModelOutsideTheTableTheHighestKnownRate(t *testing.T) 
 		}
 		if rate.Input != 10 || rate.Output != 50 {
 			t.Errorf("ListPrice(%q) = %+v, want the highest known rate, $10 in and $50 out", model, rate)
+		}
+		if !rate.Assumed {
+			t.Errorf("ListPrice(%q).Assumed = false, want true: the rate is a stand-in, and a caller "+
+				"reporting what something cost must be able to tell", model)
 		}
 	}
 	if n := strings.Count(logs.String(), "most expensive rate"); n != 1 {

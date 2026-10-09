@@ -183,6 +183,13 @@ type ModelRate struct {
 	Input float64 `json:"input"`
 	// Output is the rate for output tokens, USD per million.
 	Output float64 `json:"output"`
+	// Assumed reports that the backend has no price of its own for this
+	// model and answered with a stand-in -- the highest rate it knows -- so
+	// that a budget ceiling is held at the safe end rather than refused. A
+	// figure that spends against a ceiling can use such a rate; a figure that
+	// reports what something cost, such as a benchmark's cost per resolved
+	// task, must not, because it would publish a guess as a measurement.
+	Assumed bool `json:"assumed,omitempty"`
 }
 
 // ModelPricer is the optional half of an AgentBackend that answers, before

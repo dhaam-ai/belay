@@ -267,9 +267,19 @@ func settle(f flags, env environment) (fixrate.Mode, config.Config, error) {
 	backend := claude.New(nil)
 	for _, node := range config.RoutableNodes() {
 		model := cfg.Agent.ModelFor(node)
-		if _, err := backend.ListPrice(model); err != nil {
+		rate, err := backend.ListPrice(model)
+		if err != nil {
 			return "", config.Config{}, refuse("the %s step would run on model %q, which the backend cannot price, so "+
 				"its spend could not be held to a budget: %v", node, model, err)
+		}
+		// A run may spend against an assumed rate -- the ceiling is held at the
+		// safe end -- but the corpus publishes cost per resolved task, and a
+		// cost computed from a stand-in rate would be a guess presented as a
+		// measurement.
+		if rate.Assumed {
+			return "", config.Config{}, refuse("the %s step would run on model %q, which the backend cannot price "+
+				"exactly -- it would assume the highest rate it knows -- so the corpus's cost per resolved task "+
+				"would be a guess; pin a model belay has a price for", node, model)
 		}
 	}
 	if mode == fixrate.ModeLive {

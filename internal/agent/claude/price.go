@@ -383,5 +383,5 @@ func (b *Backend) ListPrice(model string) (belay.ModelRate, error) {
 	if !known {
 		warnUnpriced(b.logger(), model, p)
 	}
-	return belay.ModelRate{Input: p.Input, Output: p.Output}, nil
+	return belay.ModelRate{Input: p.Input, Output: p.Output, Assumed: !known}, nil
 }
