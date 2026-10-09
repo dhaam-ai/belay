@@ -521,6 +521,7 @@ func dispatchOnce(ctx context.Context, plan *runPlan, store *state.Store, resumi
 		fanout: plan.fanout != nil,
 	}
 	view.winner = winnerOf(store, view.fanout)
+	view.candidate = firstCandidateRun(store.Layout(), view.fanout)
 	return view, nil
 }
 
@@ -665,6 +666,24 @@ func announceStart(u *ui, plan *runPlan, layout state.Layout, want string) {
 	}
 	u.say("  route:  %s", routeLine(plan.route))
 	u.say("")
+	sayWarnings(u, plan)
+}
+
+// sayWarnings writes, on stderr, everything belay collected about a run that
+// a person should know and need not stop for: uncommitted work a branch run
+// leaves out, a resumed run's pins disagreeing with belay.yaml, a credential
+// it cannot see.
+//
+// --dry-run lists them, and until now nothing else did, so a run said none of
+// them at the one moment they matter: before it spends. Every announcement
+// belay makes before a dispatch ends with them -- a run's, a resume's, a
+// fork's, a queued goal's -- and a dry run, which announces nothing, keeps its
+// own section. They go to stderr, as every note about belay itself does, so a
+// piped transcript of the run is the run.
+func sayWarnings(u *ui, plan *runPlan) {
+	for _, w := range plan.warnings {
+		u.note("worth knowing: %s", w)
+	}
 }
 
 // outcomeView is everything belay's closing report reads about how one
@@ -712,6 +731,9 @@ type outcomeView struct {
 	// the dispatch returned. It is the zero Candidate for a run with no
 	// winner, or one that does not fan out.
 	winner state.Candidate
+	// candidate is the first of the run's candidate runs that exists, by
+	// id, and empty when none does (see firstCandidateRun).
+	candidate string
 }
 
 // reportOutcome turns an Outcome into the last thing a person reads, and into the
@@ -920,11 +942,13 @@ func nextSteps(view outcomeView) []string {
 			"see what happened with:", "", "    " + runCommand(view, "timeline"),
 		}
 		// A fanout fails when no candidate could win, and the reasons are
-		// in the candidates' own runs.
-		if view.fanout {
+		// in the candidates' own runs -- when it got as far as making any.
+		// A run that failed at its plan has none, and a candidate named
+		// anyway is a command that says so.
+		if view.fanout && view.candidate != "" {
 			lines = append(lines,
-				"", "and open any candidate's own run, such as the first, with:",
-				"", "    "+runCommand(view, "timeline")+" --candidate cand-01")
+				"", "and open any candidate's own run, such as "+view.candidate+", with:",
+				"", "    "+runCommand(view, "timeline")+" --candidate "+view.candidate)
 		}
 		return lines
 	default:
@@ -1763,4 +1787,30 @@ func padNode(node string) string {
 		return node
 	}
 	return node + strings.Repeat(" ", nodeColumn-len(node))
+}
+
+// firstCandidateRun returns the first candidate run of a fanout run that is
+// there to open, or "" for none.
+//
+// A report offers it to a person to type into `belay timeline --candidate`,
+// so "there" is what that command asks: a directory under the run's
+// candidate-runs. Naming one regardless sends a person who saw the run fail
+// before its fanout made anything to a command that says the run has no
+// candidate runs.
+func firstCandidateRun(layout state.Layout, fanned bool) string {
+	if !fanned {
+		return ""
+	}
+	entries, err := os.ReadDir(layout.CandidateRunsDir())
+	if err != nil {
+		return ""
+	}
+	// os.ReadDir sorts by name, and candidate ids are zero-padded, so the
+	// first directory is the lowest id.
+	for _, e := range entries {
+		if e.IsDir() {
+			return e.Name()
+		}
+	}
+	return ""
 }

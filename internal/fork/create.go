@@ -102,7 +102,7 @@ func (s *Spec) Create(ctx context.Context, runID string, iso belay.Isolator, now
 // carrying on from the visit's step, in place, filing no plan, held to the
 // guardrails its source was held to, and saying where it came from.
 func (s *Spec) manifest(now time.Time, runID, workspace string) state.Manifest {
-	m := state.NewManifest(now.UTC(), runID, workspace, s.Source.Goal, s.request.Config)
+	m := state.NewManifest(now.UTC(), runID, workspace, s.Source.Goal, s.Config)
 	// The node runs as the step it ran as: man.Step counts the steps already
 	// taken, and the dispatcher gives the next node man.Step+1.
 	m.Step = max(0, s.Snapshot.Step-1)

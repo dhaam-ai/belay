@@ -908,3 +908,300 @@ func TestQueueCommandsSurviveAPathWithASpace(t *testing.T) {
 		t.Errorf("belay runs never says %q:\n%s", want, runs)
 	}
 }
+
+// TestAQueueCopyResumesWhateverOutputModeSays: for a goal stopped at a limit,
+// belay queue says to raise the limit in the copy's belay.yaml and resume the
+// goal's run in its copy. Every queued goal's run is pinned in place, and the
+// copy's belay.yaml says output.mode "branch" when the checkout's did, which
+// the copy cannot take. That refusal outlived the bind to the run's own pin,
+// so belay refused the command it had printed. The pin wins: the resume is
+// not refused, and says that belay.yaml asks for something this run is not
+// doing.
+func TestAQueueCopyResumesWhateverOutputModeSays(t *testing.T) {
+	ws := gitWorkspace(t)
+	writeConfig(t, ws, "version: 1\noutput:\n  mode: branch\nbudget:\n  max_usd: 0.01\n")
+	queueAdd(t, ws, "add tests for the parser")
+	expensive := func() *graph.Registry {
+		r := graph.NewRegistry()
+		r.MustRegister(planWriter{body: "# Plan\n\nwrite a test\n", usage: belay.Usage{USD: 0.05}}, approve.New())
+		return r
+	}
+	if _, err := startQueue(t.Context(), t, ws, expensive); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	stopped := goal(t, ws, 1)
+	if stopped.State != queue.StatePaused {
+		t.Fatalf("goal 1 = %+v, want this test's premise: paused at a limit", stopped)
+	}
+	status, _, err := runCLI(t, "queue", "status", "--workspace", ws)
+	if err != nil {
+		t.Fatalf("belay queue status: %v", err)
+	}
+	printed := "belay --workspace " + shellWord(stopped.Dir) + " resume " + stopped.RunID
+	if !strings.Contains(status, printed) {
+		t.Fatalf("belay queue status never says %q, so this test is not running the command belay printed:\n%s",
+			printed, status)
+	}
+
+	// Raise the limit where belay queue said to, and run what it printed.
+	writeConfig(t, stopped.Dir, "version: 1\noutput:\n  mode: branch\nbudget:\n  max_usd: 5\n")
+	stdout, stderr, err := runCLI(t, "--workspace", stopped.Dir, "--dry-run", "resume", stopped.RunID)
+	t.Logf("verbatim output:\n%s%s", stdout, stderr)
+	if err != nil {
+		t.Fatalf("the resume belay queue printed was refused: %v", err)
+	}
+	for _, phrase := range []string{`output.mode is "branch"`, "carries on in place"} {
+		if !strings.Contains(stdout, phrase) {
+			t.Errorf("the resume's dry run never says %q", phrase)
+		}
+	}
+}
+
+// settlesAFanout stands in for a fanout run's whole walk: it records the
+// candidates and the winner the way join leaves them, and ends the run.
+type settlesAFanout struct{ winner string }
+
+func (settlesAFanout) Name() string { return graph.NodePlan }
+
+func (n settlesAFanout) Run(_ context.Context, rc *graph.RunContext) (graph.Result, error) {
+	candidates := []state.Candidate{
+		{ID: "cand-01", Dir: filepath.Join(rc.Workspace, "candidate one"), TestPassed: true, IssueCount: 3},
+		{ID: "cand-02", Dir: filepath.Join(rc.Workspace, "candidate two"), TestPassed: true},
+	}
+	winner := n.winner
+	return graph.Result{Status: journal.StatusOK, Next: graph.End, Note: "cand-02 wins",
+		Patch: state.Patch{Candidates: &candidates, Winner: &winner}}, nil
+}
+
+// TestAFinishedFanoutGoalSaysWhereItsChangeIs: a goal whose run fans out
+// leaves its copy as it was claimed. The change is in the winning
+// candidate's own workspace, because belay does not merge a run that edits
+// in place, and the queue edits every goal in place. Saying "it finished in
+// its copy; take what you want from it" sent a person to a copy with nothing
+// in it. Both the start and the status name the winner and its workspace.
+func TestAFinishedFanoutGoalSaysWhereItsChangeIs(t *testing.T) {
+	ws := goWorkspace(t)
+	writeConfig(t, ws, fanoutConfig)
+	queueAdd(t, ws, "--no-approval", "add docs")
+	settles := func() *graph.Registry {
+		r := graph.NewRegistry()
+		r.MustRegister(settlesAFanout{winner: "cand-02"})
+		return r
+	}
+	out, err := startQueue(t.Context(), t, ws, settles)
+	if err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	done := goal(t, ws, 1)
+	if done.State != queue.StateFinished {
+		t.Fatalf("goal 1 = %+v, want this test's premise: finished", done)
+	}
+	man, err := state.LoadManifest(runLayout(t, done).ManifestPath())
+	if err != nil || man.Fanout == nil {
+		t.Fatalf("goal 1's run fanout pin = %+v (%v), want this test's premise: a run that fans out", man.Fanout, err)
+	}
+	status, _, err := runCLI(t, "queue", "status", "--workspace", ws)
+	if err != nil {
+		t.Fatalf("belay queue status: %v", err)
+	}
+	t.Logf("verbatim status:\n%s", status)
+
+	winnerDir := filepath.Join(done.Dir, "candidate two")
+	for name, text := range map[string]string{"the start": out, "the status": status} {
+		for _, phrase := range []string{"cand-02", winnerDir} {
+			if !strings.Contains(text, phrase) {
+				t.Errorf("%s never says %q, where the goal's change is:\n%s", name, phrase, text)
+			}
+		}
+		for _, phrase := range []string{"finished, in its copy", "finished in its copy", filepath.Join(done.Dir, "candidate one")} {
+			if strings.Contains(text, phrase) {
+				t.Errorf("%s says %q, which is not where the goal's change is:\n%s", name, phrase, text)
+			}
+		}
+	}
+}
+
+// TestAQueuedGoalEditsItsCopyInPlaceWhateverOutputModeSays guards the queue's
+// one override of output.mode. A goal's copy lives under .belay and is not a
+// checkout: resolved as belay.yaml says, output.mode "branch" there is
+// refused, so no goal of such a repository could run at all, and a belay that
+// did not refuse it would branch the person's own repository from inside the
+// copy. The queue therefore runs every goal in place, in its copy, whatever
+// belay.yaml says, pins that, and creates no branch anywhere.
+func TestAQueuedGoalEditsItsCopyInPlaceWhateverOutputModeSays(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		workspace func(*testing.T) string
+	}{
+		{name: "a directory that is not a repository", workspace: goWorkspace},
+		{name: "a git repository", workspace: gitWorkspace},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ws := tc.workspace(t)
+			writeConfig(t, ws, "version: 1\noutput:\n  mode: branch\n")
+			queueAdd(t, ws, "--no-approval", "add docs")
+			var reached []string
+			if _, err := startQueue(t.Context(), t, ws, fakeGoals(reaches{goals: &reached})); err != nil {
+				t.Fatalf("start: %v", err)
+			}
+			done := goal(t, ws, 1)
+			if done.State != queue.StateFinished || !slices.Equal(reached, []string{"add docs"}) {
+				t.Fatalf("goal 1 = %+v, reached %v; want it finished, in its copy", done, reached)
+			}
+			man, err := state.LoadManifest(runLayout(t, done).ManifestPath())
+			if err != nil {
+				t.Fatalf("goal 1's run has no manifest: %v", err)
+			}
+			if man.Output.Branched() {
+				t.Errorf("goal 1's run pinned output %+v, want in place", man.Output)
+			}
+			if _, err := os.Stat(filepath.Join(ws, ".git")); err == nil {
+				if branches := gitIn(t, ws, "branch", "--list", "belay/*"); branches != "" {
+					t.Errorf("the queue created branches in the person's repository: %s", branches)
+				}
+			}
+		})
+	}
+}
+
+// TestOnlyNoApprovalTakesAQueuedGoalPastItsPlan is the queue's settled rule:
+// a queued goal's plan stops for a person unless that goal was added with
+// --no-approval, and belay never removes the gate by itself. graph.approval
+// false anywhere -- the user's own config.yaml, which applies to every
+// repository, or the project's belay.yaml -- took every queued goal from its
+// plan to its code unattended, while add and start blamed belay.yaml for it.
+func TestOnlyNoApprovalTakesAQueuedGoalPastItsPlan(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		write func(t *testing.T, ws, home string)
+	}{
+		{
+			name: "graph.approval false in the user's config",
+			write: func(t *testing.T, _, home string) {
+				dir := filepath.Join(home, "belay")
+				if err := os.MkdirAll(dir, 0o750); err != nil {
+					t.Fatalf("MkdirAll: %v", err)
+				}
+				if err := os.WriteFile(filepath.Join(home, filepath.FromSlash(config.UserFile)),
+					[]byte("version: 1\ngraph:\n  approval: false\n"), 0o600); err != nil {
+					t.Fatalf("write the user config: %v", err)
+				}
+			},
+		},
+		{
+			name: "graph.approval false in belay.yaml",
+			write: func(t *testing.T, ws, _ string) {
+				writeConfig(t, ws, "version: 1\ngraph:\n  approval: false\n")
+			},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ws, home := goWorkspace(t), t.TempDir()
+			t.Setenv("XDG_CONFIG_HOME", home)
+			tc.write(t, ws, home)
+
+			added := queueAdd(t, ws, "add tests for the parser")
+			if !strings.Contains(added, "belay queue approve 1") || strings.Contains(added, "without waiting") {
+				t.Errorf("belay queue add says the goal will not wait for its plan to be read:\n%s", added)
+			}
+			dry, _, err := runCLI(t, "--workspace", ws, "--dry-run", "queue", "start")
+			if err != nil {
+				t.Fatalf("belay --dry-run queue start: %v\n%s", err, dry)
+			}
+			if !strings.Contains(dry, "goal 1 stops at its plan for you") {
+				t.Errorf("the start's announcement does not say goal 1 stops at its plan:\n%s", dry)
+			}
+
+			var reached []string
+			if _, err := startQueue(t.Context(), t, ws, fakeGoals(reaches{goals: &reached})); err != nil {
+				t.Fatalf("start: %v", err)
+			}
+			if got := goal(t, ws, 1); got.State != queue.StateWaiting || len(reached) != 0 {
+				t.Errorf("goal 1 is %s and goals that reached code are %v; want it parked at its plan, and none",
+					got.State, reached)
+			}
+		})
+	}
+}
+
+// TestTheQueueReportsWhereAGoalsRunIsNow: belay queue tells a person to carry
+// on a goal stopped at a limit themselves, with `belay --workspace <copy>
+// resume <run-id>`, and a parked goal's run can be resumed the same way. The
+// queue's own record is written by belay queue start and nothing else, so
+// after such a run finished, status and list still said "paused at a limit"
+// and offered the resume, which then answered that the run is already
+// finished. Both read where each goal's run is now, from the run itself,
+// whenever the run has ended since the queue recorded it.
+func TestTheQueueReportsWhereAGoalsRunIsNow(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		config   string
+		add      []string
+		recorded queue.State
+		run      state.RunStatus
+		want     queue.State
+	}{
+		{name: "a goal stopped at a limit, then finished by hand", config: "version: 1\nbudget:\n  max_usd: 0.01\n",
+			add: []string{"add tests"}, recorded: queue.StatePaused, run: state.RunStatusCompleted, want: queue.StateFinished},
+		{name: "a goal stopped at a limit, then failed by hand", config: "version: 1\nbudget:\n  max_usd: 0.01\n",
+			add: []string{"add tests"}, recorded: queue.StatePaused, run: state.RunStatusFailed, want: queue.StateFailed},
+		{name: "a goal stopped at a limit, then stopped for good by hand", config: "version: 1\nbudget:\n  max_usd: 0.01\n",
+			add: []string{"add tests"}, recorded: queue.StatePaused, run: state.RunStatusAborted, want: queue.StateStopped},
+		{name: "a parked goal resumed and finished by hand", config: "version: 1\n",
+			add: []string{"add tests"}, recorded: queue.StateWaiting, run: state.RunStatusCompleted, want: queue.StateFinished},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ws := goWorkspace(t)
+			writeConfig(t, ws, tc.config)
+			queueAdd(t, ws, tc.add...)
+			goals := func() *graph.Registry {
+				r := graph.NewRegistry()
+				r.MustRegister(planWriter{body: "# Plan\n\nwrite a test\n", usage: belay.Usage{USD: 0.05}}, approve.New())
+				return r
+			}
+			if _, err := startQueue(t.Context(), t, ws, goals); err != nil {
+				t.Fatalf("start: %v", err)
+			}
+			e := goal(t, ws, 1)
+			if e.State != tc.recorded {
+				t.Fatalf("goal 1 is %s, want this test's premise: %s", e.State, tc.recorded)
+			}
+			// Carried on outside the queue, as belay resume leaves a run that
+			// ends.
+			layout := runLayout(t, e)
+			man, err := state.LoadManifest(layout.ManifestPath())
+			if err != nil {
+				t.Fatalf("LoadManifest: %v", err)
+			}
+			man.Status, man.CurrentNode = tc.run, graph.End
+			if err := state.SaveManifest(layout.ManifestPath(), man); err != nil {
+				t.Fatalf("SaveManifest: %v", err)
+			}
+
+			status, _, err := runCLI(t, "queue", "status", "--workspace", ws)
+			if err != nil {
+				t.Fatalf("belay queue status: %v", err)
+			}
+			t.Logf("verbatim status:\n%s", status)
+			if words := queueStateWords[tc.want.String()]; !strings.Contains(status, "1  "+words) {
+				t.Errorf("belay queue status does not show goal 1 as %q", words)
+			}
+			for _, stale := range []string{queueStateWords[tc.recorded.String()], "resume " + e.RunID, "belay queue approve 1"} {
+				if strings.Contains(status, stale) {
+					t.Errorf("belay queue status still says %q", stale)
+				}
+			}
+			raw, _, err := runCLI(t, "queue", "list", "--workspace", ws, "--json")
+			if err != nil {
+				t.Fatalf("belay queue list --json: %v", err)
+			}
+			var listing QueueListing
+			if err := json.Unmarshal([]byte(raw), &listing); err != nil {
+				t.Fatalf("belay queue list --json: %v\n%s", err, raw)
+			}
+			if got := listing.Goals[0].State; got != tc.want.String() {
+				t.Errorf("belay queue list --json says goal 1 is %q, want %q", got, tc.want)
+			}
+		})
+	}
+}

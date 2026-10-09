@@ -13,6 +13,7 @@ import (
 
 	"github.com/dhaam-ai/belay/internal/agent/replay"
 	"github.com/dhaam-ai/belay/internal/graph"
+	"github.com/dhaam-ai/belay/internal/journal"
 	"github.com/dhaam-ai/belay/internal/state"
 	"github.com/dhaam-ai/belay/pkg/belay"
 	"github.com/dhaam-ai/belay/pkg/belay/belaytest"
@@ -617,7 +618,7 @@ func TestNextStepsAfterAFanout(t *testing.T) {
 		},
 		{
 			name: "failed with no winner",
-			view: outcomeView{layout: layout, fanout: true, outcome: graph.Outcome{
+			view: outcomeView{layout: layout, fanout: true, candidate: "cand-01", outcome: graph.Outcome{
 				Status: state.RunStatusFailed, Node: graph.NodeJoin,
 				Note: "no winner: all 3 candidates failed their tests",
 			}},
@@ -625,6 +626,25 @@ func TestNextStepsAfterAFanout(t *testing.T) {
 				"belay timeline " + runID,
 				"belay timeline " + runID + " --candidate cand-01",
 			},
+		},
+		{
+			// The plan failed, so no candidate was ever made, and
+			// `belay timeline --candidate cand-01` would say the run has
+			// no candidate runs.
+			name: "failed before any candidate existed",
+			view: outcomeView{layout: layout, fanout: true, outcome: graph.Outcome{
+				Status: state.RunStatusFailed, Node: graph.NodePlan,
+			}},
+			want:   []string{"belay timeline " + runID},
+			absent: []string{"--candidate", "candidate's own run"},
+		},
+		{
+			name: "failed with only a later candidate's run made",
+			view: outcomeView{layout: layout, fanout: true, candidate: "cand-03", outcome: graph.Outcome{
+				Status: state.RunStatusFailed, Node: graph.NodeFanout,
+			}},
+			want:   []string{"belay timeline " + runID + " --candidate cand-03"},
+			absent: []string{"cand-01"},
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -714,5 +734,200 @@ func TestNarratorPrefixesCandidateLines(t *testing.T) {
 	}
 	if strings.Contains(got, "[] ") || strings.Contains(got, "[cand-02] → fanout") {
 		t.Errorf("the parent's own lines carry a candidate prefix; got:\n%s", got)
+	}
+}
+
+// fanoutIsolatorBlocked counts the blockers that refuse a fanout over an
+// isolator its run's output cannot use.
+func fanoutIsolatorBlocked(p *runPlan) int {
+	n := 0
+	for _, b := range p.blockers {
+		if strings.Contains(b.problem, "fanout.isolator") {
+			n++
+		}
+	}
+	return n
+}
+
+// TestFanoutRefusesAnIsolatorItsOutputCannotUse: a candidate's workspace has
+// to match how its run delivers. A worktree candidate is a branch off the
+// run's own branch, which a run in place does not have, so every candidate
+// failed to get a workspace -- after the plan was paid for -- and the fanout
+// paused, and paused again on every resume. A directory copy has no branch to
+// merge onto a branch run's. Either is refused before anything is spent.
+//
+// Only a run that fans out makes a candidate, so only such a run is refused:
+// fanout.isolator in a run that does not fan out changes nothing, and
+// refusing every branch run over it broke repositories whose belay.yaml set
+// dircopy as the old docs advised. And the judgement is made on what the run
+// walks -- its pinned output and fanout, on a resume -- against the isolator
+// belay.yaml gives now, which is read live.
+func TestFanoutRefusesAnIsolatorItsOutputCannotUse(t *testing.T) {
+	const (
+		inPlace  = "version: 1\noutput:\n  mode: in_place\nbudget:\n  max_usd: 3.00\n"
+		onBranch = "version: 1\noutput:\n  mode: branch\nbudget:\n  max_usd: 3.00\n"
+		fansOut  = "fanout:\n  enabled: true\n  candidates: 3\n"
+		worktree = "  isolator: worktree\n"
+		dircopy  = "  isolator: dircopy\n"
+	)
+	for _, tc := range []struct {
+		name   string
+		config string
+		want   int
+	}{
+		{name: "worktree candidates in a run in place", config: inPlace + fansOut + worktree, want: 1},
+		{name: "directory copies in a branch run", config: onBranch + fansOut + dircopy, want: 1},
+		{name: "worktree candidates in a branch run", config: onBranch + fansOut + worktree, want: 0},
+		{name: "directory copies in a run in place", config: inPlace + fansOut + dircopy, want: 0},
+		{name: "directory copies set, in a branch run that does not fan out", config: onBranch + "fanout:\n" + dircopy, want: 0},
+		{name: "worktrees set, in a run in place that does not fan out", config: inPlace + "fanout:\n" + worktree, want: 0},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ws := gitWorkspace(t)
+			writeConfig(t, ws, tc.config)
+			plan, err := resolve(resolveRequest{workspace: ws, logger: quietLogger(), context: t.Context()})
+			if err != nil {
+				t.Fatalf("resolve: %v", err)
+			}
+			if got := fanoutIsolatorBlocked(plan); got != tc.want {
+				t.Errorf("refused over the isolator %d times, want %d; blockers: %s", got, tc.want, blockerText(plan))
+			}
+			if tc.want == 0 {
+				return
+			}
+			// The refusal is a blocker, so the dry run says it, before
+			// anything is spent.
+			stdout, _, err := runCLI(t, "--workspace", ws, "--dry-run", "run", "add tests")
+			if err == nil || !strings.Contains(stdout, "would refuse") || !strings.Contains(stdout, "fanout.isolator") {
+				t.Errorf("the dry run = %v, want it to refuse over fanout.isolator:\n%s", err, stdout)
+			}
+		})
+	}
+
+	for _, tc := range []struct {
+		name             string
+		created, resumed string
+		want             int
+	}{
+		{
+			name:    "a fanout run in place, resumed with worktree candidates, is refused once",
+			created: inPlace + fansOut, resumed: inPlace + fansOut + worktree, want: 1,
+		},
+		{
+			name: "a fanout run in place, resumed while belay.yaml would branch with copies, is not refused",
+			// auto resolves a branch here, which the run does not have.
+			created: inPlace + fansOut, resumed: "version: 1\nbudget:\n  max_usd: 3.00\n" + fansOut + dircopy, want: 0,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ws := gitWorkspace(t)
+			writeConfig(t, ws, tc.created)
+			plan, err := resolve(resolveRequest{workspace: ws, logger: quietLogger(), context: t.Context()})
+			if err != nil {
+				t.Fatalf("resolve: %v", err)
+			}
+			const runID = "20260101T000000Z-abcdef123456"
+			store, err := createRun(t.Context(), plan, runSpec{Workspace: ws, RunID: runID, Goal: "add tests"})
+			if err != nil {
+				t.Fatalf("createRun: %v", err)
+			}
+			writeConfig(t, ws, tc.resumed)
+			resumed, err := resolve(resolveRequest{workspace: ws, logger: quietLogger(), context: t.Context()})
+			if err != nil {
+				t.Fatalf("resolve after the file changed: %v", err)
+			}
+			if err := resumed.resumePreflight(t.Context(), store); err != nil {
+				t.Fatalf("resumePreflight: %v", err)
+			}
+			if got := fanoutIsolatorBlocked(resumed); got != tc.want {
+				t.Errorf("refused over the isolator %d times, want %d; blockers: %s", got, tc.want, blockerText(resumed))
+			}
+		})
+	}
+}
+
+// TestFirstCandidateRunIsOneThatExists: the candidate a report offers to open
+// is one `belay timeline --candidate` can open -- a candidate run directory
+// on disk -- and the first of them by id. A run with none, such as one that
+// failed before its fanout made any, is offered nothing.
+func TestFirstCandidateRunIsOneThatExists(t *testing.T) {
+	layout, err := state.NewLayout(t.TempDir(), "20260101T000000Z-c0ffee000000")
+	if err != nil {
+		t.Fatalf("NewLayout: %v", err)
+	}
+	if got := firstCandidateRun(layout, true); got != "" {
+		t.Errorf("firstCandidateRun with no candidate runs = %q, want none", got)
+	}
+	for _, id := range []string{"cand-03", "cand-02"} {
+		if err := os.MkdirAll(filepath.Join(layout.CandidateRunsDir(), id), 0o750); err != nil {
+			t.Fatalf("MkdirAll: %v", err)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(layout.CandidateRunsDir(), "cand-01"), nil, 0o600); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+	if got := firstCandidateRun(layout, true); got != "cand-02" {
+		t.Errorf("firstCandidateRun = %q, want cand-02, the first candidate run directory", got)
+	}
+	if got := firstCandidateRun(layout, false); got != "" {
+		t.Errorf("firstCandidateRun of a run that does not fan out = %q, want none", got)
+	}
+}
+
+// failsAtPlan stands in for a plan step whose failure ends the run.
+type failsAtPlan struct{}
+
+func (failsAtPlan) Name() string { return graph.NodePlan }
+
+func (failsAtPlan) Run(context.Context, *graph.RunContext) (graph.Result, error) {
+	return graph.Result{Status: journal.StatusFailed, Note: "the agent could not write a plan"}, nil
+}
+
+// TestADispatchFindsTheCandidateRunItCanName: what the report offers to open
+// is read from disk once the dispatch has returned, as the winner is. A
+// fanout run that failed at its plan has no candidate run to offer; one that
+// has made a candidate run offers that one.
+func TestADispatchFindsTheCandidateRunItCanName(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		made []string
+		want string
+	}{
+		{name: "no candidate run was made", want: ""},
+		{name: "a candidate run was made", made: []string{"cand-02"}, want: "cand-02"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ws := goWorkspace(t)
+			writeConfig(t, ws, fanoutConfig)
+			plan, err := resolve(resolveRequest{workspace: ws, logger: quietLogger()})
+			if err != nil {
+				t.Fatalf("resolve: %v", err)
+			}
+			store, err := createRun(t.Context(), plan, runSpec{
+				Workspace: ws, RunID: "20260101T000000Z-abcdef123456", Goal: "add tests",
+			})
+			if err != nil {
+				t.Fatalf("createRun: %v", err)
+			}
+			for _, id := range tc.made {
+				if err := os.MkdirAll(filepath.Join(store.Layout().CandidateRunsDir(), id), 0o750); err != nil {
+					t.Fatalf("MkdirAll: %v", err)
+				}
+			}
+			registry := graph.NewRegistry()
+			registry.MustRegister(failsAtPlan{})
+			plan.registry = registry
+
+			view, err := dispatchOnce(t.Context(), plan, store, false)
+			if err != nil {
+				t.Fatalf("dispatchOnce: %v", err)
+			}
+			if view.outcome.Status != state.RunStatusFailed || !view.fanout {
+				t.Fatalf("outcome %v, fanout %v; want this test's premise, a failed fanout run", view.outcome.Status, view.fanout)
+			}
+			if view.candidate != tc.want {
+				t.Errorf("view.candidate = %q, want %q", view.candidate, tc.want)
+			}
+		})
 	}
 }

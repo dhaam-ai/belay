@@ -277,13 +277,34 @@ func (p *runPlan) bindPolicy(manifest state.Manifest) {
 // Drift is a warning, not a refusal. The run is fine — it is finishing the
 // way it started — but somebody who changed output.mode and then resumed is
 // entitled to know their change is not what this run is doing.
+//
+// That includes a belay.yaml asking for a branch this workspace cannot take.
+// resolve refused it, rightly, for a run that would start here now; but this
+// run started already, and a refusal of the file's output is not a refusal of
+// the pin. A fork and a queued goal are both pinned in place and live in a copy
+// under .belay, which can never take a branch, and their belay.yaml says
+// "branch" whenever the checkout's did -- so keeping that refusal refused the
+// very command belay prints to carry them on. Everything resolve concluded
+// from the file's output is taken back here (outputKey), including the warning
+// about uncommitted work, which describes a branch run starting now from HEAD
+// and not this one, and the reason the plan gives for where the result goes is
+// the pin's.
 func (p *runPlan) bindOutput(ctx context.Context, manifest state.Manifest) {
 	pinned, live := manifest.Output, p.output
-	if !pinned.Branched() && !live.Branched() {
+	refused := p.takeBack(outputKey)
+	if len(refused) == 0 && !pinned.Branched() && !live.Branched() {
 		return
 	}
 	p.output = pinned
-	if pinned.Mode != live.Mode {
+	p.outputReason = pinnedOutputReason(pinned)
+	switch {
+	case len(refused) > 0 && !pinned.Branched():
+		// The file asked for a branch, which is the only output resolve
+		// refuses. A branch run is not warned: it has the branch it asked
+		// for, and bindRunWorkTree checks that it still does.
+		p.warn("%s That refuses a new run here; this run was started to edit its workspace in place, and belay "+
+			"finishes a run the way it started, so it carries on in place.", refused[0].problem)
+	case len(refused) == 0 && pinned.Mode != live.Mode:
 		p.warn("this run was started with output.mode %q, and belay.yaml now says %q. belay finishes a run the way "+
 			"it started, so this run stays on %q; the new setting applies to the next run you start.",
 			orInPlace(pinned.Mode), orInPlace(live.Mode), orInPlace(pinned.Mode))
@@ -300,6 +321,17 @@ func (p *runPlan) bindOutput(ctx context.Context, manifest state.Manifest) {
 	p.bindRunWorkTree(ctx, pinned)
 }
 
+// pinnedOutputReason says where a resumed run's result goes, and why: because
+// the run started that way, whatever belay.yaml says now.
+func pinnedOutputReason(out state.Output) string {
+	if out.Branched() {
+		return fmt.Sprintf("this run was started on its own branch, %s, and belay finishes a run the way it started, "+
+			"so it works in that branch's worktree and never edits your checkout", out.Branch)
+	}
+	return "this run was started to edit its workspace in place, and belay finishes a run the way it started, " +
+		"so it edits this workspace directly"
+}
+
 // bindRunWorkTree reopens the repository a branch run commits to and checks
 // that the run's worktree is still there, on the run's own branch.
 //
@@ -308,6 +340,14 @@ func (p *runPlan) bindOutput(ctx context.Context, manifest state.Manifest) {
 // been called and paid for. Every refusal names the commands that get a
 // person somewhere: the directory, the branch that still holds the work, and
 // how to make the worktree again.
+//
+// That last command has to work as printed. A worktree whose directory was
+// deleted is still registered with git, which refuses a plain `worktree add`
+// of its path ("is a missing but already registered worktree"); `add -f`
+// takes it back. -f is printed only then: for a worktree git no longer knows,
+// a plain add works, and -f would also check the run's branch out a second
+// time if somebody had checked it out elsewhere since. Paths are quoted, as
+// every command belay writes out is, because a person pastes it.
 func (p *runPlan) bindRunWorkTree(ctx context.Context, out state.Output) {
 	repo, err := git.Open(ctx, exec.New(p.logger), out.Repo)
 	if err != nil {
@@ -329,10 +369,12 @@ func (p *runPlan) bindRunWorkTree(ctx context.Context, out state.Output) {
 		)
 		return
 	}
+	registered := false
 	for _, w := range list {
 		if w.Path != resolveWorkTreePath(out.WorkTree) {
 			continue
 		}
+		registered = true
 		switch {
 		case w.Prunable, !isDir(out.WorkTree):
 			// Registered but not there: someone deleted the directory. git
@@ -342,7 +384,7 @@ func (p *runPlan) bindRunWorkTree(ctx context.Context, out state.Output) {
 			p.block(
 				fmt.Sprintf("this run's worktree %s is on %s, not on the run's own branch %s.",
 					out.WorkTree, orDetached(w.Branch), out.Branch),
-				fmt.Sprintf("put it back with `git -C %s switch %s`, then resume", out.WorkTree, out.Branch),
+				fmt.Sprintf("put it back with `git -C %s switch %s`, then resume", shellQuote(out.WorkTree), shellQuote(out.Branch)),
 			)
 			return
 		default:
@@ -350,12 +392,16 @@ func (p *runPlan) bindRunWorkTree(ctx context.Context, out state.Output) {
 		}
 		break
 	}
+	add := "worktree add"
+	if registered {
+		add = "worktree add -f"
+	}
 	p.block(
 		fmt.Sprintf("this run works in its own git worktree at %s, and that worktree is gone. "+
 			"Everything it committed is still on the branch %s.", out.WorkTree, out.Branch),
-		fmt.Sprintf("make it again with `git -C %s worktree add %s %s`, then resume; "+
+		fmt.Sprintf("make it again with `git -C %s %s %s %s`, then resume; "+
 			"or start a fresh run and take what you need from %s",
-			out.Repo, out.WorkTree, out.Branch, out.Branch),
+			shellQuote(out.Repo), add, shellQuote(out.WorkTree), shellQuote(out.Branch), out.Branch),
 	)
 }
 
@@ -764,6 +810,7 @@ func announceContinue(u *ui, plan *runPlan, chosen resumableRun, layout state.La
 	u.say("  state:  %s", layout.RunDir())
 	u.say("  route:  %s", routeLine(plan.route))
 	u.say("")
+	sayWarnings(u, plan)
 }
 
 // orUnrecorded fills in for a manifest that never recorded what was asked for.

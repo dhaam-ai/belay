@@ -161,6 +161,9 @@ type runPlan struct {
 
 	blockers []blocker
 	warnings []string
+	// keyedWarnings holds, by key, the warnings in warnings that a later
+	// judgement of the same thing takes back (see warnAs and takeBack).
+	keyedWarnings map[string][]string
 
 	logger *slog.Logger
 }
@@ -173,6 +176,40 @@ func (p *runPlan) block(problem, fix string) {
 // warn records something a person should know that does not stop the run.
 func (p *runPlan) warn(format string, a ...any) {
 	p.warnings = append(p.warnings, fmt.Sprintf(format, a...))
+}
+
+// blockAs is block for a refusal a later judgement may take back: one resolve
+// makes about belay.yaml, which a resume replaces with the run's own pin.
+func (p *runPlan) blockAs(key, problem, fix string) {
+	p.blockers = append(p.blockers, blocker{problem: problem, fix: fix, key: key})
+}
+
+// warnAs is warn for a warning a later judgement may take back, for the
+// reason blockAs exists.
+func (p *runPlan) warnAs(key, format string, a ...any) {
+	text := fmt.Sprintf(format, a...)
+	p.warnings = append(p.warnings, text)
+	if p.keyedWarnings == nil {
+		p.keyedWarnings = map[string][]string{}
+	}
+	p.keyedWarnings[key] = append(p.keyedWarnings[key], text)
+}
+
+// takeBack removes every blocker and warning recorded under key, and returns
+// the blockers it removed, so the caller can say what no longer applies.
+func (p *runPlan) takeBack(key string) []blocker {
+	var taken []blocker
+	p.blockers = slices.DeleteFunc(p.blockers, func(b blocker) bool {
+		if b.key != key {
+			return false
+		}
+		taken = append(taken, b)
+		return true
+	})
+	withdrawn := p.keyedWarnings[key]
+	delete(p.keyedWarnings, key)
+	p.warnings = slices.DeleteFunc(p.warnings, func(w string) bool { return slices.Contains(withdrawn, w) })
+	return taken
 }
 
 // options assembles the dispatcher's Options for this plan.
@@ -734,7 +771,12 @@ func (p *runPlan) resolveFanout() {
 // resolveOutput, resolvePolicy and resolveFanout set them for a new run from
 // belay.yaml; bindOutput, bindPolicy and bindFanout set them for a resume
 // from the chosen run's manifest, and call this again. It never refuses a
-// run: a pin this plan cannot honour is resumePreflight's to report.
+// run over a pin: a pin this plan cannot honour is resumePreflight's to
+// report. What it does re-derive on every rebuild are the two refusals that
+// judge the run's fanout against what belay.yaml gives now -- its review mode
+// (checkFanoutReview) and its isolator (checkFanoutIsolator) -- because the
+// fanout and the output they are judged with are only final once the pins
+// are bound.
 //
 // The route is set even when the registry cannot be built, so that a dry run
 // refusing to start still shows the route it would have taken.
@@ -761,6 +803,7 @@ func (p *runPlan) resolveRegistry() {
 	p.registry = registry
 	p.resolveCandidates()
 	p.checkFanoutReview()
+	p.checkFanoutIsolator()
 }
 
 // checkFanoutReview refuses a run that fans out into a quality gate its

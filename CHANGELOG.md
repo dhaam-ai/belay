@@ -337,6 +337,79 @@ that only `pkg/belay` carries a compatibility promise. Everything under
   branch the person's own repository, and warned that `belay.yaml` now asked
   for a branch when nobody had changed it. A workspace under `.belay` now
   edits in place, says why, and refuses `output.mode: branch`.
+- **`belay fork` works when `belay.yaml` enables fanout.** A fork re-runs one
+  step of a single run, and is meant to turn fanout off as it turns branch
+  output off, but it kept `fanout.enabled`. Its graph was then the fanout
+  graph, which has no `code`, `test`, `fix` or `review`, so forking any of
+  them ended the new run as failed with `unknown node`. A fork is now always
+  a single run.
+- **A fork or a queued goal can be carried on when `belay.yaml` says
+  `output.mode: branch`.** Both run in place, in a copy under `.belay`, and
+  the copy can never take a branch, so resolving it refused `branch` — and
+  that refusal outlived the run's own pin, which says in place. belay
+  refused the very command it had printed: `belay --workspace <copy> resume
+  <fork>` after a fork, and the resume `belay queue` prints for a goal
+  stopped at a limit. A resume now judges the output the run was started
+  with, as `docs/config.md` promises: what `belay.yaml` would give a new run
+  is a warning, never a refusal. The same rule stops a resume from warning
+  about uncommitted work a branch run starting now would leave out, and from
+  telling a branch run that `belay.yaml` "now says" a mode it does not.
+- **A fanout whose isolator cannot serve its output is refused before it
+  spends, and `fanout.isolator` no longer refuses a run that does not fan
+  out.** `fanout.isolator: worktree` in a run that edits in place passed the
+  dry run, paid for the plan, and then could not make a single candidate's
+  workspace, so the fanout paused, and paused again on every resume. It is
+  now refused up front, like `dircopy` in a branch run. That refusal, in turn,
+  was applied to every branch run, fanout or not, so a repository whose
+  `belay.yaml` set `dircopy` as earlier docs advised could not start a run at
+  all; both refusals now apply only to a run that fans out, and a resume
+  judges them against the output and fanout the run was started with.
+- **`belay queue` says where a fanout goal's change is.** A queued goal whose
+  run fans out leaves its copy as it was claimed: the change is in the
+  winning candidate's own workspace, under the run's `candidates/`, because
+  belay does not merge a run that edits in place. The queue said the goal
+  "finished in its copy" and to take what you want from there, which found
+  nothing. It now names the winner and its workspace.
+- **A failed fanout run names a candidate only when one exists.** Its last
+  lines offered `belay timeline <run> --candidate cand-01` whenever the run
+  fanned out, including a run that failed at its plan, before any candidate
+  was made, where that command says the run has no candidate runs. The line
+  now appears only when a candidate run is on disk, and names the first one.
+- **A queued goal's plan always waits for you unless you added it with
+  `--no-approval`.** `graph.approval: false` anywhere — the project's
+  `belay.yaml`, or your own `config.yaml`, which reaches every repository —
+  took every queued goal from its plan to its code unattended, and
+  `belay queue add` and `queue start` blamed `belay.yaml` for it. The queue no
+  longer reads `graph.approval`: the gate stops every goal except one added
+  with `--no-approval`.
+- **The command belay prints to remake a deleted run worktree works.** A
+  branch run whose worktree directory was deleted is refused with the git
+  command that makes it again, and git refused that command: the worktree
+  was still registered, and git takes the path back only with `worktree add
+  -f`. belay now prints `-f` when git still has the worktree registered, a
+  plain `worktree add` when it does not, and quotes the paths.
+- **Forking a fix loop that gave up calls the model.** `belay fork <run-id>
+  fix --model opus`, the README's own example, re-runs the last fix — the one
+  that gave up — whose state had every round of `graph.give_up` used, so the
+  fix step gave up again without calling anything, and `--model` changed
+  nothing. A fork of such a fix now gets one more round, and says so with the
+  other differences before it spends anything; nothing in `belay.yaml` needs
+  to change.
+- **belay says what it warns about on real runs, not only under `--dry-run`.**
+  Uncommitted work a branch run leaves out, a resumed run's settings
+  disagreeing with `belay.yaml`, a credential belay cannot see: each was
+  collected for every run and printed only by `--dry-run`, so the run itself
+  said none of it. `belay run`, `belay resume`, `belay fork` and each queued
+  goal now print them on stderr, after the announcement and before anything
+  is spent.
+- **`belay queue` shows a goal carried on by hand as its run now stands.**
+  For a goal stopped at a limit, the queue says to raise the limit and run
+  `belay --workspace <copy> resume <run-id>` yourself. After that run
+  finished, `belay queue`, `queue status` and `queue list` still said
+  "paused at a limit" and offered the same resume, which then answered that
+  the run is already finished. The reports now read each goal's run, and show
+  one that has finished, failed or stopped since the queue recorded it that
+  way.
 - **A repair's file list is checked against the disk, not taken on trust.**
   The fix step routed straight back to the tests, so a repair was the one
   change in a run that nothing verified: no claimed path was proven to be a

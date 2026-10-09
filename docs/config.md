@@ -409,7 +409,7 @@ Isolation strategy for candidates:
 - `"worktree"`: Each candidate is a git worktree on its own branch, `belay/<run-id>-<candidate-id>`, and the winner is promoted with a merge commit. It needs the same git a branch run needs (2.38 or newer, at least one commit, no submodules).
 - `"dircopy"`: Plain directory copies. Works on non-git targets and uses O(N × repo_size) disk — the trade [ADR-0004](adr/0004-directory-copies-for-fanout.md) accepted, now superseded by [ADR-0012](adr/0012-git-native-run-output.md) for git targets. Note that `.git` is **not** copied, so a candidate cannot run git commands, and its work cannot be merged.
 
-`"dircopy"` together with `output.mode: "branch"` refuses the run: a copy has no branch to merge from.
+A run that fans out is refused, before anything is spent, when the isolator cannot serve its output: `"dircopy"` in a run on a branch, because a copy has no branch to merge from, and `"worktree"` in a run that edits in place, because a worktree candidate branches from the run's own branch. With `fanout.enabled: false` this setting changes nothing.
 
 ### `fanout.select`
 

@@ -8,6 +8,7 @@ import (
 	"io"
 	"io/fs"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -213,12 +214,9 @@ func addToQueue(cmd *cobra.Command, goal string) error {
 	default:
 		u.say("  %s ahead of it.", runsPlural(ahead, "goal is", "goals are"))
 	}
-	switch {
-	case added.NoApproval:
+	if added.NoApproval {
 		u.say("  you added it with --no-approval, so it goes from its plan to its code without waiting for you.")
-	case !approvalOn(ws):
-		u.say("  graph.approval is off in belay.yaml, so it goes from its plan to its code without waiting for you.")
-	default:
+	} else {
 		u.say("  when its plan is written, the queue parks it for you to read, and moves on.")
 		u.say("  approve it then with:  belay queue approve %d", added.ID)
 	}
@@ -228,15 +226,6 @@ func addToQueue(cmd *cobra.Command, goal string) error {
 	}
 	u.say("  start the queue with:  belay queue start")
 	return nil
-}
-
-// approvalOn reports whether the plan of a goal added without --no-approval
-// would stop for review, from the workspace's configuration as it is now. It
-// is only ever wording: a configuration belay cannot read says yes, which is
-// what the defaults say.
-func approvalOn(ws string) bool {
-	cfg, err := config.Load(config.Options{Path: rootFlags.configPath, Dir: ws})
-	return err != nil || cfg.Graph.Approval
 }
 
 // QueueListing is the documented shape of `belay queue list --json`.
@@ -321,6 +310,7 @@ func listQueue(cmd *cobra.Command) error {
 	if err != nil {
 		return failed(err)
 	}
+	q = observed(q)
 	goals := queueGoals(q)
 	if queueFlags.json {
 		return writeQueueJSON(u.out, QueueListing{Workspace: ws, Goals: goals})
@@ -425,6 +415,7 @@ func showQueueStatus(cmd *cobra.Command) error {
 	if err != nil {
 		return failed(err)
 	}
+	q = observed(q)
 	goals := queueGoals(q)
 	pid, active, err := store.WorkerActive()
 	if err != nil {
@@ -558,9 +549,11 @@ func queueNextSteps(q queue.Queue, active bool, pid int) []string {
 		case queue.StateFailed, queue.StateStopped:
 			lines = append(lines, fmt.Sprintf("see what happened to goal %d:  %s", e.ID, timeline))
 		case queue.StateFinished:
-			lines = append(lines,
-				fmt.Sprintf("goal %d finished in its copy, %s; take what you want from it by hand", e.ID, e.Dir),
-				fmt.Sprintf("  see what it did:  %s", timeline))
+			finished := fmt.Sprintf("goal %d finished in its copy, %s; take what you want from it by hand", e.ID, e.Dir)
+			if where, fanned := winnerWorkspace(e); fanned {
+				finished = fmt.Sprintf("goal %d finished; its change is %s; take what you want from it by hand", e.ID, where)
+			}
+			lines = append(lines, finished, fmt.Sprintf("  see what it did:  %s", timeline))
 		}
 	}
 	if len(runnable(q)) > 0 {
@@ -571,6 +564,92 @@ func queueNextSteps(q queue.Queue, active bool, pid int) []string {
 		}
 	}
 	return lines
+}
+
+// winnerWorkspace says where a finished goal's change is when its run fanned
+// out, and reports whether it did.
+//
+// A goal's copy is where its change is, except when its run fans out. Then
+// the copy is as it was claimed: each candidate worked in a workspace of its
+// own, under the run's candidates directory, and belay does not merge a run
+// that edits in place -- which every queued goal's run does -- so the change
+// stayed in the winner's. A person sent to the copy to take the change by
+// hand would find nothing there. The answer is read from the goal's run, its
+// manifest's fanout pin and its blackboard's winner, as completedFanoutSteps
+// reads them for a run started by hand.
+func winnerWorkspace(e queue.Entry) (string, bool) {
+	man, ok := goalManifest(e)
+	if !ok || man.Fanout == nil {
+		return "", false
+	}
+	layout, err := state.NewLayout(e.Dir, e.RunID)
+	if err != nil {
+		return "", false
+	}
+	st, err := state.LoadState(layout.StatePath())
+	if err != nil || st.Winner == "" {
+		// A finished fanout always has a winner: join fails a run with
+		// none. Not finding one, belay says where to look, not what to guess.
+		return "in its winning candidate's own workspace, which belay timeline names", true
+	}
+	winner := state.Candidate{ID: st.Winner}
+	for _, c := range st.Candidates {
+		if c.ID == st.Winner {
+			winner = c
+		}
+	}
+	return fmt.Sprintf("in the workspace of %s, the candidate that won: %s", winner.ID, dirOrUnrecorded(winner.Dir)), true
+}
+
+// endedRunGoalState is how a goal stands once its run has ended, by the
+// run's status: what goalOutcome settles the same run as.
+var endedRunGoalState = map[state.RunStatus]queue.State{
+	state.RunStatusCompleted: queue.StateFinished,
+	state.RunStatusFailed:    queue.StateFailed,
+	state.RunStatusAborted:   queue.StateStopped,
+}
+
+// observed returns q as a person should read it: each goal whose run has
+// ended since the queue recorded it is shown as its run now stands.
+//
+// The queue's record is written by belay queue start and by nothing else, but
+// a goal's run is an ordinary run in an ordinary workspace, and belay queue
+// itself tells a person to carry one on by hand: `belay --workspace <copy>
+// resume <run-id>` for a goal stopped at a limit. Once that run finished, the
+// record still said "paused at a limit", and the report offered the resume,
+// which answered that the run is already finished. So the reports read the
+// run: one that has ended -- completed, failed or stopped for good -- is shown
+// that way, whatever the record says, with a note saying it went on outside
+// the queue. A run still paused or in progress is left as recorded, because
+// the record knows what the run cannot say: that a goal was approved, or is in
+// a worker's hands.
+//
+// It is for display, and writes nothing: status, list and belay runs only
+// read, and what queue start runs next is decided from the record, which
+// never runs a goal that has ended again either way.
+func observed(q queue.Queue) queue.Queue {
+	entries := slices.Clone(q.Entries)
+	for i, e := range entries {
+		switch e.State {
+		case queue.StateQueued, queue.StateRemoved, queue.StateFinished, queue.StateFailed, queue.StateStopped:
+			continue
+		}
+		man, ok := goalManifest(e)
+		if !ok {
+			continue
+		}
+		now, ended := endedRunGoalState[man.Status]
+		if !ended {
+			continue
+		}
+		entries[i].Note = "its run went on outside the queue after it was " + queueStateWords[e.State.String()]
+		entries[i].State = now
+		if man.UpdatedAt.After(e.UpdatedAt) {
+			entries[i].UpdatedAt = man.UpdatedAt
+		}
+	}
+	q.Entries = entries
+	return q
 }
 
 // runnable lists the goals a start would run, in the order it runs them: the
@@ -725,7 +804,7 @@ func startTheQueue(cmd *cobra.Command) error {
 	toRun := runnable(q)
 	if len(toRun) == 0 {
 		u.say("There is nothing in the queue in %s that belay can run.", ws)
-		sayQueueNextSteps(u, q, false, 0)
+		sayQueueNextSteps(u, observed(q), false, 0)
 		return nil
 	}
 
@@ -808,16 +887,21 @@ func refuseUnwatchedSpend(plan *runPlan) {
 // branch run would look for a git repository from inside it, find the
 // person's own a few directories up, and branch that. It files no plan into
 // the repository, because the copy is not the repository, and a plan filed
-// into a copy nobody keeps would be lost with it. And a goal the person added
-// with --no-approval has no gate: that is the one way a queued goal skips
-// review, and the person chose it.
+// into a copy nobody keeps would be lost with it.
+//
+// And its plan stops for a person unless the goal was added with
+// --no-approval: that is the one way a queued goal skips review, and the
+// person chose it, for that goal. graph.approval is not consulted at all.
+// Turned off in a belay.yaml, or in the user's own config.yaml, which reaches
+// every repository they own, it would take every goal from its plan to its
+// code with nobody watching -- belay removing the gate on its own, which a
+// queue never does. A person at a terminal who turns it off for `belay run`
+// is there to watch the run; a queue's goals run while they are away.
 func queueOverride(noApproval bool) func(*config.Config) {
 	return func(c *config.Config) {
 		c.Output.Mode = config.OutputInPlace
 		c.Plan.Archive = false
-		if noApproval {
-			c.Graph.Approval = false
-		}
+		c.Graph.Approval = !noApproval
 	}
 }
 
@@ -829,7 +913,7 @@ func announceQueue(u *ui, plan *runPlan, ws string, store *queue.Store, toRun []
 	var stops []int
 	for i, e := range toRun {
 		ids[i] = e.ID
-		if e.State == queue.StateQueued && !e.NoApproval && plan.config.Graph.Approval {
+		if e.State == queue.StateQueued && !e.NoApproval {
 			stops = append(stops, e.ID)
 		}
 	}
@@ -851,8 +935,6 @@ func announceQueue(u *ui, plan *runPlan, ws string, store *queue.Store, toRun []
 	case len(stops) > 1:
 		u.say("  plans to approve:     goals %s stop at their plans for you; the queue parks each one and moves on",
 			goalList(stops))
-	case !plan.config.Graph.Approval:
-		u.say("  plans to approve:     none; graph.approval is off in belay.yaml")
 	default:
 		u.say("  plans to approve:     none")
 	}
@@ -882,9 +964,10 @@ type queueDriver struct {
 	source     string
 	configPath string
 	cassette   string
-	// adjust, when set, changes each goal's plan once it is resolved. Tests
-	// use it to give a goal's run a graph of fake nodes; nothing else sets
-	// it.
+	// adjust, when set, changes each goal's plan once it is final: resolved,
+	// and for a run being driven, bound to the run's pins, which rebuilds
+	// its registry. Tests use it to give a goal's run a graph of fake nodes;
+	// nothing else sets it.
 	adjust func(*runPlan)
 }
 
@@ -912,11 +995,15 @@ func (d *queueDriver) plan(ctx context.Context, e queue.Entry) (*runPlan, error)
 	if err != nil {
 		return nil, err
 	}
+	plan.goal = e.Goal
+	return plan, nil
+}
+
+// adjusted applies the test seam adjust to a goal's final plan.
+func (d *queueDriver) adjusted(plan *runPlan) {
 	if d.adjust != nil {
 		d.adjust(plan)
 	}
-	plan.goal = e.Goal
-	return plan, nil
 }
 
 // Observe implements queue.Driver.
@@ -949,6 +1036,7 @@ func (d *queueDriver) Create(ctx context.Context, e queue.Entry) error {
 	if err != nil {
 		return err
 	}
+	d.adjusted(plan)
 	if err := blocked(plan); err != nil {
 		return err
 	}
@@ -980,6 +1068,7 @@ func (d *queueDriver) Drive(ctx context.Context, e queue.Entry) (queue.Outcome, 
 	if err != nil {
 		return queue.Outcome{}, err
 	}
+	d.adjusted(plan)
 	if err := blocked(plan); err != nil {
 		return queue.Outcome{}, err
 	}
@@ -987,6 +1076,7 @@ func (d *queueDriver) Drive(ctx context.Context, e queue.Entry) (queue.Outcome, 
 	d.u.say("")
 	d.u.say("goal %d: %s", e.ID, e.Goal)
 	d.u.say("  run:   %s, in %s", e.RunID, e.Dir)
+	sayWarnings(d.u, plan)
 	view, err := dispatchOnce(ctx, plan, store, true, pauseOnCancel)
 	if err != nil {
 		return queue.Outcome{}, err
@@ -1057,6 +1147,10 @@ func (d *queueDriver) sayOutcome(e queue.Entry, out queue.Outcome) {
 		d.u.say("goal %d is waiting for you to approve its plan; %s", e.ID, out.Note)
 		d.u.say("  the queue moves on; approve it later with:  belay queue approve %d", e.ID)
 	case out.State == queue.StateFinished:
+		if where, fanned := winnerWorkspace(e); fanned {
+			d.u.say("goal %d finished; its change is %s", e.ID, where)
+			return
+		}
 		d.u.say("goal %d finished, in its copy %s", e.ID, e.Dir)
 	case out.State == queue.StatePaused:
 		d.u.say("goal %d stopped at one of belay's limits: %s", e.ID, out.Note)
@@ -1109,6 +1203,7 @@ func workQueue(ctx context.Context, u *ui, w *queue.Worker) error {
 	}
 
 	q, readErr := w.Store.Read()
+	q = observed(q)
 	u.say("")
 	switch {
 	case err != nil:
@@ -1158,6 +1253,7 @@ func sayQueueRuns(u *ui, workspace string) {
 	if err != nil {
 		return
 	}
+	q = observed(q)
 	var lines []string
 	for _, e := range q.Entries {
 		if _, ok := goalManifest(e); !ok {

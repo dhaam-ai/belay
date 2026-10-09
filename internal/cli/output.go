@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log/slog"
 	"path/filepath"
+	"slices"
 	"strings"
 
 	"github.com/dhaam-ai/belay/internal/config"
@@ -21,6 +22,14 @@ import (
 // candidate's is that branch, a "-" and the candidate's id (see
 // internal/isolate/worktree for why the separator is not another "/").
 const branchPrefix = "belay/"
+
+// outputKey keys what resolveOutput concludes from belay.yaml rather than
+// from a run: the refusal of a branch this workspace cannot take, and the
+// warning about uncommitted work a branch run would leave out. Both are about
+// a run starting now. A resume's run started already, under the output its
+// manifest pinned, so bindOutput takes them back (runPlan.takeBack) and judges
+// the pin instead.
+const outputKey = "output"
 
 // runBranch names the branch a run delivers its result on.
 func runBranch(runID string) string { return branchPrefix + runID }
@@ -58,14 +67,13 @@ func (p *runPlan) resolveOutput(ctx context.Context) {
 	if want == config.OutputInPlace {
 		p.output = state.Output{Mode: state.OutputInPlace}
 		p.outputReason = "output.mode is \"in_place\", so belay edits this workspace directly"
-		p.resolveIsolator()
 		return
 	}
 
 	repo, why := p.openRepo(ctx)
 	if repo == nil {
 		if want == config.OutputBranch {
-			p.block(
+			p.blockAs(outputKey,
 				fmt.Sprintf("output.mode is \"branch\", but %s cannot take one: %s.", p.workspace, why),
 				"set output.mode to \"auto\" or \"in_place\" in belay.yaml, or point --workspace at a git repository "+
 					"with at least one commit",
@@ -74,7 +82,6 @@ func (p *runPlan) resolveOutput(ctx context.Context) {
 		}
 		p.output = state.Output{Mode: state.OutputInPlace}
 		p.outputReason = fmt.Sprintf("belay is editing this workspace directly: %s", why)
-		p.resolveIsolator()
 		return
 	}
 
@@ -95,7 +102,6 @@ func (p *runPlan) resolveOutput(ctx context.Context) {
 		Prefix:  repo.Prefix(),
 	}
 	p.outputReason = branchReason(want, repo, head)
-	p.resolveIsolator()
 	p.warnAboutUncommittedWork(ctx, repo)
 }
 
@@ -153,7 +159,7 @@ func insideBelay(prefix string) bool {
 // the person asked for one, and as the reason for editing in place otherwise.
 func (p *runPlan) fallBackOrBlock(want config.OutputMode, why string) {
 	if want == config.OutputBranch {
-		p.block(
+		p.blockAs(outputKey,
 			fmt.Sprintf("output.mode is \"branch\", but %s cannot take one: %s.", p.workspace, why),
 			"set output.mode to \"auto\" or \"in_place\" in belay.yaml",
 		)
@@ -161,7 +167,6 @@ func (p *runPlan) fallBackOrBlock(want config.OutputMode, why string) {
 	}
 	p.output = state.Output{Mode: state.OutputInPlace}
 	p.outputReason = "belay is editing this workspace directly: " + why
-	p.resolveIsolator()
 }
 
 // branchReason says why this run works on a branch, naming the setting when
@@ -178,23 +183,59 @@ func branchReason(want config.OutputMode, repo *git.Repo, head git.Head) string 
 		"and never edits your checkout", repo.Top(), from)
 }
 
-// resolveIsolator settles which isolator a fanout candidate would get, and
-// refuses the one combination that cannot work.
+// fanoutIsolatorKey is the key of the blocker refusing a fanout over an
+// isolator its run's output cannot use; see checkFanoutIsolator.
+const fanoutIsolatorKey = "fanout-isolator"
+
+// checkFanoutIsolator refuses a run that fans out with an isolator that
+// cannot make, or cannot deliver, its candidates' workspaces.
 //
 // "auto" follows the output mode, because the two are one decision: a
 // candidate is promoted by merging its branch, so a candidate without a
-// branch cannot be promoted. Asking for dircopy in a branch run is therefore
-// refused rather than honoured — belay would run the candidates, pick a
-// winner, and have no way to deliver it.
-func (p *runPlan) resolveIsolator() {
-	if p.config.Fanout.Isolator != config.IsolatorDircopy || !p.output.Branched() {
+// branch cannot be promoted, and a worktree candidate is a branch off the
+// run's own branch, so a run without one cannot make it. Asking for either
+// mismatch is refused rather than honoured, or quietly swapped for the other
+// isolator. dircopy in a branch run would run the candidates, pick a winner,
+// and have no way to deliver it. worktree in a run in place would pay for the
+// plan and then fail to make a single candidate's workspace, and pause, and
+// pause again on every resume. And an isolator named in belay.yaml is a
+// choice, which belay obeys or refuses, as it does output.mode: a run that
+// fans out over N copies when its owner asked for N branches finds out when
+// the disk fills.
+//
+// Only a run that fans out makes a candidate, so only such a run is refused.
+// fanout.isolator in a run that does not fan out changes nothing, and
+// refusing it there stopped every branch run in a repository whose belay.yaml
+// says dircopy, as belay's earlier docs advised.
+//
+// It judges the output and the fanout this run walks -- the pins, on a
+// resume -- against the isolator belay.yaml gives now, which is read live, so
+// resolveRegistry calls it on every rebuild and it first removes what an
+// earlier call found, as checkFanoutReview does. While the output itself is
+// refused (outputKey) there is no output to judge it against, and the refusal
+// already says what to fix.
+func (p *runPlan) checkFanoutIsolator() {
+	p.takeBack(fanoutIsolatorKey)
+	if p.fanout == nil || slices.ContainsFunc(p.blockers, func(b blocker) bool { return b.key == outputKey }) {
 		return
 	}
-	p.block(
-		"fanout.isolator is \"dircopy\" and this run delivers its result on a branch, but a directory copy has no "+
-			"branch to merge, so belay could not promote whichever candidate won.",
-		"set fanout.isolator to \"auto\" or \"worktree\", or set output.mode to \"in_place\" in belay.yaml",
-	)
+	switch {
+	case p.config.Fanout.Isolator == config.IsolatorDircopy && p.output.Branched():
+		p.blockAs(fanoutIsolatorKey,
+			"fanout.isolator is \"dircopy\" and this run delivers its result on a branch, but a directory copy has no "+
+				"branch to merge, so belay could not promote whichever candidate won.",
+			"set fanout.isolator to \"auto\" or \"worktree\" in belay.yaml; a run not yet started can instead set "+
+				"output.mode to \"in_place\"",
+		)
+	case p.config.Fanout.Isolator == config.IsolatorWorktree && !p.output.Branched():
+		p.blockAs(fanoutIsolatorKey,
+			"fanout.isolator is \"worktree\" and this run edits its workspace in place, but a worktree candidate is "+
+				"a branch off the run's own branch, which a run in place does not have, so belay could not make any "+
+				"candidate's workspace.",
+			"set fanout.isolator to \"auto\" or \"dircopy\" in belay.yaml; a run not yet started in a git "+
+				"repository can instead set output.mode to \"auto\" or \"branch\"",
+		)
+	}
 }
 
 // isolatorName is the isolator this plan would give a fanout candidate, with
@@ -224,13 +265,13 @@ func (p *runPlan) isolatorName() config.IsolatorName {
 func (p *runPlan) warnAboutUncommittedWork(ctx context.Context, repo *git.Repo) {
 	dirty, err := repo.Status(ctx, p.workspace)
 	if err != nil {
-		p.warn("belay could not check whether %s has uncommitted changes: %v", p.workspace, err)
+		p.warnAs(outputKey, "belay could not check whether %s has uncommitted changes: %v", p.workspace, err)
 		return
 	}
 	if len(dirty) == 0 {
 		return
 	}
-	p.warn("%s has %d uncommitted change(s), starting with %s. A branch run starts from the commit %s, "+
+	p.warnAs(outputKey, "%s has %d uncommitted change(s), starting with %s. A branch run starts from the commit %s, "+
 		"so they are not part of this run and belay will not touch them.",
 		p.workspace, len(dirty), dirty[0], shortCommit(p.output.Base))
 }

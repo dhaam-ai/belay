@@ -249,6 +249,11 @@ type Spec struct {
 	// Deviations lists every way the fork's inputs differ from what the visit
 	// was given. Empty, never nil, when there are none.
 	Deviations []string
+	// Config is the configuration the fork runs under: the request's, with
+	// one exception Prepare makes itself (see noteGiveUp), and records in
+	// Deviations. The caller dispatches the fork under it, and Create writes
+	// it into the fork's manifest.
+	Config config.Config
 
 	request Request
 	// plan is the plan to give the fork, or nil when the visit had none or it
@@ -309,6 +314,7 @@ func Prepare(ctx context.Context, req Request) (*Spec, error) {
 		Source: man, Visit: visit, Visits: total, Snapshot: snap, Tree: req.Tree,
 		Inherited: inherited, InheritedUSD: usd, InheritedEstimated: estimated,
 		Deviations: []string{},
+		Config:     req.Config,
 		request:    req,
 	}
 	if err := spec.checkFiles(ctx); err != nil {
@@ -321,7 +327,38 @@ func Prepare(ctx context.Context, req Request) (*Spec, error) {
 	spec.noteConversation()
 	spec.noteShape()
 	spec.noteSettings()
+	// After noteSettings, which compares the request's configuration with
+	// the source's: the round given here is said once, in its own words.
+	spec.noteGiveUp()
 	return spec, nil
+}
+
+// noteGiveUp gives a fork of a fix visit that had used every round of its
+// loop one more round, and says so.
+//
+// The fix node gives up, without calling the agent, once the blackboard's
+// Fix.Attempts reaches graph.give_up. The visit a fix loop gave up on was
+// given a blackboard with every round used, and it is the visit a fork
+// re-runs by default, the last. Forked as it was, it would give up again:
+// nothing is called, and --model, which is why a person forks a fix that
+// gave up, changes nothing. Raising graph.give_up in belay.yaml would get
+// the round, at the price of changing the files a fork checks, so the fork
+// would refuse to run until told --current-files. So the fork runs under
+// graph.give_up one above the rounds used -- one more, not the file's whole
+// allowance again -- and the difference is listed with the others, before
+// anything is spent.
+//
+// A visit with rounds left is forked under the configuration it was given:
+// it never reaches the cap, and a raised one would be a difference with no
+// reason.
+func (s *Spec) noteGiveUp() {
+	used := s.Snapshot.State.Fix.Attempts
+	if s.Visit.Node != graph.NodeFix || used < s.Config.Graph.GiveUp {
+		return
+	}
+	s.Config.Graph.GiveUp = used + 1
+	s.note("%s found every round of the fix loop used (%d), so it gave up without calling the agent; the fork "+
+		"gives it one more: graph.give_up is %d for the fork", s.label(), used, s.Config.Graph.GiveUp)
 }
 
 // label names the visit the way `belay timeline` does: "fix #2".

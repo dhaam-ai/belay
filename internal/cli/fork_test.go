@@ -7,9 +7,11 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io/fs"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -22,6 +24,7 @@ import (
 	"github.com/dhaam-ai/belay/internal/nodes/approve"
 	"github.com/dhaam-ai/belay/internal/state"
 	"github.com/dhaam-ai/belay/pkg/belay"
+	"github.com/dhaam-ai/belay/pkg/belay/belaytest"
 )
 
 // TestResolveAppliesAnOverrideBeforeItResolvesAnything: a command that
@@ -55,6 +58,39 @@ func TestResolveAppliesAnOverrideBeforeItResolvesAnything(t *testing.T) {
 	}})
 	if err == nil || !strings.Contains(err.Error(), "agent.models") {
 		t.Errorf("resolve with an override belay.yaml could not hold = %v, want the configuration refused", err)
+	}
+}
+
+// TestAForkIsASingleRunWhateverBelayYamlSaysAboutFanout: a fork re-runs one
+// node of the single-run graph, so it turns fanout off as it turns branch
+// output off. With fanout.enabled left on, the fork's graph was the fanout
+// graph -- plan, approve, fanout, join -- and forking test failed the new
+// run with "unknown node". The fork resolves no fanout pin, its registry
+// holds every node a fork can re-run and no fanout, and a review mode only a
+// fanout refuses is not refused.
+func TestAForkIsASingleRunWhateverBelayYamlSaysAboutFanout(t *testing.T) {
+	ws := goWorkspace(t)
+	writeConfig(t, ws, "version: 1\nfanout:\n  enabled: true\n  candidates: 3\n")
+	req := forkRequest{runID: "20260902T000000Z-f0f0f0f0f0f0", node: graph.NodeTest}
+
+	plan, err := resolve(resolveRequest{workspace: ws, logger: quietLogger(), override: req.configure})
+	if err != nil {
+		t.Fatalf("resolve: %v", err)
+	}
+	if plan.fanout != nil {
+		t.Errorf("the fork's plan fans out into %d candidates; a fork is a single run", plan.fanout.Candidates)
+	}
+	if plan.registry == nil {
+		t.Fatalf("no registry built; blockers: %s", blockerText(plan))
+	}
+	names := plan.registry.Names()
+	for _, node := range []string{graph.NodePlan, graph.NodeCode, graph.NodeWrite, graph.NodeTest, graph.NodeFix, graph.NodeReview} {
+		if !slices.Contains(names, node) {
+			t.Errorf("the fork's registry %v has no %s; forking it would fail the fork on an unknown node", names, node)
+		}
+	}
+	if slices.Contains(names, graph.NodeFanout) || slices.Contains(plan.route, graph.NodeFanout) {
+		t.Errorf("the fork's registry %v or route %v has the fanout", names, plan.route)
 	}
 }
 
@@ -203,6 +239,13 @@ func forkScript() (*graph.Registry, map[string]*scriptedNode) {
 func forkSource(t *testing.T) (ws, runID string) {
 	t.Helper()
 	ws = goWorkspace(t)
+	return ws, forkSourceIn(t, ws)
+}
+
+// forkSourceIn is forkSource in a workspace the caller made, and returns the
+// run's id.
+func forkSourceIn(t *testing.T, ws string) string {
+	t.Helper()
 	if err := os.WriteFile(filepath.Join(ws, "main.go"), []byte("package main\n"), 0o600); err != nil {
 		t.Fatalf("write main.go: %v", err)
 	}
@@ -219,7 +262,7 @@ func forkSource(t *testing.T) (ws, runID string) {
 	if out, err := d.Run(context.Background()); err != nil || out.Status != state.RunStatusCompleted {
 		t.Fatalf("recording the source run: %v, %v; want it completed", out.Status, err)
 	}
-	return ws, store.Layout().RunID()
+	return store.Layout().RunID()
 }
 
 // forksIn lists the forks made in ws.
@@ -526,5 +569,125 @@ func TestAForkResumesFromItsCopy(t *testing.T) {
 		if !strings.Contains(stdout, phrase) {
 			t.Errorf("the resume's dry run never says %q:\n%s", phrase, stdout)
 		}
+	}
+}
+
+// TestAForkResumesFromItsCopyWhateverOutputModeSays: the command a fork's
+// report writes out to carry it on is a resume of the fork in its copy, and
+// the copy holds belay.yaml as the checkout had it. With output.mode
+// "branch" there, resolving the copy refused it -- a copy under .belay is not
+// a checkout to branch -- and that refusal outlived the bind to the fork's
+// own pin, which is in place, so belay refused the very command it had just
+// printed. The pin wins: the resume is not refused, says that belay.yaml asks
+// for something this run is not doing, and says where its result goes.
+func TestAForkResumesFromItsCopyWhateverOutputModeSays(t *testing.T) {
+	ws := gitWorkspace(t)
+	writeConfig(t, ws, "version: 1\noutput:\n  mode: in_place\n")
+	id := forkSourceIn(t, ws)
+	writeConfig(t, ws, "version: 1\noutput:\n  mode: branch\n")
+
+	var made bytes.Buffer
+	u := &ui{out: &made, err: &made}
+	req := forkRequest{runID: id, node: graph.NodeTest, currentFiles: true}
+	plan, err := resolve(resolveRequest{workspace: ws, logger: newLogger(u), override: req.configure})
+	if err != nil {
+		t.Fatalf("resolve: %v", err)
+	}
+	plan.registry, _ = forkScript()
+	if err := makeFork(cmdWithContext(), u, plan, req); err != nil {
+		t.Fatalf("makeFork: %v\n%s", err, made.String())
+	}
+	forks := forksIn(t, ws)
+	if len(forks) != 1 {
+		t.Fatalf("forks = %v, want one", forks)
+	}
+	copyDir := filepath.Join(ws, ".belay", "forks", forks[0])
+	printed := "belay --workspace " + shellQuote(evalPath(t, copyDir)) + " resume " + forks[0]
+	if !strings.Contains(made.String(), printed) {
+		t.Fatalf("the fork's report never says %q, so this test is not running the command belay printed:\n%s",
+			printed, made.String())
+	}
+
+	stdout, stderr, err := runCLI(t, "--workspace", evalPath(t, copyDir), "--dry-run", "resume", forks[0])
+	t.Logf("verbatim output:\n%s%s", stdout, stderr)
+	if err != nil {
+		t.Fatalf("the resume the fork printed was refused: %v", err)
+	}
+	for _, phrase := range []string{`output.mode is "branch"`, "carries on in place", "started to edit its workspace in place"} {
+		if !strings.Contains(stdout, phrase) {
+			t.Errorf("the resume's dry run never says %q", phrase)
+		}
+	}
+}
+
+// TestForkingAFixLoopThatGaveUpCallsTheStrongerModel is the README's own fork
+// example, end to end over belay's real graph: a run's fix loop gives up, and
+// the person types `belay fork <run-id> fix --model opus`. That forks the
+// last fix visit -- the one that gave up -- whose blackboard has every round
+// used, so the fix node gave up again without calling anything and --model
+// changed nothing. The fork gets one more round instead, says so before it
+// spends anything, and calls the agent exactly once, with opus.
+func TestForkingAFixLoopThatGaveUpCallsTheStrongerModel(t *testing.T) {
+	ws := goWorkspace(t)
+	writeConfig(t, ws, "version: 1\noutput:\n  mode: in_place\ngraph:\n  approval: false\n  give_up: 2\n")
+	if err := os.WriteFile(filepath.Join(ws, "main.go"), []byte("package main\n"), 0o600); err != nil {
+		t.Fatalf("write main.go: %v", err)
+	}
+	const planText = "## Summary\nAdd an Add helper to main.go.\n\n## Context\nmain.go is the only file.\n\n" +
+		"## Steps\n1. Add `Add(a, b int) int` to main.go.\n\n## Tests\nCover it in main_test.go.\n\n" +
+		"## Risks\nNone.\n\n## Out of scope\nEverything else.\n"
+	failing := &belaytest.FakeRunner{Responses: []belay.TestReport{{Total: 1, Failed: 1,
+		Failures: []belay.TestFailure{{Name: "TestAdd", File: "main_test.go", Line: 3, Message: "Add(2, 2) = 3, want 4"}}}}}
+	passingGate := &belaytest.FakeLinter{Responses: []belay.QualityReport{{Source: "fake", Gate: belay.GatePass,
+		Issues: []belay.Issue{}, Summary: "no issues"}}}
+	repair := func(n int) belay.AgentResponse {
+		return belay.AgentResponse{Text: fmt.Sprintf("Fix attempt %d.", n), SessionID: "sess-1", Usage: belay.Usage{USD: 0.03}}
+	}
+
+	// The source: plan, code, two repairs, and then fix gives up.
+	source, err := resolve(resolveRequest{workspace: ws, logger: quietLogger()})
+	if err != nil {
+		t.Fatalf("resolve: %v", err)
+	}
+	source.agent = &belaytest.FakeAgent{Responses: []belay.AgentResponse{
+		{Text: planText, Usage: belay.Usage{USD: 0.02}},
+		{Text: "Added it.\n\n```changed-files\nmain.go\n```\n", SessionID: "sess-1", Usage: belay.Usage{USD: 0.05}},
+		repair(1), repair(2),
+	}}
+	source.runner, source.linter = failing, passingGate
+	store, err := createRun(t.Context(), source, runSpec{Workspace: ws, RunID: "20260101T000000Z-6a7e0b000000", Goal: "add Add"})
+	if err != nil {
+		t.Fatalf("createRun: %v", err)
+	}
+	gaveUp, err := dispatchOnce(t.Context(), source, store, false)
+	if err != nil || gaveUp.outcome.Status != state.RunStatusFailed || gaveUp.outcome.Node != graph.NodeFix {
+		t.Fatalf("the source = %v at %q, %v (%q); want this test's premise, a run whose fix loop gave up",
+			gaveUp.outcome.Status, gaveUp.outcome.Node, err, gaveUp.outcome.Note)
+	}
+
+	// The fork, as the README types it.
+	var out bytes.Buffer
+	u := &ui{out: &out, err: &out}
+	req := forkRequest{runID: store.Layout().RunID(), node: graph.NodeFix, model: "opus"}
+	plan, err := resolve(resolveRequest{workspace: ws, logger: newLogger(u), override: req.configure})
+	if err != nil {
+		t.Fatalf("resolve: %v", err)
+	}
+	stronger := &belaytest.FakeAgent{Responses: []belay.AgentResponse{repair(3)}}
+	plan.agent, plan.runner, plan.linter = stronger, failing, passingGate
+	err = makeFork(cmdWithContext(), u, plan, req)
+	t.Logf("verbatim output:\n%s", out.String())
+	if err != nil {
+		t.Fatalf("makeFork: %v", err)
+	}
+	calls := stronger.Calls()
+	if len(calls) != 1 {
+		t.Fatalf("the fork called the agent %d times, want once, for the fix it re-ran", len(calls))
+	}
+	if calls[0].Model != "opus" {
+		t.Errorf("the fork's fix was sent model %q, want opus", calls[0].Model)
+	}
+	if !strings.Contains(out.String(), "graph.give_up") {
+		t.Errorf("the fork never says it gave the fix loop another round")
 	}
 }
