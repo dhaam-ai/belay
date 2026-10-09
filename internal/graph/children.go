@@ -14,6 +14,7 @@ import (
 	"sync"
 
 	"github.com/dhaam-ai/belay/internal/config"
+	"github.com/dhaam-ai/belay/internal/filerecord"
 	"github.com/dhaam-ai/belay/internal/journal"
 	"github.com/dhaam-ai/belay/internal/state"
 	"github.com/dhaam-ai/belay/pkg/belay"
@@ -498,6 +499,22 @@ func (r *candidateRunner) makeWorkspace(ctx context.Context, c *candidateClaim, 
 		return false
 	}
 
+	// A directory copy has no git to ask what the candidate changed, so the
+	// copy itself is recorded before the candidate's agent runs. It is taken
+	// before the workspace is recorded as made: a crash in between leaves a
+	// claim that is reclaimed and made again on resume, with a new record,
+	// never a candidate judged against no record at all.
+	if pin := c.man.Changes; pin != nil && pin.From == state.ChangesFromRecord {
+		rec, err := filerecord.Take(ctx, ws.Dir, nil)
+		if err == nil {
+			err = rec.Save(c.layout.FileRecordPath())
+		}
+		if err != nil {
+			out.Err = fmt.Errorf("graph: record the workspace of candidate %q: %w", c.spec.ID, err)
+			return false
+		}
+	}
+
 	c.man.Workspace = ws.Dir
 	block := *c.man.Candidate
 	block.Provision, block.Workspace = state.ProvisionOK, ws
@@ -578,6 +595,8 @@ func (r *candidateRunner) resume(ctx context.Context, c *candidateClaim, out *Ca
 //     continue past;
 //   - Isolator and VCS are nil: a candidate never fans out again, and it
 //     commits nothing — promote commits the winner's work;
+//   - Changes is the parent's factory, so a candidate's write node and
+//     policy gate read what its own workspace changed;
 //   - the agent, runner, linter and reviewer are shared, which pkg/belay
 //     already requires to be safe under fanout, with CandidateAgent the one
 //     hook for a backend that needs a per-candidate view.
@@ -602,6 +621,9 @@ func (r *candidateRunner) childOptions(c *candidateClaim, store *state.Store) Op
 		Runner:        p.runner,
 		Linter:        p.linter,
 		Reviewer:      p.reviewer,
+		// The parent's factory, called with this candidate's own manifest
+		// and Layout, so the candidate reads its own workspace's change.
+		Changes: p.changes,
 	}
 }
 
@@ -898,6 +920,14 @@ func (r *candidateRunner) claimFresh(
 	// branch run is immune because its candidates start from a commit.
 	if parent.Policy != nil {
 		man.SetPolicy(*parent.Policy)
+	}
+	// Where the candidate's change is read from, decided by the parent when
+	// it was created for exactly this: a fanout run's own nodes never change
+	// its workspace, so the pin describes the workspaces its candidates get.
+	// A candidate on a git worktree is measured from the parent's base
+	// commit; one in a directory copy, from the record makeWorkspace takes.
+	if parent.Changes != nil {
+		man.SetChanges(*parent.Changes)
 	}
 	if err := state.SaveManifest(layout.ManifestPath(), man); err != nil {
 		return nil, fmt.Errorf("graph: write the manifest of candidate %q: %w", spec.ID, err)

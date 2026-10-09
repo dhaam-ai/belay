@@ -344,3 +344,22 @@ func hashFile(root *os.Root, rel string) (string, error) {
 func clean(rel string) string {
 	return strings.TrimPrefix(path.Clean(filepath.ToSlash(rel)), "./")
 }
+
+// Source answers what a workspace changed against the record saved at Path.
+// It is the graph.ChangeSource for a run whose change is read from a file
+// record, and it loads the record on every call, so a resumed run judges
+// against the one taken when the run began.
+type Source struct {
+	// Path is where Save wrote the record.
+	Path string
+}
+
+// Changes returns what changed in the workspace at dir since the record was
+// taken. A record that cannot be read is an error, never "nothing changed".
+func (s Source) Changes(ctx context.Context, dir string) ([]string, error) {
+	rec, err := Load(s.Path)
+	if err != nil {
+		return nil, err
+	}
+	return rec.Changed(ctx, dir)
+}
