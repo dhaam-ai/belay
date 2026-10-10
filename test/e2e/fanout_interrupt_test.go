@@ -14,6 +14,8 @@ import (
 	"sync"
 	"testing"
 
+	"github.com/dhaam-ai/belay/internal/budget"
+	"github.com/dhaam-ai/belay/internal/config"
 	"github.com/dhaam-ai/belay/internal/graph"
 	"github.com/dhaam-ai/belay/internal/isolate/dircopy"
 	"github.com/dhaam-ai/belay/internal/journal"
@@ -283,4 +285,61 @@ func TestFanoutCandidatesAtTheirEnvelopesStopTheRunAtTheCeiling(t *testing.T) {
 	if got := h.state().Winner; got != fanoutWinner {
 		t.Errorf("Winner = %q, want %q", got, fanoutWinner)
 	}
+}
+
+// TestFanoutResumedWithNoCeilingPausesAndThenConverges: a fanout's shape is
+// pinned and budget.max_usd is read live, so belay.yaml can drop the ceiling
+// the fanout divides after the run began. A run Ctrl-C stopped part-way
+// through its candidates, resumed under budget.max_usd 0, ended failed for
+// good, with every candidate it had paid for out of reach (the final
+// review's finding 5): the fanout's refusal was not one of the dispatcher's
+// limits. It pauses at exit 3 now, naming budget.max_usd, runs no candidate,
+// and a resume with the ceiling back converges on what a run nothing
+// interrupted settles.
+//
+// `belay resume` refuses such a run before it starts (resumePreflight); this
+// is the safety net underneath, through belay's real graph, for every other
+// way a run is driven.
+func TestFanoutResumedWithNoCeilingPausesAndThenConverges(t *testing.T) {
+	control := fanoutControl(t)
+
+	h := newFanoutRun(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	iso := &fanoutCancelAfterCreate{Isolator: h.fanoutDircopy(), target: "cand-03", cancel: cancel}
+	if out, err := h.isolatedDispatcher(newFanoutWorld(), iso, 1).Run(ctx); out.Status != state.RunStatusPaused {
+		t.Fatalf("the interrupted dispatch: status %v, error %v, want paused", out.Status, err)
+	}
+
+	// belay.yaml as it now loads: no dollar ceiling, which the loader takes
+	// only with on_exceed warn, and fanout.enabled off, which it requires
+	// without a ceiling. The run's pin keeps the fanout.
+	pinned := h.cfg
+	h.cfg.Budget.MaxUSD = 0
+	h.cfg.Budget.OnExceed = config.OnExceedWarn
+	h.cfg.Fanout.Enabled = false
+	world := newFanoutWorld()
+	out, err := h.isolatedDispatcher(world, h.fanoutDircopy(), 1).Resume(context.Background())
+	if out.Status != state.RunStatusPaused || out.ExitCode != graph.ExitAborted {
+		t.Fatalf("resumed with no ceiling: Outcome = {%v, exit %d} (error %v, note %q), want {paused, exit %d}",
+			out.Status, out.ExitCode, err, out.Note, graph.ExitAborted)
+	}
+	if !errors.Is(err, budget.ErrNoCeiling) {
+		t.Errorf("Resume() error = %v, want one wrapping budget.ErrNoCeiling", err)
+	}
+	if !strings.Contains(out.Note, "budget.max_usd") {
+		t.Errorf("Outcome.Note = %q, want it to name budget.max_usd", out.Note)
+	}
+	for _, id := range fanoutIDs {
+		if n := world.called(id); n != 0 {
+			t.Errorf("%s's agent was called %d time(s) with no ceiling to hold it to", id, n)
+		}
+	}
+	recs := fanoutRecords(t, h.layout.JournalPath())
+	if last := recs[len(recs)-1]; last.Event != journal.EventRunPaused {
+		t.Fatalf("the run's journal ends with %v (%q), want run_paused: the run must stay resumable", last.Event, last.Note)
+	}
+
+	h.cfg = pinned
+	fanoutResumeConverges(t, h, control)
 }
