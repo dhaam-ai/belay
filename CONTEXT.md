@@ -20,8 +20,8 @@ The fixed set of nodes a run moves through and the edges that route between them
 _Avoid_: pipeline, workflow, DAG (the graph has cycles: test → fix → test)
 
 **Node**:
-One named step of the graph — plan, approve, code, write, test, fix, review, fanout
-or join — that reads the blackboard and returns a result.
+One named step of the graph — plan, approve, code, write, policy, test, fix,
+review, promote, fanout or join — that reads the blackboard and returns a result.
 _Avoid_: phase, stage, step (in code; "step" is fine in prose), task
 
 **Dispatcher**:
@@ -81,7 +81,8 @@ run started with)
 A new run, with its own ID, that re-runs one node of an existing run from the
 blackboard as it stood before that node, and never writes to the source run. It
 works in a copy of the workspace under `.belay/forks/<fork-id>`, runs that one node
-and pauses; `belay fork <run-id> <node>` makes one (ADR-0017). Unrelated to forking
+and pauses, or finishes when that node was the last; `belay fork <run-id> <node>`
+makes one (ADR-0017). Unrelated to forking
 belay's own repository, which is what "fork" means in ADR-0009.
 _Avoid_: replay, node re-run
 
@@ -103,8 +104,8 @@ the run completes, so it survives as a record beside the code it produced.
 _Avoid_: saved plan, exported plan
 
 **Quality gate**:
-The review node's pass/fail judgement on the run's change, from linters, SonarQube
-or an AI reviewer, expressed as one quality report.
+The review node's pass/fail judgement on the run's change, from a linter or a
+SonarQube scan, expressed as one quality report.
 _Avoid_: lint check, code review
 
 **Fix loop**:
@@ -166,8 +167,7 @@ isolator and described entirely by plain data so it can be destroyed after a res
 _Avoid_: sandbox, checkout, worktree (a worktree is one kind of workspace)
 
 **Isolator**:
-Whatever creates and destroys workspaces — a directory copy, a git worktree or a
-container.
+Whatever creates and destroys workspaces — a directory copy or a git worktree.
 _Avoid_: sandbox, provisioner
 
 ## Agents and cost
