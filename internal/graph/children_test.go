@@ -2063,6 +2063,36 @@ func TestAResumeKillsACandidatesOrphanedProcessBeforeItsNodeRunsAgain(t *testing
 	}
 }
 
+// lostToss is a context whose cancellation the pool's feeder never sees.
+//
+// The pool's feeder stops on ctx.Done() and a worker checks ctx.Err() before
+// it admits the candidate it was handed, because the two are ready at the
+// same moment when a worker is between candidates and the runtime picks one
+// at random. A real context cannot make that pick come out the same way
+// every time, so this one models the case the worker's check exists for: the
+// feeder losing the toss. Its Done never fires, so the feeder always hands
+// the next candidate over; its Err reports the cancellation once cancel has
+// been called, as the worker sees it. That breaks the context contract on
+// purpose and only here, where the guard is the thing under test: nothing
+// derived from it would ever be cancelled.
+type lostToss struct {
+	context.Context
+	cancelled atomic.Bool
+}
+
+func newLostToss() *lostToss { return &lostToss{Context: context.Background()} }
+
+func (c *lostToss) cancel() { c.cancelled.Store(true) }
+
+func (*lostToss) Done() <-chan struct{} { return nil }
+
+func (c *lostToss) Err() error {
+	if c.cancelled.Load() {
+		return context.Canceled
+	}
+	return nil
+}
+
 // TestACancelledPoolAdmitsNoFurtherCandidate: a candidate that has not been
 // admitted must stay claimed and untouched, because that is exactly what a
 // resume adopts. Admitting one after the cancellation would copy a whole
@@ -2071,20 +2101,22 @@ func TestAResumeKillsACandidatesOrphanedProcessBeforeItsNodeRunsAgain(t *testing
 //
 // The window is the moment a worker is between candidates: the goroutine
 // feeding the pool and the cancellation are both ready, and which one the
-// runtime picks is a coin toss. So the cancellation is thrown from inside
-// the first candidate, when a worker is about to come back for the next one,
-// and there are enough candidates behind it that the toss cannot come up
-// heads every time.
+// runtime picks is a coin toss. With a real context this test could not
+// fail: the cancellation lands inside cand-01, long before its worker comes
+// back, so the feeder has always seen it and stopped (removing the worker's
+// check passed it 30 times in 30, as the mutation review found). lostToss
+// makes the toss come up the other way every time, so every candidate after
+// cand-01 is handed to a worker after the cancellation, and only the
+// worker's own check keeps it out.
 func TestACancelledPoolAdmitsNoFurtherCandidate(t *testing.T) {
 	h := newRun(t, budgetCfg(9.00, 0), "admit nothing more once it is stopping")
 	iso := newFakeIsolator(h.layout.CandidatesDir())
 	specs := poolSpecs(h, 9)
 
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	ctx := newLostToss()
 	code := newCandidateNode(graph.NodeCode, func(_ context.Context, id string, _ *graph.RunContext) (graph.Result, error) {
 		if id == "cand-01" {
-			cancel()
+			ctx.cancel()
 		}
 		return Result{Next: graph.End, Status: journal.StatusOK, Note: id}, nil
 	})
