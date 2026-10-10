@@ -454,6 +454,58 @@ func TestForkRunsOneNodeInItsCopy(t *testing.T) {
 	}
 }
 
+// TestForkNeverOpensItsSourceJournal: belay fork reads its source run and
+// never writes to it, and the journal is where that is easiest to break
+// without noticing. journal.Open heals a torn final line by rewriting the
+// file, so opening the source's journal to read it is a write -- and on a
+// source with a clean journal, which is every other fork test's, the heal
+// changes nothing and the write cannot be seen. This source's journal ends in
+// a record cut off as it was written, which is a run that may still have
+// been running: the fork is refused for it, and the journal, like the rest
+// of the source, is byte for byte what it was.
+func TestForkNeverOpensItsSourceJournal(t *testing.T) {
+	ws, id := forkSource(t)
+	source, err := state.NewLayout(ws, id)
+	if err != nil {
+		t.Fatalf("NewLayout: %v", err)
+	}
+	runDir := source.RunDir()
+	f, err := os.OpenFile(source.JournalPath(), os.O_APPEND|os.O_WRONLY, 0o600) //nolint:gosec // G304: the test's own run
+	if err != nil {
+		t.Fatalf("open the source journal: %v", err)
+	}
+	if _, err := f.WriteString(`{"seq":99,"event":"node_st`); err != nil {
+		t.Fatalf("tear the source journal: %v", err)
+	}
+	if err := f.Close(); err != nil {
+		t.Fatalf("close the source journal: %v", err)
+	}
+	before := treeSums(t, runDir)
+
+	var out bytes.Buffer
+	u := &ui{out: &out, err: &out}
+	req := forkRequest{runID: id, node: graph.NodeTest}
+	plan, err := resolve(resolveRequest{workspace: ws, logger: newLogger(u), override: req.configure})
+	if err != nil {
+		t.Fatalf("resolve: %v", err)
+	}
+	plan.registry, _ = forkScript()
+	err = makeFork(cmdWithContext(), u, plan, req)
+	said := out.String()
+	if err == nil {
+		t.Errorf("belay fork forked a run whose journal ends in a record cut off as it was written:\n%s", said)
+	}
+	if !strings.Contains(said, "cut off") {
+		t.Errorf("the refusal does not say the journal was cut off:\n%s", said)
+	}
+	if got := forksIn(t, ws); len(got) != 0 {
+		t.Errorf("a refused fork made forks %v", got)
+	}
+	if diff := cmp.Diff(before, treeSums(t, runDir)); diff != "" {
+		t.Errorf("the source run changed (-before +after):\n%s", diff)
+	}
+}
+
 // evalPath resolves path's symbolic links, which on macOS turn /var into
 // /private/var: dircopy names its copies by their resolved path.
 func evalPath(t *testing.T, path string) string {
