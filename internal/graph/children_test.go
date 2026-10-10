@@ -1640,6 +1640,59 @@ func TestOneCancelLeavesEveryCandidateResumable(t *testing.T) {
 	}
 }
 
+// TestACandidatePausesOnCancelWhateverItsParentWasGiven: childOptions turns
+// PauseOnCancel on for every candidate run and does not consult the
+// parent's own setting, because nothing but the parent's fanout ever resumes
+// a candidate, and one ended as aborted could never be continued.
+// TestOneCancelLeavesEveryCandidateResumable drives a parent that pauses on
+// cancel too, so a candidate that inherited its parent's setting passed it;
+// this is the parent that does not.
+func TestACandidatePausesOnCancelWhateverItsParentWasGiven(t *testing.T) {
+	h := newRun(t, budgetCfg(5.00, 0), "one Ctrl-C, a parent that does not pause")
+	iso := reclaimingIsolator{newFakeIsolator(h.layout.CandidatesDir())}
+	specs := poolSpecs(h, 2)
+
+	arrived := make(chan string, len(specs))
+	code := newCandidateNode(graph.NodeCode, func(ctx context.Context, id string, _ *graph.RunContext) (graph.Result, error) {
+		arrived <- id
+		<-ctx.Done()
+		return Result{}, ctx.Err()
+	})
+
+	ctx, cancel := context.WithCancel(context.Background())
+	stopped := make(chan struct{})
+	go func() {
+		defer close(stopped)
+		_, _ = h.poolDispatcher(t, pool{
+			registry: candidateRegistry(t, code), isolator: iso, concurrency: 2, pauseOnCancel: false,
+		}, &runsCandidates{specs: specs}).Run(ctx)
+	}()
+	for range specs {
+		select {
+		case <-arrived:
+		case <-time.After(10 * time.Second):
+			t.Fatal("the candidates never reached their node")
+		}
+	}
+	cancel()
+	select {
+	case <-stopped:
+	case <-time.After(10 * time.Second):
+		t.Fatal("the interrupted run never returned")
+	}
+
+	for _, spec := range specs {
+		recs := candidateRecords(t, h, spec.ID)
+		if len(recs) < 2 {
+			t.Fatalf("%s has %d journal records, want its interrupted attempt and how its run ended", spec.ID, len(recs))
+		}
+		if last := recs[len(recs)-1]; last.Event != journal.EventRunPaused {
+			t.Errorf("%s journal ends with %v, want run_paused: a candidate ended as aborted can never be resumed",
+				spec.ID, last.Event)
+		}
+	}
+}
+
 // TestAnAdoptedEnvelopeIsNeverLoweredAndMayRise: an envelope is a
 // reservation, and part of it may already be spent, so taking it back
 // returns no money. It may rise, because the settled rule for every limit
