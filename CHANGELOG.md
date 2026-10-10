@@ -10,81 +10,102 @@ that only `pkg/belay` carries a compatibility promise. Everything under
 
 ### Added
 
-- **Best-of-N works: a run with `fanout.enabled` runs its candidates and
-  keeps the best.** Until now `fanout.enabled` changed nothing a run did —
-  nothing in the graph led to the fanout step, and that step only prepared
-  workspaces. A run that fans out now goes plan → approve → fanout → join:
-  once the plan is approved, each of `fanout.candidates` candidates codes,
-  tests, repairs and is reviewed in a workspace of its own, and `join` keeps
-  the one `fanout.select` prefers among those whose tests passed. A branch
-  run merges the winner onto its branch; an in-place run leaves it in its
-  workspace, and the run's last lines name the directory to copy it back
-  from. Each candidate is a run of its own, with its own journal, plan,
+- **Best-of-N works: a run with `fanout.enabled` runs its candidates and keeps
+  the best.** Until now `fanout.enabled` changed nothing a run did — nothing
+  in the graph led to the fanout step, and that step only prepared workspaces.
+  A run that fans out now goes plan → approve → fanout → join, and then
+  promote when it works on a branch: once the plan is approved, each of
+  `fanout.candidates` candidates codes, tests, repairs and is reviewed in a
+  workspace of its own, and `join` keeps the one `fanout.select` prefers among
+  those whose tests passed, whose own run completed and that broke no `policy`
+  rule. A branch run merges the winner onto its branch; an in-place run leaves
+  it in its workspace, and the run's last lines name the directory to copy it
+  back from. Each candidate is a run of its own, with its own journal, plan,
   blackboard and spend, under `.belay/runs/<run-id>/candidate-runs/`, so a
   crash or a Ctrl-C mid-fanout resumes like any run: finished candidates are
-  kept, and only the interrupted ones run again. The new
-  `fanout.concurrency` (default 3) says how many candidates run at once; it
-  is read again on every resume, so lowering it backs off a rate limit.
-  `budget.max_usd` is divided between the candidates before any of them
-  starts, and `belay run --dry-run` shows each one's share, the route each
-  candidate walks, how the winner is chosen, and how far past the ceiling a
-  fanout can end: up to one step per candidate, because a candidate is
-  checked before a step and not during one. `fanout.enabled`,
-  `fanout.candidates` and `fanout.select` are recorded when a run starts and
-  a resume keeps them, warning if `belay.yaml` has changed since. Several
-  candidates running at once are told apart on screen by a `[cand-02]`
-  prefix. `fanout.enabled` now requires `budget.max_usd` above zero, since
-  there is otherwise no ceiling to divide, and is refused with
-  `review.mode: sonar` or `ai`, whose SonarQube projects would be shared by
-  every run's candidates; both configurations used to load and do nothing.
-  A fanout leaves N workspaces and N candidate-run directories behind, and
+  kept, and only the interrupted ones run again. The new `fanout.concurrency`
+  (default 3) says how many candidates run at once; it is read again on every
+  resume, so lowering it backs off a rate limit. `budget.max_usd` is divided
+  between the candidates before any of them starts, and `belay run --dry-run`
+  shows each one's share, the route each candidate walks, how the winner is
+  chosen, and how far past the ceiling a fanout can end: up to one step per
+  candidate, because a candidate is checked before a step and not during one.
+  A candidate that meets its share, `graph.max_steps` or `graph.node_timeout`
+  pauses the run like any limit, at exit 3, naming the candidate, why its run
+  stopped and the setting to raise; a fault a resume could fix, such as a full
+  disk or a git lock, pauses the fanout with the fault in its note; and the
+  run's spend in `belay runs` and the closing report includes what its
+  candidates have spent, at every pause. `fanout.enabled`, `fanout.candidates`
+  and `fanout.select` are recorded when a run starts and a resume keeps them,
+  warning if `belay.yaml` has changed since. Several candidates running at
+  once are told apart on screen by a `[cand-02]` prefix. `fanout.enabled` now
+  requires `budget.max_usd` above zero, since there is otherwise no ceiling to
+  divide; it is refused with `review.mode: sonar` or `ai`, whose SonarQube
+  projects would be shared by every run's candidates, and refused before
+  anything is spent when `fanout.isolator` cannot serve the run's output
+  (`dircopy` on a branch, `worktree` in place). Every fanout leaves its N
+  candidate-run directories behind, and one that edits in place its N
+  workspaces too (a branch run's promote removes its candidates' worktrees);
   belay has no command to remove them yet. ADR-0019 records the decision.
 - **`belay fork` re-runs one step of a run without paying again for the steps
   before it.** `belay fork <run-id> fix` makes a new run, with an id of its
   own, in a copy of your repository under `.belay/forks/`, from the state the
-  run was in just before that step: it inherits everything before it, runs
-  the one step, and pauses. Give a fix loop that gave up another round with a
-  stronger model (`--model opus`, for plan, code and fix), or re-run a review
-  after changing a setting, and pay for that step alone. `--visit 2` picks
-  the second time the step ran, numbered the way `belay timeline` numbers
-  them; without it belay takes the last. The original run is only ever read
-  — not a byte of its journal, state or files changes — so both outcomes are
-  there to compare. Carry the fork on with
-  `belay --workspace .belay/forks/<fork-id> resume <fork-id>`, which belay
-  writes out, and `belay runs` names every fork with the command that lists
-  it. Before it spends anything, belay checks what it cannot put back: if
-  your files have changed since the step ran it stops and says so, because
-  that would be a different experiment, and `--current-files` re-runs the
-  step on them as they are now; it names every setting that differs from
-  the original, with both values; and the agent's conversation never carries
-  over, since the original's went on past that step. The fork's spending
-  starts at zero, and what its inherited history cost is recorded beside it
-  rather than counted twice. `fanout`, `join` and `promote` cannot be forked,
-  nor can a run recorded by a belay that kept no snapshots. `--dry-run`
-  describes the fork exactly and creates nothing. ADR-0017 records the
-  decision.
-
-- **Line up goals and let belay work through them while you are away.**
-  `belay queue add "<goal>"` adds a goal, and `belay queue start` works
-  through the queue one goal at a time, each in a copy of the workspace made
-  when belay reaches it, under `.belay/queue/work/`, so your checkout is never
-  edited. Before it spends anything, a start says how many goals it will run,
-  the most each can spend (`budget.max_usd`) and the product; it refuses
-  `budget.on_exceed: warn`, since nobody is watching a queue to stop an
-  overrun. A goal whose plan stops for review is parked, and the queue moves
-  on to the next: `belay queue approve <goal>` releases it, and the next start
-  carries it on. Only a goal you add with `--no-approval` skips the gate;
-  belay never turns it off by itself. Ctrl-C pauses the goal in progress, and
-  a crash, a kill or a reboot loses nothing: `belay queue start` again picks
-  up the goal it had in hand, in the same run, and then the rest. The queue
-  records each goal's claim before it makes anything for it, so no crash can
-  run a goal twice. `belay queue` on its own is the morning report: what the
-  last start did, what it spent, and the exact command for each goal that
-  needs you; `belay queue list --json` is the documented shape for scripts,
-  and `belay queue rm` takes back a goal nothing has started. Taking a
-  finished goal's change from its copy is up to you. `belay runs` still
-  prints the JSON it always did, and under its table names the runs that
-  live in the queue's copies. ADR-0017 records the decision.
+  run was in just before that step: it inherits everything before it, runs the
+  one step, and pauses before the next, or finishes when the step was the
+  run's last. Give a fix loop that gave up another round with a stronger model
+  (`--model opus`, for plan, code and fix), or re-run a review after changing
+  a setting, and pay for that step alone. A fork of a fix that had used every
+  round of `graph.give_up` gets one more, since as it stood it would give up
+  again without calling the model. `--visit 2` picks the second time the step
+  ran, numbered the way `belay timeline` numbers them; without it belay takes
+  the last. The original run is only ever read — not a byte of its journal,
+  state or files changes — so both outcomes are there to compare. Carry the
+  fork on with `belay --workspace .belay/forks/<fork-id> resume <fork-id>`,
+  which belay writes out, and `belay runs` names every fork with the command
+  that lists it. Before it spends anything, belay checks what it cannot put
+  back: if your files have changed since the step ran it stops and says so,
+  because that would be a different experiment, and `--current-files` re-runs
+  the step on them as they are now; it names every setting that differs from
+  the original, with both values, the extra fix round among them; and the
+  agent's conversation never carries over, since the original's went on past
+  that step. The fork's spending starts at zero, and what its inherited
+  history cost is recorded beside it rather than counted twice. A fork is
+  always a single run that edits its copy in place and files no plan, whatever
+  `belay.yaml` says; it is held to its source's policy and judged on what its
+  agent reports, because its copy cannot say where its source's change began.
+  The copy leaves out `.git`, dependency directories such as `node_modules`
+  and `vendor`, and any symbolic link that leads outside it, through however
+  many links; a Ctrl-C while it is being made removes it. `fanout`, `join` and
+  `promote` cannot be forked, nor can a run recorded by a belay that kept no
+  snapshots. `--dry-run` describes the fork exactly and creates nothing.
+  ADR-0017 records the decision.
+- **Line up goals and let belay work through them while you are away.** `belay
+  queue add "<goal>"` adds a goal, and `belay queue start` works through the
+  queue one goal at a time, each in a copy of the workspace made when belay
+  reaches it, under `.belay/queue/work/`, so your checkout is never edited.
+  The copy is made like a fork's, without `.git` or dependency directories,
+  and every goal runs in place in it. Before it spends anything, a start says
+  how many goals it will run, the most each can spend (`budget.max_usd`) and
+  the product; it refuses `budget.on_exceed: warn`, since nobody is watching a
+  queue to stop an overrun. A goal whose plan stops for review is parked, and
+  the queue moves on to the next: `belay queue approve <goal>` releases it,
+  and the next start carries it on. Only a goal you add with `--no-approval`
+  skips the gate: the queue does not read `graph.approval`, so turning it off
+  in a `belay.yaml`, or in your own `config.yaml`, never takes a queued goal
+  past it. Ctrl-C pauses the goal in progress, and a crash, a kill or a reboot
+  loses nothing: `belay queue start` again picks up the goal it had in hand,
+  in the same run, and then the rest. The queue records each goal's claim
+  before it makes anything for it, so no crash can run a goal twice. `belay
+  queue` on its own is the morning report: what the last start did, what it
+  spent, and the exact command for each goal that needs you. The reports read
+  each goal's run, so a goal you carried on by hand shows as its run now
+  stands, and a goal whose run fanned out names the winning candidate's
+  workspace, where its change is. `belay queue list --json` prints every goal
+  with its state, run, copy and spend, for scripts, and `belay queue rm` takes
+  back a goal nothing has started. Taking a finished goal's change from its
+  copy is up to you. `belay runs` still prints the JSON it always did, and
+  under its table names the runs that live in the queue's copies. ADR-0017
+  records the decision.
 - **Guardrails a run's change must obey, whatever its tests say.** The new
   `policy` section in `belay.yaml` declares paths a change may not touch
   (`forbidden_paths`), ceilings on its size (`max_changed_files`,
@@ -94,27 +115,45 @@ that only `pkg/belay` carries a compatibility promise. Everything under
   beside the code), and text a changed file may not contain
   (`forbidden_content`). A guarded run gains a `policy` step between `write`
   and `test`, so the change is judged before anything else is spent on it and
-  again on every pass of the fix loop. A forbidden path or an exceeded ceiling
-  ends the run, because a change that touched what it may not touch is not
-  something to ask an agent to repair; the other rules go to the fix loop,
-  which tells the agent what it broke and asks for a repair, bounded by
-  `graph.give_up`. Violations reach you as the same report a linter's findings
-  do, archived per step, and `belay run --dry-run` prints every rule and says
-  which ones would end a run. A rule belay cannot honour — an unusable path
-  glob, a pattern that is not a regular expression — is refused when the
-  configuration loads rather than skipped at the gate: a guardrail that
-  silently does nothing is worse than none, because somebody is relying on it.
-  The rules, and a survey of what your workspace declared, are recorded when
-  the run starts, so `belay resume` holds a run to the rules it began with and
-  warns if `belay.yaml` has changed since — a policy added mid-run has no
-  record of the tree from before the agent ran, and could only fail the run
-  for something it did not do. `max_changed_lines` counts the whole of every
-  file the change touches rather than a diff, because belay keeps no copy of
-  the tree from before; a one-line edit to a 900-line file counts 900.
-  Best-of-N is not a way around a rule: `join` will not promote a candidate
-  whose change broke one. Repositories that declare no policy run exactly as
-  they did. ADR-0014 records the decision, and `docs/config.md` documents
-  every setting.
+  again on every pass of the fix loop. The gate judges what the workspace says
+  changed, not what the agent says it changed: in a git repository, every file
+  git says differs from the run's starting commit, committed, staged, edited,
+  deleted or new, in its true name; in place in a git checkout, less what you
+  had already changed before the run; with no git (including a queued goal's
+  copy and an in-place run's candidates), every file that differs from a
+  record of the workspace taken when the run starts. Files the agent changed
+  and did not report are judged like the rest and named in the gate's verdict,
+  `belay timeline` and the commit, and on a disk that folds case, as macOS's
+  does, rules match without regard to case. A fork, whose copy cannot say
+  where its source's change began, is judged on its agent's report and says
+  so. A forbidden path or an exceeded ceiling ends the run, because a change
+  that touched what it may not touch is not something to ask an agent to
+  repair; the other rules go to the fix loop, which tells the agent what it
+  broke and asks for a repair, bounded by `graph.give_up`. Violations reach
+  you as the same report a linter's findings do, archived per step, and `belay
+  run --dry-run` prints every rule, says which ones would end a run, and says
+  what the gate will judge. Unlike every other setting, policy combines across
+  configuration files to the most restrictive result — lists are joined, each
+  ceiling is the smallest any file sets, and `no_new_dependencies` holds if
+  any file sets it — so a repository's `belay.yaml`, a file the agent can
+  edit, cannot drop the guardrails in your own `~/.config/belay/config.yaml`.
+  A rule belay cannot honour — an unusable path glob, a pattern that is not a
+  regular expression — is refused when the configuration loads rather than
+  skipped at the gate: a guardrail that silently does nothing is worse than
+  none, because somebody is relying on it. The rules, and a survey of what
+  your workspace declared, are recorded when the run starts, so `belay resume`
+  holds a run to the rules it began with and warns if `belay.yaml` has changed
+  since — a policy added mid-run has no record of the tree from before the
+  agent ran, and could only fail the run for something it did not do.
+  `max_changed_lines` counts the whole of every file the change touches rather
+  than a diff; a one-line edit to a 900-line file counts 900. The gate cannot
+  see what the agent writes outside the workspace, a file `.gitignore`
+  excludes in a git checkout, or a name that differs from a pattern only in
+  its Unicode normalisation; `docs/config.md` says what it judges in each kind
+  of run. Best-of-N is not a way around a rule: `join` will not promote a
+  candidate whose change broke one. Repositories that declare no policy run
+  exactly as they did. ADR-0014 records the decision, and `docs/config.md`
+  documents every setting.
 - **`belay timeline` shows what a best-of-N run's candidates did.** A run
   that fans out now gets a lane per candidate after its totals: how each one
   ended, whether its tests passed, how many issues its quality gate found,
@@ -133,36 +172,53 @@ that only `pkg/belay` carries a compatibility promise. Everything under
   `parent_run_id`; nothing already in that document changed, so its schema
   version is unchanged, and a run that does not fan out prints exactly what
   it printed before.
-
-- **Each step can call a model of its own.** `agent.models` routes a node to
-  a model, so the strong one writes the plan and repairs a failure while the
+- **Each step can call a model of its own.** `agent.models` routes a node to a
+  model, so the strong one writes the plan and repairs a failure while the
   cheap one does the mechanical middle, and the same `budget.max_usd` buys a
   longer run. A node with no entry is sent `agent.model`, so a configuration
   without it costs exactly what it did. Only the nodes that call a model may
-  be keyed — `plan`, `code` and `fix` — and any other name is refused when
-  the configuration loads, by name and with the names it could have been: a
-  typo that quietly sent the whole run to one model is the failure that would
-  make routing not worth having. `belay run --dry-run` prints a row per node
-  with the model it would use and that model’s list rate, and states no
-  total, because belay cannot know how many tokens a goal will take and a
-  wrong dollar projection is worse than none. Every model a run would use is
-  checked against the backend before the run starts, not just `agent.model`,
-  so one the backend cannot price stops the run before it spends rather than
-  in the middle of it. Spend is recorded against the model that actually ran
-  each step, so `belay timeline` shows the cheap step cheap.
+  be keyed — `plan`, `code` and `fix` — and any other name is refused when the
+  configuration loads, by name and with the names it could have been: a typo
+  that quietly sent the whole run to one model is the failure that would make
+  routing not worth having. `belay run --dry-run` prints a row per node with
+  the model it would use and that model’s list rate, and states no total,
+  because belay cannot know how many tokens a goal will take and a wrong
+  dollar projection is worse than none. Every model a run would use is checked
+  against the backend before the run starts, not just `agent.model`, so one
+  the backend refuses stops the run before it spends rather than in the middle
+  of it. The Claude Code backend refuses none: a dated identifier such as
+  `claude-haiku-4-5-20251001` and the aliases `sonnet[1m]` and `opusplan` are
+  priced as the model they name, and a model its price table does not list,
+  such as `claude-sonnet-4-5` or one released after this belay, is priced at
+  the most expensive rate it knows, marked as an estimate, with a warning
+  naming it, so the budget ceiling still holds and errs towards stopping
+  early. The table is only used when the CLI does not report a call's cost
+  itself. Spend is recorded against the model that actually ran each step, so
+  `belay timeline` shows the cheap step cheap.
 - **A run works on its own branch and never edits your checkout.** In a git
   repository, `belay run` now creates `belay/<run-id>` at the commit you are
   on, checks it out in its own worktree under `.belay/runs/<run-id>/`, and
   works there. It commits once, after the quality gate passes, under your own
-  git identity with a `Belay-Run: <run-id>` trailer. Your checkout keeps its
-  branch, its commit and its uncommitted work, and the run's result is a
-  branch you can read with `git log -p`, take with `git switch`, or delete.
-  Outside a git repository, or with `output.mode: "in_place"`, belay edits
-  the workspace directly, as it always did. The new `output.mode` setting
-  chooses, and `auto` — the default — picks a branch whenever the workspace
-  can take one and says why when it cannot. `belay resume` finishes a run the
-  way it started, whatever `belay.yaml` says by then. ADR-0012 records the
-  decision.
+  git identity with a `Belay-Run: <run-id>` trailer, and it commits exactly
+  what the run's steps recorded and judged: if the worktree holds anything
+  else when the run reaches that commit — an edit made while the run was
+  paused, a file the test command wrote, a change above the directory a run
+  was started in — the run pauses and names the files, and a guarded run's
+  change is judged against its policy once more first. The commit step,
+  `promote`, calls no model, so the budget ceiling is not checked before it,
+  nor before `join`: a run that reached `budget.max_usd` in its last coding
+  step still delivers what it paid for. Your checkout keeps its branch, its
+  commit and its uncommitted work, and the run's result is a branch you can
+  read with `git log -p`, take with `git switch`, or delete. Outside a git
+  repository, or with `output.mode: "in_place"`, belay edits the workspace
+  directly, as it always did. The new `output.mode` setting chooses, and
+  `auto` — the default — picks a branch whenever the workspace can take one (a
+  commit to branch from, git 2.38 or newer, no submodules) and says why when
+  it cannot; a workspace inside `.belay`, such as a queued goal's or a fork's
+  copy, always edits in place. `belay resume` finishes a run the way it
+  started, whatever `belay.yaml` says by then, and refuses a run whose
+  worktree has been deleted with the git command that makes it again. ADR-0012
+  records the decision.
 - **`belay run --pr` opens a draft pull request.** When the run finishes,
   belay pushes its branch and opens a draft pull request through `gh`,
   GitHub's own command line. It checks before the run starts that it could:
@@ -189,11 +245,6 @@ that only `pkg/belay` carries a compatibility promise. Everything under
   `plan.archive_dir` choose whether and where, and belay says where the plan
   will go in `--dry-run` and in the run's opening lines. ADR-0016 records the
   decision.
-- **`belay plan` reads a finished run's plan.** Naming a run that is over used
-  to be refused with "it is already finished" — which is exactly the run whose
-  plan has just moved. `belay plan <run-id>` now shows it from wherever it is:
-  the copy in your repository, the run's commit for a branch you have not
-  taken yet, or the run directory when the plan never moved.
 - **belay keeps its own scratch out of your commits.** The first run in a
   repository writes `.belay/.gitignore` holding `*`, so run state is never
   offered for a commit by accident. One you wrote yourself is never replaced.
@@ -209,65 +260,51 @@ that only `pkg/belay` carries a compatibility promise. Everything under
   is, and what to do with it. `belay plan --regenerate "fewer steps, and leave
   the parser alone"` is the other half: belay keeps a copy of the plan it is
   about to replace, records what you asked for, and continues the run so the
-  plan step writes a new plan with your words in its prompt — then stops at the
-  plan again so you can read it. Asking is a step of the run like any other: it
-  is journaled, it counts against the budget, `belay timeline` shows it, and
-  `belay resume` picks it up if it is interrupted. Neither form needs a
-  terminal. `belay resume` still means "the plan as it stands is approved", so
+  plan step writes a new plan with your words in its prompt — then stops at
+  the plan again so you can read it. Asking is a step of the run like any
+  other: it is journaled, it counts against the budget, `belay timeline` shows
+  it, and `belay resume` picks it up if it is interrupted. Neither form needs
+  a terminal. Name a run that is over and `belay plan <run-id>` shows its plan
+  from wherever it is: the copy in your repository, the run's commit for a
+  branch you have not taken yet, or the run directory when the plan never
+  moved. `belay resume` still means "the plan as it stands is approved", so
   resuming after asking for a new plan withdraws the request instead of
   spending on one, and says so.
-
-- **A plan can be read, edited and approved in belay, without leaving it.**
-  At a terminal, `belay plan` now opens the plan in a full-screen viewer:
-  scroll it, edit a step in place, add, delete and reorder steps, undo, ask
-  the agent for a different plan in your own words, and approve it and carry
-  on — all in one place, with what the run has spent shown before you commit
-  it to spending more. `belay run` and `belay resume` open it too, whenever a
-  run stops at its plan and there is a terminal to open it on. Press q to
-  leave: the run stays exactly where it was waiting, and belay says how to
-  come back.
+- **A plan can be read, edited and approved in belay, without leaving it.** At
+  a terminal, `belay plan` now opens the plan in a full-screen viewer: scroll
+  it, edit a step in place, add, delete and reorder steps, undo, ask the agent
+  for a different plan in your own words, and approve it and carry on — all in
+  one place, with what the run has spent shown before you commit it to
+  spending more. `belay run` and `belay resume` open it too, whenever a run
+  stops at its plan and there is a terminal to open it on. Press q to leave:
+  the run stays exactly where it was waiting, and belay says how to come back.
 
   Nothing about belay without a terminal changes. The viewer opens only when
   belay is reading from and writing to a real terminal, `TERM` is set and is
-  not "dumb", `CI` is unset, and `--no-input` — a new flag for saying so
-  outright — was not given. Anywhere else, and under `--dry-run`, every
-  command prints exactly what it printed before and exits, and the run waits
-  for `belay resume` as it always has.
+  not "dumb", `CI` is unset (or `0` or `false`), and `--no-input` — a new flag
+  for saying so outright — was not given. Anywhere else, and under
+  `--dry-run`, every command prints exactly what it printed before and exits,
+  and the run waits for `belay resume` as it always has.
 
-  What the viewer does is what you could already do by hand: it edits the
-  same plan file, which it saves only when the approve gate would accept it,
-  and approving is `belay resume` and asking for a new plan is `belay plan
+  What the viewer does is what you could already do by hand: it edits the same
+  plan file, which it saves only when the approve gate would accept it, and
+  approving is `belay resume` and asking for a new plan is `belay plan
   --regenerate`. It never runs a step of the run itself — it opens after the
   run is durably waiting and closes before belay dispatches again — so
   stopping belay while it is open loses nothing but edits you had not saved.
   ADR-0015 records the decision, including the nineteen modules it adds, all
   MIT or BSD-3-Clause.
-
-- **A dry run says that `fanout.enabled` does nothing yet.** Nothing in the
-  graph leads to the fanout node, so a run with fanout on takes the ordinary
-  route once, whatever `fanout.candidates` says — and belay said nothing about
-  it, while somebody who had turned it on was expecting N attempts and
-  watching what N attempts would cost. `belay --dry-run run` now lists it
-  under "worth knowing".
 - **`belay timeline` lists the files a run changed.** After the totals, a
-  "Files changed:" section lists every file the run changed, one per line
-  and sorted, including the files the fix loop repaired. It is left out when
-  the run has changed nothing. `belay timeline --json` carries the same list
-  as `changed_files`. The README's example output showed this section before
-  belay printed it, in a table layout belay never used; it now shows exactly
-  what belay prints, and a test keeps it that way.
+  "Files changed:" section lists every file the run changed, one per line and
+  sorted, including the files the fix loop repaired. It is left out when the
+  run has changed nothing. `belay timeline --json` carries the same list as
+  `changed_files`. The README's example output showed this section before
+  belay printed it, in a table layout belay never used; it is now rendered by
+  belay's own timeline code from the journal of a run with a fix loop, and a
+  test keeps it that way.
 
 ### Changed
 
-- **A run that has met its budget ceiling still delivers the work it already
-  bought.** The ceiling is checked before every node, which meant a run that
-  reached `budget.max_usd` during its last coding step stopped just short of
-  promoting the change it had paid for, and the only way to collect it was to
-  raise the limit in `belay.yaml` and resume. `promote` runs git and calls no
-  model, so stopping there saved nothing and lost everything; it is now
-  exempt from the check, along with `join`. Every other node is checked
-  exactly as before, and both nodes' spend is still recorded — what changed
-  is what is checked, never what is counted.
 - **`fanout.isolator` defaults to `auto`, and is a closed set.** It was free
   text checked only for emptiness, so `worktrees` or `dircopy ` loaded fine
   and failed later, when a run had already been created — while
@@ -276,31 +313,36 @@ that only `pkg/belay` carries a compatibility promise. Everything under
   The default changes from `dircopy` to `auto`, which keeps it in step with
   `output.mode`.
 - **belay v0.1.x can no longer resume a run this version has saved.** belay
-  ignores fields it does not know in a run's state.json and manifest.json,
-  and saves the run without them. Once runs carry settings that change what
-  they do, an older belay resuming one would drop those settings without a
-  word. Both files now carry a `requires` list naming what a run depends on,
-  and a belay that lacks something on the list refuses the run by name and
-  says to upgrade. Nothing adds to the list yet. v0.1.x never reads it, so
-  both files also move to schema version 2, which v0.1.x refuses: its
-  `belay runs` shows such a run as "unsupported manifest version 2", and its
-  `belay resume` does not offer it. Runs started by v0.1.x still resume, and
-  are saved at version 2 from then on. With two belay installs, resume runs
-  with the newer one. ADR-0011 records the decision.
+  ignores fields it does not know in a run's state.json and manifest.json, and
+  saves the run without them. Once runs carry settings that change what they
+  do, an older belay resuming one would drop those settings without a word.
+  Both files now carry a `requires` list naming what a run depends on, and a
+  belay that lacks something on the list refuses the run by name and says to
+  upgrade. A run on a branch, a run with a policy, a run that fans out (and
+  each of its candidate runs), and a plan waiting to be regenerated each name
+  what they need; a run that edits in place with none of these requires
+  nothing. v0.1.x never reads the list, so both files also move to schema
+  version 2, which v0.1.x refuses: its `belay runs` shows such a run as
+  "unsupported manifest version 2", and its `belay resume` does not offer it.
+  Runs started by v0.1.x still resume, and are saved at version 2 from then
+  on. With two belay installs, resume runs with the newer one. ADR-0011
+  records the decision.
 - **A run belay stops at one of its own limits is paused, not ended.**
   Reaching `budget.max_usd` or `budget.max_tokens`, running out of
   `graph.max_steps`, or overrunning `graph.node_timeout` used to end the run
   for good: the only way on was a new run from nothing, which would spend the
   whole budget again from zero. belay now pauses the run and says which
-  setting to raise. Raise it in belay.yaml and `belay resume <run-id>`
-  carries on with everything the run has already spent still counted; leave
-  it and the run stops at the same limit again, having done nothing and spent
-  nothing. These limits are read from belay.yaml every time a run is
-  resumed, unlike the shape of the graph, which is fixed when a run starts.
-  A step that overran `graph.node_timeout` runs again from its start. The
-  exit code is unchanged: an invocation belay stopped this way still exits 3,
-  so scripts can tell it from a run that paused for you to read the plan.
-  `belay runs` lists such a run as waiting and `belay resume` accepts it.
+  setting to raise. Raise it in belay.yaml and `belay resume <run-id>` carries
+  on with everything the run has already spent still counted; leave it and the
+  run stops at the same limit again, having done nothing and spent nothing.
+  These limits are read from belay.yaml every time a run is resumed, unlike
+  the shape of the graph, which is fixed when a run starts. A step that
+  overran `graph.node_timeout` runs again from its start. The exit code is
+  unchanged: an invocation belay stopped this way still exits 3, so scripts
+  can tell it from a run that paused for you to read the plan. `belay runs`
+  lists such a run as waiting and `belay resume` accepts it. A step that stops
+  for the same reason, because it can see the ceiling will not cover what it
+  is about to buy, as the fanout step can, pauses the run the same way.
 - **ruff judges only the lines a run changed, the way golangci-lint already
   does.** The lint gate on a Python project counted every ruff finding in the
   repository, so a repository with existing debt failed every run whatever
@@ -318,186 +360,6 @@ that only `pkg/belay` carries a compatibility promise. Everything under
 
 ### Fixed
 
-- **The policy gate judges what the workspace says changed, not what the
-  agent says it changed.** It judged the agent's own report, so an agent
-  that edited `infra/main.tf` and rewrote `belay.yaml` to `policy: {}` while
-  reporting only `src/app.py` passed every rule ("1 file checked"), and a
-  branch run committed both edits; a report spelled `Infra/main.tf` dodged
-  `infra/**` too. belay now reads the change off the workspace: in a git
-  repository, every file git says differs from the run's starting commit,
-  committed, staged, edited, deleted or new, in its true name; in place in a
-  git checkout, less what you had already changed before the run; with no
-  git (including a queued goal's copy and an in-place run's candidates),
-  every file that differs from a record of the workspace taken when the run
-  starts. Files the agent changed and did not report are judged like the
-  rest and named in the gate's verdict, `belay timeline` and the commit. On
-  a disk that folds case, as macOS's does, rules match without regard to
-  case. A fork, whose copy cannot say where its source's change began, is
-  judged on the agent's report and says so in every verdict and in its dry
-  run. `belay run --dry-run` says what the gate will judge.
-- **A branch run commits exactly what was recorded and judged.** promote
-  committed everything in the run's worktree, so an edit made there while a
-  run was paused, or a file the test command wrote, went into the commit
-  unjudged while the timeline said fewer files were verified. promote now
-  pauses, naming the files, when the worktree holds anything the run's
-  steps did not record, and in a guarded run judges the change against the
-  policy once more before committing; remove what does not belong and
-  `belay resume`. A run started in a subdirectory pauses the same way over
-  a change above that directory.
-- **A repository's `belay.yaml` can no longer drop your own guardrails.**
-  Policy rules from a later configuration file replaced the earlier ones
-  outright, so a project `belay.yaml` forbidding `secrets/**` silently
-  discarded the `.github/workflows/**` and `infra/**` your
-  `~/.config/belay/config.yaml` forbade, and the dry run showed only the
-  project's rule. Policy now combines across files to the most restrictive
-  result: forbidden paths, required tests and forbidden content are joined,
-  each ceiling is the smallest any file sets (a later `0` does not lift
-  one), and `no_new_dependencies` holds if any file sets it. Every other
-  setting still takes the later file's value.
-- **A policy pattern that describes a secret is no longer redacted as one.**
-  `belay run` printed "redacted secret-shaped config values" on every run
-  whose `policy.forbidden_content` held a pattern like the documented
-  `AKIA[0-9A-Z]{16}`, or whose `policy.forbidden_paths` held a long path,
-  and the manifest's record of the settings showed `REDACTED` where the rule
-  should be. The rules are kept now; a value shaped like a credential under
-  any other setting is still redacted.
-- **belay starts on a Claude model its price table does not list.** It
-  refused, before spending anything, any model outside the table it ships
-  with: `claude-sonnet-4-5`, `claude-opus-4-1`, a dated identifier such as
-  `claude-haiku-4-5-20251001`, and the aliases `sonnet[1m]` and `opusplan`.
-  Dated identifiers and those aliases are now priced as the model they name.
-  Any other model is priced at the most expensive rate belay knows, marked as
-  an estimate, with a warning naming it, so the budget ceiling still holds
-  and errs towards stopping early. The table is only used when the CLI does
-  not report a call's cost itself.
-- **`fanout.select: fastest` no longer depends on how a run was
-  interrupted.** A candidate's time counted a step a Ctrl-C cut short but not
-  one a crash cut short, so the same work could win or lose depending on
-  which stopped it. Only the steps that finished count now.
-- **A paused fanout no longer fails for good on a resume it cannot carry
-  out yet.** Resumed after `budget.max_usd` was set to 0, a run that fans out
-  ended failed, with every candidate it had paid for out of reach; so did one
-  whose run directory could not be read at that moment. The first now pauses
-  at exit 3 and says to set `budget.max_usd` above zero; the second pauses
-  with the fault in its note, and resuming tries again.
-- **A fanout whose candidates stop at a limit says so, and exits 3.** A
-  candidate that met its share of `budget.max_usd`, `graph.max_steps` or
-  `graph.node_timeout`, each of which applies to every candidate, left the
-  run "waiting for you" with exit 0, no reason printed and no setting named,
-  and resuming met the same limit for ever. The run now stops like any
-  other limit: it names each candidate, why its own run stopped and the
-  setting to raise, and a resume that raises nothing spends nothing. The
-  run's spend, in `belay runs` and the closing report, now includes what its
-  candidates have spent, at every pause and not only once the fanout
-  finishes: it showed $0.10 of $1.00 where $1.10 had been spent.
-- **After a crash mid-fanout, resuming collects the candidates without a
-  raised ceiling.** The resume charged the killed fanout step the plan's cost
-  a second time, then re-ran the launch-time cost projection against that
-  inflated spend and refused to continue ("projected at $2.0000 each on top
-  of $2.0000 already spent") until `budget.max_usd` was raised, which also
-  raised the candidates' envelopes. Candidates already claimed are now
-  adopted without the projection, at the envelopes they were given.
-- **A crash inside `join`, `promote` or the fanout itself is no longer billed
-  as the run's costliest step.** Resuming after a kill charges the step that
-  died an estimate of what its agent may have spent, but these steps call no
-  agent of their own: after a fanout the costliest step was the whole
-  fanout, so a kill inside promote's merge reported $2.10 against $1.10
-  spent, and a kill mid-fanout charged the plan again. They are now charged
-  nothing; a candidate's own steps are still charged as before.
-- **A step stopped by Ctrl-C or `graph.node_timeout` is charged for, so the
-  budget ceiling stops a step that keeps being interrupted.** The agent CLI
-  prints its bill only when it finishes, so a call belay stopped reported
-  nothing and was recorded as free: four Ctrl-C and resume cycles of a
-  fanout started ten $0.40 calls and reported $0.90, and a step that kept
-  timing out was never stopped by the ceiling. Such a step is now charged
-  what a kill at the same moment is charged — the costliest step the run (or
-  a candidate's parent) has paid for, marked as an estimate — unless it
-  reported its own spend. When the interrupted step costs more than any step
-  before it, each interruption still under-counts by the difference, so the
-  ceiling stops it later than its real cost would; ADR-0007 states the bound.
-- **A Ctrl-C just after a candidate's workspace is made no longer loses that
-  candidate.** A candidate whose run had been interrupted, or killed, before
-  its first step resumed at "plan", a step a candidate does not have, and
-  ended failed for good; the fanout then settled without it, and a Ctrl-C
-  as the last copy finished could fail every candidate and the whole run. A
-  candidate now starts at its own first step until its journal records one.
-- **The golangci-lint gate waits for golangci-lint instead of failing on
-  it.** golangci-lint allows one instance per machine at a time, and one
-  that finds another running waits about five seconds and then gives up with
-  "parallel golangci-lint is running", which belay reported as a quality
-  gate that could not run — failing the step for something unrelated to the
-  code. Anything else running golangci-lint for more than five seconds, such
-  as an editor's integration or another run, could cause it, and best-of-N
-  would have caused it routinely: of five gates started together, one failed
-  in each of three tries. belay now passes
-  `--allow-serial-runners`, so a gate waits its turn. It does not pass
-  `--allow-parallel-runners`, which would let concurrent instances hand each
-  other findings through their shared cache.
-- **belay no longer takes a copy it made for the repository around it.** A
-  queued goal's copy lives under the repository's `.belay`, and git finds the
-  repository a few directories up, so `belay --workspace <copy> resume` —
-  the command `belay queue` prints for a goal stopped at a limit — decided to
-  branch the person's own repository, and warned that `belay.yaml` now asked
-  for a branch when nobody had changed it. A workspace under `.belay` now
-  edits in place, says why, and refuses `output.mode: branch`.
-- **`belay fork` works when `belay.yaml` enables fanout.** A fork re-runs one
-  step of a single run, and is meant to turn fanout off as it turns branch
-  output off, but it kept `fanout.enabled`. Its graph was then the fanout
-  graph, which has no `code`, `test`, `fix` or `review`, so forking any of
-  them ended the new run as failed with `unknown node`. A fork is now always
-  a single run.
-- **A fork or a queued goal can be carried on when `belay.yaml` says
-  `output.mode: branch`.** Both run in place, in a copy under `.belay`, and
-  the copy can never take a branch, so resolving it refused `branch` — and
-  that refusal outlived the run's own pin, which says in place. belay
-  refused the very command it had printed: `belay --workspace <copy> resume
-  <fork>` after a fork, and the resume `belay queue` prints for a goal
-  stopped at a limit. A resume now judges the output the run was started
-  with, as `docs/config.md` promises: what `belay.yaml` would give a new run
-  is a warning, never a refusal. The same rule stops a resume from warning
-  about uncommitted work a branch run starting now would leave out, and from
-  telling a branch run that `belay.yaml` "now says" a mode it does not.
-- **A fanout whose isolator cannot serve its output is refused before it
-  spends, and `fanout.isolator` no longer refuses a run that does not fan
-  out.** `fanout.isolator: worktree` in a run that edits in place passed the
-  dry run, paid for the plan, and then could not make a single candidate's
-  workspace, so the fanout paused, and paused again on every resume. It is
-  now refused up front, like `dircopy` in a branch run. That refusal, in turn,
-  was applied to every branch run, fanout or not, so a repository whose
-  `belay.yaml` set `dircopy` as earlier docs advised could not start a run at
-  all; both refusals now apply only to a run that fans out, and a resume
-  judges them against the output and fanout the run was started with.
-- **`belay queue` says where a fanout goal's change is.** A queued goal whose
-  run fans out leaves its copy as it was claimed: the change is in the
-  winning candidate's own workspace, under the run's `candidates/`, because
-  belay does not merge a run that edits in place. The queue said the goal
-  "finished in its copy" and to take what you want from there, which found
-  nothing. It now names the winner and its workspace.
-- **A failed fanout run names a candidate only when one exists.** Its last
-  lines offered `belay timeline <run> --candidate cand-01` whenever the run
-  fanned out, including a run that failed at its plan, before any candidate
-  was made, where that command says the run has no candidate runs. The line
-  now appears only when a candidate run is on disk, and names the first one.
-- **A queued goal's plan always waits for you unless you added it with
-  `--no-approval`.** `graph.approval: false` anywhere — the project's
-  `belay.yaml`, or your own `config.yaml`, which reaches every repository —
-  took every queued goal from its plan to its code unattended, and
-  `belay queue add` and `queue start` blamed `belay.yaml` for it. The queue no
-  longer reads `graph.approval`: the gate stops every goal except one added
-  with `--no-approval`.
-- **The command belay prints to remake a deleted run worktree works.** A
-  branch run whose worktree directory was deleted is refused with the git
-  command that makes it again, and git refused that command: the worktree
-  was still registered, and git takes the path back only with `worktree add
-  -f`. belay now prints `-f` when git still has the worktree registered, a
-  plain `worktree add` when it does not, and quotes the paths.
-- **Forking a fix loop that gave up calls the model.** `belay fork <run-id>
-  fix --model opus`, the README's own example, re-runs the last fix — the one
-  that gave up — whose state had every round of `graph.give_up` used, so the
-  fix step gave up again without calling anything, and `--model` changed
-  nothing. A fork of such a fix now gets one more round, and says so with the
-  other differences before it spends anything; nothing in `belay.yaml` needs
-  to change.
 - **belay says what it warns about on real runs, not only under `--dry-run`.**
   Uncommitted work a branch run leaves out, a resumed run's settings
   disagreeing with `belay.yaml`, a credential belay cannot see: each was
@@ -505,41 +367,20 @@ that only `pkg/belay` carries a compatibility promise. Everything under
   said none of it. `belay run`, `belay resume`, `belay fork` and each queued
   goal now print them on stderr, after the announcement and before anything
   is spent.
-- **`belay queue` shows a goal carried on by hand as its run now stands.**
-  For a goal stopped at a limit, the queue says to raise the limit and run
-  `belay --workspace <copy> resume <run-id>` yourself. After that run
-  finished, `belay queue`, `queue status` and `queue list` still said
-  "paused at a limit" and offered the same resume, which then answered that
-  the run is already finished. The reports now read each goal's run, and show
-  one that has finished, failed or stopped since the queue recorded it that
-  way.
-- **A repair's file list is checked against the disk, not taken on trust.**
-  The fix step routed straight back to the tests, so a repair was the one
-  change in a run that nothing verified: no claimed path was proven to be a
-  regular file inside the workspace, no diff of the repair was recorded, and
-  the run's `last_diff` still pointed at the original change however many
-  repairs had happened since. A repair now goes back through the `write` step,
-  which does all three.
-
-- **A step that stops because of the budget ceiling now pauses the run, like
-  every other limit.** belay's own guards pause a run that reaches
-  `budget.max_usd`, so raising the ceiling and resuming continues it and keeps
-  what it has already spent. A step that refused for the same reason — it
-  could see the ceiling would not cover what it was about to buy — ended the
-  run instead, although belay then told you to raise the setting and resume,
-  which could not work. Such a step now pauses the run and is run again on
-  `belay resume`, against the ceiling as it is then. The exit code is
-  unchanged: the invocation still exits 3.
-
-- **`belay runs` says "needs plan approval" only when the plan gate asked.**
-  A run stopped by Ctrl-C while the gate was running, or by one of belay's
-  own limits just before it, is paused at the same step and looked the same
-  in the listing, which reads manifest.json — so belay told you to go and
-  read a plan nothing had offered you. The listing now asks the run's journal
-  whether the gate stopped to ask, which is the same question `belay resume`
-  asks before treating a resume as your approval, and says "waiting at
-  approve" for the rest. `belay runs --json` is unchanged in shape.
-
+- **A repair's changes are recorded and checked like the first change.** belay
+  keeps a list of the files a run changed, taken from what the agent reported
+  after writing the code. When a test or the quality gate failed and the agent
+  repaired it, the files the repair touched were never added, so the list
+  belay passes to a reviewer, and shows the agent on its next repair, left
+  them out. And the fix step routed straight back to the tests, so a repair
+  was the one change in a run that nothing verified: no claimed path was
+  proven to be a regular file inside the workspace, no diff of the repair was
+  recorded, and the run's `last_diff` still pointed at the original change
+  however many repairs had happened since. A repair now goes back through the
+  `write` step, which adds the files it changed to the list, each once, checks
+  every one against the disk, records a diff and moves `last_diff` on. A
+  repair that reports a path outside the repository fails the run, as the
+  first change already did.
 - **A step belay re-runs after a crash no longer counts its crashed attempt
   as well as its own.** belay saves a step's changes and only then records
   that the step finished, so a process killed in between left the changes
@@ -573,6 +414,19 @@ that only `pkg/belay` carries a compatibility promise. Everything under
   pauses the run, when it sends the change to the fix step; said nodes
   never touch the filesystem; and put writing the journal before saving a
   step's changes, the reverse of the order belay depends on.
+- **The docs no longer claim what belay does not do.** The README called belay
+  "CLI-agnostic" and said the same workflow "runs against any backend without
+  code changes", when Claude Code is the only backend and the seam has never
+  been tried with another; docs/adapters.md listed a `CodeFormatter` interface
+  that does not exist and cited an `internal/review` package that does not
+  either. The README described recording test cassettes with a `make
+  test-record` target, and docs/adapters.md with a `cassette_record` build
+  tag; neither exists, and the adapters' fixtures are hand-written. The README
+  also called the module path a placeholder (it is the real one) and suggested
+  `go get ...@latest` to install a command, named macOS 11 as Monterey (it is
+  Big Sur, and unsupported because Go 1.26 binaries need macOS 12), and said
+  `belay runs` lists all runs (the latest 20, unless `--limit` says
+  otherwise). Each now says what the code does.
 - **belay no longer says its write step saves the agent's changes.** The
   closing report described the write step as "saving the agent's changes
   into your repository", and `belay run --help` said belay "saves the
@@ -613,29 +467,6 @@ that only `pkg/belay` carries a compatibility promise. Everything under
   and `iterations` count visits too, and the `loop_*` totals start at the
   first node that really looped. `schema` stays 1: these fields always meant
   how many times the run came back to a node, and the old values were wrong.
-- **Stopping a run with Ctrl-C no longer costs it a step.** The interrupted
-  step was counted against `graph.max_steps` before the run was paused, so a
-  run stopped twice had two fewer steps left to finish in than one killed
-  twice — although `belay run`'s help promises that Ctrl-C leaves the run
-  where a kill would. It also moved the re-run's evidence directory under
-  `nodes/` beside the attempt it replaces rather than over it. Only a step the
-  run acted on is counted now.
-- **A version-1 run's manifest is now saved at the current schema version
-  before belay writes anything else to the run.** Resuming a run belay v0.1.x
-  started upgrades both of its documents, and state.json was saved first — by
-  the dispatcher's first patch, or by `belay resume` recording your approval.
-  A crash in between left a version-1 manifest over a version-2 state.json,
-  which a released belay accepts: it would resume the run, append to its
-  journal, and on the next invocation report that the run had already ended.
-  The manifest is now saved first, which is the version a released belay
-  refuses (ADR-0011).
-- **A run that requires something this belay does not have is refused before
-  its journal is touched.** A run may declare a required capability in
-  state.json alone, and the dispatcher read manifest.json, opened the journal
-  and healed a crashed step before it ever read state.json — so a run it was
-  not allowed to read had already been written to, and the first guard it met
-  ended it for good. Nothing sets `requires` yet, so no run was affected in
-  practice.
 - **A repair that quotes the failure it fixed no longer poisons or ends the
   run.** The fix node read its reply with the code node's parser, which, when
   no changed-files block is present, salvages paths out of any unified diff in
@@ -678,15 +509,6 @@ that only `pkg/belay` carries a compatibility promise. Everything under
   workspace, `belay resume` with no run id will not choose a run for you;
   name the run instead. A version older than any belay reads keeps its
   "unsupported" wording.
-- **Files changed in the fix loop are now recorded with the rest of the
-  run's change.** belay keeps a list of the files a run changed, taken from
-  the files the agent reports after writing the code. When a test or the
-  quality gate failed and the agent repaired it, the files that repair
-  touched were never added, so the list belay passes to a reviewer, and
-  shows the agent on its next repair, left them out. belay now asks the
-  agent which files each repair changed and adds them to the list, each
-  file once. A repair that reports a path outside the repository fails the
-  run, as the first change already did.
 - **Ctrl-C now leaves a run that `belay resume` continues.** `belay run
   --help` promised this, but Ctrl-C, or a SIGTERM, ended the run as
   aborted: belay printed `belay resume <id>`, and `belay resume` then
@@ -697,13 +519,12 @@ that only `pkg/belay` carries a compatibility promise. Everything under
   approving the plan for you. An interrupted `belay run` still exits with
   code 3. A second Ctrl-C still quits at once, which leaves the run as a
   crash does, and `belay resume` continues that too.
-- **belay no longer tells you to resume a run it cannot resume.** After
-  `graph.max_steps`, `graph.node_timeout`, or the budget ceiling with
-  `budget.on_exceed: abort`, the closing report offered `belay resume
-  <id>`, which refuses such a run. It now says the run has ended, names the
-  setting to raise — `budget.max_usd` or `budget.max_tokens` for the budget
-  ceiling — and gives the command that starts a new run. A run aborted
-  any other way is pointed at `belay timeline`.
+- **belay no longer tells you to resume a run it cannot resume.** A run that
+  ended as aborted was offered `belay resume <id>` in the closing report, and
+  `belay resume` refuses such a run. The report now says the run has ended and
+  points at `belay timeline`. (A run stopped at `graph.max_steps`,
+  `graph.node_timeout` or the budget ceiling is now paused, and the report
+  names the setting to raise before resuming; see *Changed*.)
   docs/troubleshooting.md and docs/architecture.md also suggested `belay
   resume` for runs that had completed or failed, and no longer do.
 - **A crash while belay recovers from a crash no longer ends the run.**
@@ -728,65 +549,85 @@ that only `pkg/belay` carries a compatibility promise. Everything under
   `review.fail_on` and `review.ai.mcp.mode`, and documented
   `review.sonar.quality_gate_wait` and `quality_gate_timeout` as durations
   when they are a boolean and a number of seconds. It also said unknown keys
-  are only warnings, when they are errors, and that environment variables
-  and flags override settings, when only a `--config` file does. Tests now
-  check every documented setting's type, default and valid values against
-  the code, and fail when a setting has no entry.
-- **The docs no longer say fanout works.** The README said parallel
-  candidate generation works and only merging the winner back was manual,
-  and docs/architecture.md said the fanout node runs each candidate from the
-  code step onward. Neither was true. The fanout and join nodes exist and
-  are unit-tested, but no step in belay's graph leads to fanout, so no run
-  reaches either one, and `fanout.enabled: true` changes nothing a run does.
-  The fanout node only prepares a workspace per candidate; nothing runs a
-  candidate. The README, docs/architecture.md, docs/troubleshooting.md,
-  docs/config.md, docs/adapters.md and examples/naive now say so. Running
-  candidates is planned, and ADR-0019 is reserved for it.
-- **A step that fails, times out or is stopped is charged for what it
-  spent.** When the agent reported spending money and the step then
-  returned an error, ran past `graph.node_timeout`, or was stopped with
-  Ctrl-C, belay recorded the step as free: the money was left out of the
-  run's total and out of the journal. A run could then go past
-  `budget.max_usd`, and a run stopped with Ctrl-C and resumed could spend
-  its whole budget a second time. Whatever the agent reported spending is
-  now added to the run's total and written to the journal, however the step
-  ended.
+  are only warnings, when they are errors, and that environment variables and
+  flags override settings: none does, apart from the few settings `belay fork`
+  and `belay queue` decide for themselves, and a `--config` file is how to
+  change one for a run. Tests now check every documented setting's type,
+  default and valid values against the code, and fail when a setting has no
+  entry.
+- **A step that fails, times out or is stopped is charged for what it spent.**
+  When the agent reported spending money and the step then returned an error,
+  ran past `graph.node_timeout`, or was stopped with Ctrl-C, belay recorded
+  the step as free: the money was left out of the run's total and out of the
+  journal. A run could then go past `budget.max_usd`, and a run stopped with
+  Ctrl-C and resumed could spend its whole budget a second time. Whatever the
+  agent reported spending is now added to the run's total and written to the
+  journal, however the step ended. The agent CLI prints its bill only when it
+  finishes, so a step belay stopped often reports nothing; such a step is now
+  charged what a kill at the same moment is charged — the costliest step the
+  run (or a candidate's parent) has paid for, marked as an estimate — so the
+  budget ceiling stops a step that keeps being interrupted. When the
+  interrupted step costs more than any step before it, each interruption still
+  under-counts by the difference, so the ceiling stops it later than its real
+  cost would; ADR-0007 states the bound.
 - **A resumed run no longer forgets what its last step cost.** belay
   records a step's cost in the journal and then saves it in manifest.json.
   If belay was killed between the two, `belay resume` read the older total
   from manifest.json and let the run spend that step's cost again, past
   `budget.max_usd`. A resume now adds up the cost of every step in the
   journal, and never starts below the total manifest.json saved.
-- **A step cut short by a kill -9 is no longer free.** When belay is killed
-  in the middle of a step, nothing is left to say what that step spent, and
+- **A step cut short by a kill -9 is no longer free.** When belay is killed in
+  the middle of a step, nothing is left to say what that step spent, and
   `belay resume` used to count it as nothing, so a run killed during a paid
-  step paid for it twice and counted it once. The step is now charged the
-  most any one step of the run has cost so far, and the run's cost is shown
-  as estimated from then on. A run killed in its first paid step, before
-  anything was spent, is still charged nothing, because there is nothing to
-  go on. ADR-0007 explains the choice.
+  step paid for it twice and counted it once. The step is now charged the most
+  any one step of the run has cost so far, and the run's cost is shown as
+  estimated from then on. A run killed in its first paid step, before anything
+  was spent, is still charged nothing, because there is nothing to go on.
+  `join`, `promote` and the fanout step call no agent of their own and are
+  charged nothing; a candidate's own steps are charged as any run's are.
+  ADR-0007 explains the choice.
 - **Resuming a run kills the agent and test processes a kill -9 left
-  running.** belay starts each of them in a process group of its own and
-  kills that group when a step is cancelled or times out — but only while
-  belay is alive to do it. After a kill -9, or a second Ctrl-C, they were
-  left running: your terminal's Ctrl-C never reaches them, so an agent could
-  keep working, and keep spending, with nothing watching it. belay now
-  writes down every process it starts, before the process starts, and
-  `belay resume` kills whatever is still running from the step that was
-  interrupted. It checks each process first — its start time, that it leads
-  its own process group, and that it still runs the program belay started —
-  so a process id that has since been given to something else is never
-  signalled.
+  running.** belay starts each of them in a process group of its own and kills
+  that group when a step is cancelled or times out — but only while belay is
+  alive to do it. After a kill -9, or a second Ctrl-C, they were left running:
+  your terminal's Ctrl-C never reaches them, so an agent could keep working,
+  and keep spending, with nothing watching it. belay now writes down every
+  process it starts, before the process starts, in its own state directory,
+  `$XDG_STATE_HOME/belay` or `~/.local/state/belay` — not in the run's
+  directory, which in a run that edits in place is inside the workspace the
+  agent writes — and `belay resume` kills whatever is still running from the
+  step that was interrupted. It checks each process first — its start time,
+  that it leads its own process group, and that it still runs the program
+  belay started — so a process id that has since been given to something else
+  is never signalled. belay now needs `HOME` or `XDG_STATE_HOME` set to start
+  a step's processes.
 - **An empty `NO_COLOR` no longer turns `belay timeline` plain.** The
   timeline switched colour off whenever `NO_COLOR` existed, even exported
   empty, while every other command waits for a non-empty value, as
   no-color.org asks. It now reads it the same way as the rest of belay.
-- **Ctrl-C while `belay fork` is copying your tree stops it cleanly.**
-  `belay fork` says to press Ctrl-C once to stop it, but until its step
-  started running, a Ctrl-C killed belay outright, part-way through copying
-  the tree, and left a half-made copy under `.belay/forks` that `belay runs`
-  listed as unreadable. A Ctrl-C during the copy now cancels it, removes
-  what was copied, and says nothing was kept or spent.
+- **The golangci-lint gate waits for golangci-lint instead of failing on
+  it.** golangci-lint allows one instance per machine at a time, and one
+  that finds another running waits about five seconds and then gives up with
+  "parallel golangci-lint is running", which belay reported as a quality
+  gate that could not run — failing the step for something unrelated to the
+  code. Anything else running golangci-lint for more than five seconds, such
+  as an editor's integration or another run, could cause it, and best-of-N
+  would have caused it routinely: of five gates started together, one failed
+  in each of three tries. belay now passes
+  `--allow-serial-runners`, so a gate waits its turn. It does not pass
+  `--allow-parallel-runners`, which would let concurrent instances hand each
+  other findings through their shared cache.
+- **A finding's path is relative to the workspace even when the workspace is
+  reached through a symbolic link.** ruff reports a file by its resolved path,
+  so in a workspace under macOS's `/var`, which is a link to `/private/var`,
+  every finding was shown with its whole absolute path, and the review step
+  could not tell the file was part of the workspace. The two paths are now
+  also compared resolved.
+- **A Python change that leaves a file unparsable fails the lint gate.**
+  ruff 0.8 stopped reporting a syntax error as `E999` and reports it as
+  `invalid-syntax`, which belay's severity table did not know, so it took the
+  default, minor, and passed the gate at `review.fail_on: major`. It is a
+  blocker now, as `E999` always was.
 
 ### Security
 
@@ -806,41 +647,6 @@ that only `pkg/belay` carries a compatibility promise. Everything under
   `--json` output of `timeline`, `runs` and `queue list` keeps every string
   exactly as recorded, and now escapes the DEL and C1 controls that
   encoding/json left raw, so it is safe to print as well.
-- **A chain of symlinks can no longer lead out of a copy belay makes.** The
-  copy a queued goal, a fork or an in-place candidate works in left out any
-  symlink whose text pointed outside it, but judged each link's text alone.
-  So `a/b/c/up -> ../../..`, which lands on the copy's root, was kept, and
-  so was `esc -> a/b/c/up/../../../..`, which reads as the root too — yet
-  the system follows `up` first and then climbs four levels above the copy,
-  and in a queued goal's copy that is your own checkout. Once a copy is
-  built, belay now follows every link it recreated through every link along
-  the way and removes any that does not end inside the copy, loops included.
-- **A run's files can no longer make `belay resume` kill a process.**
-  `belay resume` kills the processes a killed belay left running, from
-  records it kept in the run's `nodes/` directory — which, in a run that edits
-  your workspace in place, is inside the workspace the agent writes. A
-  record written there naming any process of yours, with its real start
-  time, had belay send it SIGKILL. The records now live in belay's own state
-  directory, `$XDG_STATE_HOME/belay` or `~/.local/state/belay`, and a process
-  is killed only if it also leads its own process group and still runs the
-  program the record names. A record found in a run's `nodes/` directory is
-  reported and removed, never acted on: if you resume, with this belay, a run
-  a development build of belay was killed during, kill what it left running
-  yourself (`ps` lists it). belay now needs `HOME` or `XDG_STATE_HOME` set to
-  start a step's processes.
-
-- **A finding's path is relative to the workspace even when the workspace is
-  reached through a symbolic link.** ruff reports a file by its resolved path,
-  so in a workspace under macOS's `/var`, which is a link to `/private/var`,
-  every finding was shown with its whole absolute path, and the review step
-  could not tell the file was part of the workspace. The two paths are now
-  also compared resolved.
-
-- **A Python change that leaves a file unparsable fails the lint gate.**
-  ruff 0.8 stopped reporting a syntax error as `E999` and reports it as
-  `invalid-syntax`, which belay's severity table did not know, so it took the
-  default, minor, and passed the gate at `review.fail_on: major`. It is a
-  blocker now, as `E999` always was.
 
 ## v0.1.4 — 2026-09-17
 
