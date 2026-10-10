@@ -46,7 +46,7 @@ The coding agent belay drives to write the plan, the code and the fixes.
 **Default**: `"claude-code"`  
 **Shipped values**: `"claude-code"`
 
-The agent backend to use. In v0.1 only `"claude-code"` exists; the `belay.AgentBackend` interface is exported so other CLIs can be added, but none is shipped or tested (see [ADR-0005](adr/0005-claude-code-only-backend-v0.md)). The loader does not yet reject unknown names, so a typo surfaces at run time rather than at load time.
+The agent backend to use. In v0.1 only `"claude-code"` exists; the `belay.AgentBackend` interface is exported so other CLIs can be added, but none is shipped or tested (see [ADR-0005](adr/0005-claude-code-only-backend-v0.md)). The loader does not reject an unknown name, but belay refuses it before a run starts (`belay does not have a backend called "nope".`), and `--dry-run` says the same, so a typo costs nothing.
 
 ### `agent.model`
 
@@ -54,7 +54,7 @@ The agent backend to use. In v0.1 only `"claude-code"` exists; the `belay.AgentB
 **Default**: `"sonnet"`  
 **Example**: `"sonnet"`, `"opus"`, `"claude-sonnet-5"`
 
-The model identifier passed straight through to the backend CLI's `--model` flag, so any alias or full identifier that CLI accepts works here. It is also the key the cost estimator uses when the CLI does not report a price, so an unrecognised name makes the budget guard fall back to an error rather than a silent zero.
+The model identifier passed straight through to the backend CLI's `--model` flag, so any alias or full identifier that CLI accepts works here. It is also the key the cost estimator uses when the CLI does not report a price. A dated identifier, a Bedrock-style suffix or an alias such as `sonnet[1m]` or `opusplan` is priced as the model it names; any other name the price table does not list is priced at the highest rate the table holds, marked as an estimate, and belay warns once naming it, so the budget ceiling errs towards stopping a run early rather than never.
 
 ### `agent.max_turns`
 
@@ -146,6 +146,10 @@ At the cap the run ends as failed, with a note naming the exhaustion — it does
 not silently return a partial result. Set it higher for a task you expect to
 take several rounds, lower to fail fast. It must be at least 1.
 
+`belay fork <run-id> fix` of a fix that had used every round gives the fork
+one more: it runs with `graph.give_up` set one above the rounds already used,
+and says so before it spends anything.
+
 Not to be confused with the `give_up` field belay writes into a run's
 `state.json`, which is a boolean recording whether the loop *has* exhausted
 this budget.
@@ -156,7 +160,7 @@ this budget.
 **Default**: `60`  
 **Minimum**: `1`
 
-The most steps one run may execute in total, counting every step each time it runs, including each pass through the fix loop. belay checks it before starting each step, and a run that reaches it is aborted with `graph: max steps exceeded`. It is a backstop for a graph that is not converging; `graph.give_up` is the limit meant to end a fix loop that is not making progress.
+The most steps one run may execute in total, counting every step each time it runs, including each pass through the fix loop. belay checks it before starting each step, and a run that reaches it is paused with `graph: max steps exceeded` (exit code 3): raise it and `belay resume <run-id>` carries on with what the run has already spent still counted, because belay reads it again on every resume. It is a backstop for a graph that is not converging; `graph.give_up` is the limit meant to end a fix loop that is not making progress.
 
 ### `graph.node_timeout`
 
@@ -164,7 +168,7 @@ The most steps one run may execute in total, counting every step each time it ru
 **Default**: `"15m"`  
 **Example**: `"30m"`, `"1h30m"`
 
-The longest one step may run, written as a Go duration. A step still running at the deadline is cancelled, and the run is aborted with `graph: node timeout exceeded`, whatever the step returns afterwards. It must be greater than zero.
+The longest one step may run, written as a Go duration. A step still running at the deadline is cancelled, whatever it returns afterwards, and the run is paused with `graph: node timeout exceeded` (exit code 3). The step is charged an estimate of what it spent, since it reports nothing. Raise the setting and `belay resume <run-id>` runs that step again from its start; belay reads it again on every resume. It must be greater than zero.
 
 ### `graph.approval`
 
@@ -188,14 +192,17 @@ With `false`, planning routes straight to coding. That is the right setting for
 an unattended or CI run, and the wrong one for the first time you point belay
 at a repository you care about.
 
-In a queue, `graph.approval` means the same thing. When a goal's plan is
-written, `belay queue start` parks the goal for you to read the plan and moves
-on to the next goal; `belay queue approve <goal>` releases it, and the next
-start carries it on. The only way one queued goal skips the gate is `belay
-queue add --no-approval`, which you type when you add it; belay never turns
-the gate off by itself.
+A queue does not read `graph.approval`. Every queued goal's plan stops at the
+gate: `belay queue start` parks the goal for you to read the plan and moves on
+to the next; `belay queue approve <goal>` releases it, and the next start
+carries it on. The only way one queued goal skips the gate is `belay queue add
+--no-approval`, which you type when you add it. `graph.approval: false` in a
+`belay.yaml`, or in your own `config.yaml`, which reaches every repository,
+never takes a queued goal past it.
 
 A few settings work differently for queued goals, and these are all of them:
+
+- `graph.approval` is not read, as above: `--no-approval` decides, goal by goal.
 
 - Each goal runs in its own copy of the workspace, and reads the `belay.yaml`
   in that copy, as the file stood when belay reached the goal.
@@ -479,11 +486,11 @@ Guardrails a run's change must obey, whatever its tests say. A change that passe
 
 A branch run then commits exactly what was recorded and judged. Just before it commits, belay compares the run's worktree with what its steps recorded, and pauses, naming the files, if anything else changed there since: a file the test command wrote, an edit made by hand while the run was paused. It judges the change once more against the policy too, so a file the gate passed and something rewrote afterwards cannot ship. Both pauses are described in docs/troubleshooting.md.
 
-**What it does not protect against.** belay does not sandbox the agent. Claude Code and your test command run as you, and nothing stops them writing outside the workspace, into another repository, your home directory, or belay's own `.belay` directory; the gate judges the workspace and sees none of that. In a git checkout, a file your `.gitignore` excludes is not part of the change (a commit would not carry it either, but an in-place run leaves it in your checkout); an edit to a `.gitignore` is part of it and is judged. In a workspace with no git there are no ignore rules, so a file the test command writes into the tree, such as a `__pycache__` or a coverage report, counts as changed on the next pass of the fix loop. If you need the agent confined, run belay in a container or a VM that holds only the repository.
+**What it does not protect against.** belay does not sandbox the agent. Claude Code and your test command run as you, and nothing stops them writing outside the workspace, into another repository, your home directory, or belay's own `.belay` directory; the gate judges the workspace and sees none of that. In a git checkout, a file your `.gitignore` excludes is invisible to the gate: it is not part of the change (a commit would not carry it either, but an in-place run leaves it in your checkout); an edit to a `.gitignore` is part of it and is judged. In a workspace with no git there are no ignore rules, so a file the test command writes into the tree, such as a `__pycache__` or a coverage report, counts as changed on the next pass of the fix loop. A fork judges only what its agent reports, as the table says. Paths are compared without Unicode normalisation: on macOS a file name can be stored decomposed (an `é` as `e` and an accent) while a pattern spells it composed, and then the pattern does not match it, case folding or not. If you need the agent confined, run belay in a container or a VM that holds only the repository.
 
 Every rule is off by default, and a repository that declares no policy runs exactly as it did before this section existed: belay adds no step to the graph and reads no extra file.
 
-When a policy is set, belay adds a `policy` gate to the run's route, between `write` and `test`, and judges the change there on every pass of the fix loop. Two things follow:
+When a policy is set, belay adds a `policy` gate to the run's route, between `write` and `test`, and judges the change there on every pass of the fix loop. Three things follow:
 
 - **The rules are fixed when the run starts.** belay records them, and the dependencies your workspace declared, in the run's `manifest.json`, and `belay resume` judges the change against those and not against `belay.yaml` as it is by then. A run started with no policy never grows one: it has no gate, and no record of what its workspace looked like before the agent ran, so a policy added mid-run could only fail it for something it did not do. ADR-0014 records the decision.
 - **A violation is one of two kinds.** `forbidden_paths`, `max_changed_files` and `max_changed_lines` **end the run**: a change that touched a path it may not touch is not something to ask an agent to repair. Everything else goes to the **fix loop**, which tells the agent what it broke and asks for a repair, bounded by `graph.give_up` like any other repair.
@@ -721,7 +728,7 @@ budget:
 
 ## Validation
 
-belay checks the configuration before a run starts, and reports every problem it finds at once rather than stopping at the first:
+belay checks the configuration before a run starts. It reports every invalid value at once rather than stopping at the first, but a file it cannot read as a configuration at all — a key that names no setting, a value of the wrong type, broken YAML — stops at that one problem, and the values are checked once it is fixed:
 
 - A key that names no setting is an error, not a warning, so a typo cannot be silently ignored. So is a key written twice.
 - A value of the wrong type (e.g., `max_turns: "five"` instead of `5`) is an error naming the file, the line and the setting.
@@ -732,13 +739,24 @@ belay checks the configuration before a run starts, and reports every problem it
 
 ## Configuration Precedence
 
-Settings come only from the files listed under [File Location](#file-location), in that order, on top of the built-in defaults. No environment variable or command-line flag overrides an individual setting; to change one for a single run, put it in a file and pass that file with `--config`:
+Settings come only from the files listed under [File Location](#file-location), in that order, on top of the built-in defaults. No environment variable overrides a setting, and `belay run` and `belay resume` have no flag that does; to change one for a single run, put it in a file and pass that file with `--config`:
 
 ```bash
 # belay.yaml says max_usd: 10.0; this run gets 2.5 and keeps everything else
 printf 'budget:\n  max_usd: 2.5\n' > /tmp/cheap.yaml
 belay run --config /tmp/cheap.yaml "fix the bug"
 ```
+
+Two commands set a few settings themselves, whatever the files say, and these
+are all of them:
+
+- `belay fork` always edits its copy in place (`output.mode: in_place`), files
+  no plan (`plan.archive: false`) and never fans out (`fanout.enabled: false`);
+  `--model` sets `agent.models` for the step it re-runs; and a fork of a fix
+  that had used every round runs with `graph.give_up` one above the rounds
+  used.
+- `belay queue` runs every goal in place with `plan.archive: false`, and
+  decides the approval gate from `--no-approval` instead of `graph.approval`.
 
 ## References
 

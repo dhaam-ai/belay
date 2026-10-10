@@ -703,15 +703,18 @@ func TestTimelineRenderListsTheFilesTheRunChanged(t *testing.T) {
 }
 
 // timelineReadmeRun is the run README.md's "Example timeline output" shows:
-// the plan pauses at the approval gate, the tests fail twice and pass after
-// the second repair, and the change is three files.
+// an in-place run whose plan pauses at the approval gate, whose tests fail
+// twice and pass after the second repair, and whose change is three files.
 //
 // The durations and costs are illustrative. Everything else is what belay
 // records for such a run: each note is in the words its node writes (plan,
 // approve, code, write, the go-test runner, fix, and review with
-// golangci-lint), a failing test run finishes ok and routes to fix, the
+// golangci-lint), a failing test run finishes ok and routes to fix, a repair
+// routes back through write, which verifies the whole change again before
+// the tests run, each artifact is named after the step that wrote it, the
 // dispatcher gives every node a usage record, and the gate's pause is a
-// paused approve followed by run_paused and run_resumed.
+// paused approve followed by run_paused and run_resumed. A passing gate ends
+// the run, because a run that edits its workspace in place has no promote.
 func timelineReadmeRun() []journal.Record {
 	const planPath = "/home/you/app/.belay/runs/20260905T142530Z-1f2e3d4c5b6a/artifacts/plan.md"
 	free := func() *journal.Usage { return usd(0, 0, 0, false) }
@@ -735,17 +738,23 @@ func timelineReadmeRun() []journal.Record {
 			note:  "verified 3 changed file(s): 3 present, 0 deleted; recorded artifacts/diff-0005.patch"}).
 		node(timelineNodeSpec{node: "test", status: journal.StatusOK, durationMS: 3500, next: "fix",
 			usage: free(), note: "go-test: 12 tests, 1 failed"}).
-		node(timelineNodeSpec{node: "fix", status: journal.StatusOK, durationMS: 28400, next: "test",
+		node(timelineNodeSpec{node: "fix", status: journal.StatusOK, durationMS: 28400, next: "write",
 			usage: usd(14000, 5100, 0.120, false), note: "fix attempt 1 of 3: 1 of 12 tests failing"}).
+		node(timelineNodeSpec{node: "write", status: journal.StatusOK, durationMS: 100, next: "test",
+			usage: free(),
+			note:  "verified 3 changed file(s): 3 present, 0 deleted; recorded artifacts/diff-0008.patch"}).
 		node(timelineNodeSpec{node: "test", status: journal.StatusOK, durationMS: 2100, next: "fix",
 			usage: free(), note: "go-test: 12 tests, 1 failed"}).
-		node(timelineNodeSpec{node: "fix", status: journal.StatusOK, durationMS: 31200, next: "test",
+		node(timelineNodeSpec{node: "fix", status: journal.StatusOK, durationMS: 31200, next: "write",
 			usage: usd(16500, 6200, 0.150, false), note: "fix attempt 2 of 3: 1 of 12 tests failing"}).
+		node(timelineNodeSpec{node: "write", status: journal.StatusOK, durationMS: 100, next: "test",
+			usage: free(),
+			note:  "verified 3 changed file(s): 3 present, 0 deleted; recorded artifacts/diff-0011.patch"}).
 		node(timelineNodeSpec{node: "test", status: journal.StatusOK, durationMS: 2900, next: "review",
 			usage: free(), note: "go-test: 12 tests, 0 failed"}).
 		node(timelineNodeSpec{node: "review", status: journal.StatusOK, durationMS: 6400,
 			usage: free(),
-			note:  "gate pass: no issues at or above fail_on=major (source=golangci-lint, report=artifacts/review-11.json)"}).
+			note:  "gate pass: no issues at or above fail_on=major (source=golangci-lint, report=artifacts/review-13.json)"}).
 		run(journal.EventRunCompleted).
 		records
 }
@@ -1572,13 +1581,16 @@ func TestTimelineAGatePauseAndItsResumeAreOneVisit(t *testing.T) {
 					e.Index, e.Node, e.Iteration, e.Iterations)
 			}
 		}
-		wantLoops := []TimelineLoop{{Node: "test", Executions: 3}, {Node: "fix", Executions: 2}}
+		// A repair routes back through write, so write loops with test and
+		// fix: the gate's two records are still one visit and no loop.
+		wantLoops := []TimelineLoop{{Node: "write", Executions: 3}, {Node: "test", Executions: 3}, {Node: "fix", Executions: 2}}
 		if diff := cmp.Diff(wantLoops, tl.Loops); diff != "" {
 			t.Errorf("loops mismatch (-want +got):\n%s", diff)
 		}
-		// The loop is the test-and-fix stretch, steps 6 to 10: two repairs at
-		// $0.120 and $0.150, and the three test runs between and around them.
-		if got, want := [2]int{tl.Totals.LoopFirstIndex, tl.Totals.LoopLastIndex}, [2]int{6, 10}; got != want {
+		// The loop is the write-test-fix stretch, steps 5 to 12: two repairs
+		// at $0.120 and $0.150, and the three writes and three test runs
+		// between and around them, which cost nothing.
+		if got, want := [2]int{tl.Totals.LoopFirstIndex, tl.Totals.LoopLastIndex}, [2]int{5, 12}; got != want {
 			t.Errorf("loop span = %v, want %v", got, want)
 		}
 		if got, want := tl.Totals.LoopUSD, 0.270; math.Abs(got-want) > 1e-9 {

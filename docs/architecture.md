@@ -19,7 +19,7 @@ The four product pillars are:
 1. **Durable + Resumable**: Crash-resume from the last completed node, not from the beginning.
 2. **Quality-Gated**: Code must pass the quality gate, a linter or a SonarQube scan, before the run can finish.
 3. **Best-of-N Candidates**: fanout gives one goal N candidates, each a run of its own in a workspace of its own, run `fanout.concurrency` at a time, and join keeps the best (see Fanout/Join, and ADR-0019).
-4. **CLI-Agnostic**: Agent backend is pluggable (Claude Code in v0.1; Codex and Gemini via AgentBackend interface).
+4. **One seam for the agent**: The graph reaches the coding agent only through `belay.AgentBackend`. Claude Code is its only implementation, so that another agent CLI could be plugged in without changing the graph is a design promise proven once (ADR-0005).
 
 ## Architecture Layers
 
@@ -65,7 +65,7 @@ Only the budget ledger is recomputed from the journal. On resume the dispatcher 
 
 Beside the adapters, RunContext carries `Output`, how the run delivers its result. It is read from the run's manifest, where it was pinned when the run was created, never from live configuration.
 
-All adapters are injected at dispatcher creation time, making the entire graph backend-agnostic (ADR-0005).
+All adapters are injected at dispatcher creation time, so no node names a concrete backend, test runner or linter; with one agent backend, that independence is designed rather than demonstrated (ADR-0005).
 
 ### Layer 3: Dispatcher & Graph
 
@@ -104,9 +104,9 @@ By applying first, a crash can leave an applied patch with no journal record, bu
 
 The critical invariant: two conforming adapters produce reports that serialize to identical JSON key sets, regardless of content. This makes reports comparable and testable across implementations.
 
-The graph acts only on `Gate`: if GateFail, the run branches to the `fix` node (bounded by a loop counter); if GatePass, the run finishes; if GateError, the run fails (the tool could not reach a verdict, not "the code is bad").
+The graph acts only on `Gate`: if GateFail, the run branches to the `fix` node (bounded by a loop counter); if GatePass, the run finishes, or goes on to `promote` in a run on a branch; if GateError, the run fails (the tool could not reach a verdict, not "the code is bad").
 
-**Budget Ledger** (see `internal/budget/budget.go`): Day-one constraint (ADR-0007). Every node's Usage is added to a cumulative budget. Before each node the dispatcher checks the total against `budget.max_usd` and `budget.max_tokens` in belay.yaml. Once either is exceeded, `budget.on_exceed` decides: `abort`, the default, stops the run with an error wrapping belay.ErrBudgetExceeded; `warn` logs the overrun and carries on. `abort` pauses the run rather than ending it, so raising the ceiling and running `belay resume` continues it with the spend it has already made still counted; the limits are read from belay.yaml on every dispatch, unlike the shape of the graph, which is pinned when the run is created.
+**Budget Ledger** (see `internal/budget/budget.go`): Day-one constraint (ADR-0007). Every node's Usage is added to a cumulative budget. Before each node the dispatcher checks the total against `budget.max_usd` and `budget.max_tokens` in belay.yaml, except before `join` and `promote`, which call no model (`graph.Unpriced`): stopping there would save nothing and keep a run from delivering what it has already bought. Their spend is still recorded. Once either ceiling is exceeded, `budget.on_exceed` decides: `abort`, the default, pauses the run with an error wrapping belay.ErrBudgetExceeded, so raising the ceiling and running `belay resume` continues it with the spend it has already made still counted; `warn` logs the overrun and carries on. The limits are read from belay.yaml on every dispatch, unlike the shape of the graph, which is pinned when the run is created. A step cut short by Ctrl-C, `graph.node_timeout` or a kill reports nothing of what it spent, and is charged the costliest step recorded before it, marked as an estimate (ADR-0007).
 
 Usage.Estimated reports whether USD was computed from actual backend costs or estimated from a fallback table (belay.Usage.Estimated); callers can log differently for estimated costs.
 
@@ -124,8 +124,10 @@ Usage.Estimated reports whether USD was computed from actual backend costs or es
 - `belay run "<what you want built>"`: start a new run. `--workspace` names the repository, and `--config` adds a settings file on top of belay.yaml
 - `belay resume <run-id>`: continue a paused or crashed run
 - `belay plan [run-id]`: read the plan a run stopped at, or a finished run's plan wherever it has moved to; `--regenerate "<guidance>"` records a request for a new one and continues the run, so the plan node writes it, and `--archive` finishes moving a finished run's plan into the repository when the run could not. At a terminal it opens the plan viewer instead of printing (see *The plan review* below)
-- `belay runs`: list the workspace's runs
+- `belay runs`: list the workspace's runs, newest first (20 unless `--limit` says otherwise)
 - `belay timeline <run-id>`: inspect the journal and manifest
+- `belay fork <run-id> <node>`: make a new run that re-runs one visit of a node from that visit's snapshot, in a copy of the workspace under `.belay/forks/<fork-id>` (`internal/fork`, ADR-0017)
+- `belay queue`: line up goals with `add`, run them one at a time with `start`, release a parked plan with `approve`, and read the report with `status` or `list` (`internal/queue`, ADR-0017)
 - Config is validated on load; invalid settings abort before any work starts.
 - `--no-input` never opens the plan viewer, wherever belay is run
 
@@ -170,8 +172,8 @@ The run progresses through a directed graph of nodes (see `internal/graph/node.g
 - **write**: Records what the run changed: the files the agent reported, together with every file the workspace itself says changed (git against the run's base commit, or a record of the workspace's files taken when the run began, through `RunContext.Changes`). It checks each against the workspace, refusing any path outside it, records them in state.Code.ChangedFiles with a diff artifact, and keeps the ones the agent did not report in state.Code.Unreported. It never modifies the workspace: the agent has already edited the files in place. Branches to test, or to policy in a guarded run.
 - **policy** (guarded runs only): Judges the recorded change, and the workspace's answer asked again, against the rules the run's manifest pinned, naming every file the agent did not report. A fail-class violation ends the run; a fix-class one goes to fix. A run with no record to measure against (a fork) is judged on the agent's report, and the verdict says so.
 - **test** (TestRunner): Executes the test suite. If all tests pass, branches to review; if any fail, branches to fix.
-- **fix** (Agent): Uses the agent to fix failing tests, and adds the files the repair reports changing to the run's list of changed files (state.Code.ChangedFiles). Branches back to test. Reached again after `graph.give_up` repairs, it fails the run instead of repairing, so the loop cannot run forever.
-- **review** (Linter or Reviewer): Runs the quality gate, a linter or a SonarQube scan. If gate passes, branches to END; if gate fails, branches to fix.
+- **fix** (Agent): Uses the agent to repair what failed — the tests, the quality gate, or a fix-class policy violation — and adds the files the repair reports changing to the run's list of changed files (state.Code.ChangedFiles). Branches to write, which verifies and records the whole change again before the tests run, and in a guarded run judges it at the policy gate. Reached again after `graph.give_up` repairs, it fails the run instead of repairing, so the loop cannot run forever.
+- **review** (Linter or Reviewer): Runs the quality gate, a linter or a SonarQube scan. If the gate passes, branches to END, or to promote in a run on a branch; if it fails, branches to fix.
 - **fanout** (candidate runs): Divides the remaining budget between the candidates and runs each as a candidate run of its own, through the pool the dispatcher provides. Branches to join once every candidate has an end state; pauses when a candidate could not be finished for a reason a resume can fix.
 - **join**: Picks a winner among the eligible candidates, by `fanout.select`, and records it in state.Winner. Branches to promote in a branch run, to END in an in-place run, and fails the run when no candidate is eligible.
 - **promote** (branch runs only): Commits the run's change on its branch, or merges the winner. It first compares the tree with what the run's steps recorded and pauses, naming the files, on anything else, and in a guarded run judges the change against the policy once more, so what it commits is what was judged.
@@ -180,7 +182,7 @@ The run progresses through a directed graph of nodes (see `internal/graph/node.g
 - StatusOK with Next="END": run completed successfully
 - StatusFailed: a node returned an error or returned StatusFailed
 - StatusAborted: a node returned StatusAborted, ending the run
-- StatusPaused: the run is waiting and `belay resume` continues it. Four things pause a run: the human approval gate; the caller's context being cancelled, for which `belay run` and `belay resume` set the dispatcher's `PauseOnCancel`, so a Ctrl-C or SIGTERM closes the interrupted attempt as aborted, naming the node itself as `next`, and `belay resume` re-runs that node; and belay's own limits — the budget ceiling, `graph.max_steps` and `graph.node_timeout` — each of which records in its note the setting to raise. The invocation still exits 3 for a pause that was not the graph's own choice, so a script can tell the two apart
+- StatusPaused: the run is waiting and `belay resume` continues it. Five things pause a run: the approve gate, which waits for a person to read the plan, and pauses again with a reason when the plan file was emptied or is not text; the caller's context being cancelled, for which `belay run` and `belay resume` set the dispatcher's `PauseOnCancel`, so a Ctrl-C or SIGTERM closes the interrupted attempt as aborted, naming the node itself as `next`, and `belay resume` re-runs that node; belay's own limits — the budget ceiling, `graph.max_steps` and `graph.node_timeout`, including a step that refuses because it can see the ceiling will not cover what it is about to buy — each of which records in its note the setting to raise; the fanout node, when a candidate could not be finished for a reason a resume could fix, or its candidates stopped at a limit; and promote, when a winner's merge conflicts or the worktree holds a change no step recorded or the policy no longer passes. The invocation still exits 3 for a pause that was not the graph's own choice, so a script can tell the two apart
 
 If a node returns an error or an invalid Result, the dispatcher stops the run and records the failure. The user inspects the journal with `belay timeline`, fixes the underlying issue, and starts a new run: `belay resume` refuses a run that has failed.
 
@@ -200,13 +202,13 @@ If a node returns an error or an invalid Result, the dispatcher stops the run an
 
 Five pluggable interfaces in `pkg/belay` allow third-party implementations:
 
-- **AgentBackend** (see `pkg/belay/agent.go`): LLM code generation. One method: Invoke(ctx, AgentRequest) → AgentResponse. The request carries the prompt, working directory, MCP config, and optional session ID for resumption. The response carries generated text, usage, and session ID for continuation. Implemented by internal/agent/claude (v0.1) and future Codex, Gemini implementations.
+- **AgentBackend** (see `pkg/belay/agent.go`): LLM code generation. Invoke(ctx, AgentRequest) → AgentResponse, beside Name(). The request carries the prompt, working directory, model, turn limit, allowed tools, MCP config, and optional session ID for resumption. The response carries generated text, usage, and session ID for continuation. Implemented by internal/agent/claude, the only backend; internal/agent/replay wraps it to record a cassette or answer from one.
 
-- **TestRunner** (see `pkg/belay/runner.go`): Test execution auto-detection and running. Two methods: Detect(dir) → bool (is this a project this runner can test?), Test(ctx, dir) → TestReport. Returns test pass/fail counts, failure details, and coverage. Implemented by internal/runner for Go, Node, Python. A missing toolchain returns an error wrapping belay.ErrToolchainMissing (not a TestReport with a failure).
+- **TestRunner** (see `pkg/belay/runner.go`): Test execution auto-detection and running. Two methods beside Name(): Detect(dir) → bool (is this a project this runner can test?), Test(ctx, dir) → TestReport. Returns test pass/fail counts, failure details, and coverage. Implemented by internal/runner for Go, Node, Python. A missing toolchain returns an error wrapping belay.ErrToolchainMissing (not a TestReport with a failure).
 
-- **Linter** (see `pkg/belay/linter.go`): Static analysis auto-detection and running. Two methods: Detect(dir) → bool, Lint(ctx, dir) → QualityReport. Like TestRunner, a missing toolchain is an error, not a failed gate. Implemented by internal/linter for golangci-lint, eslint, ruff.
+- **Linter** (see `pkg/belay/linter.go`): Static analysis auto-detection and running. Two methods beside Name(): Detect(dir) → bool, Lint(ctx, dir) → QualityReport. Like TestRunner, a missing toolchain is an error, not a failed gate. Implemented by internal/linter for golangci-lint, eslint, ruff.
 
-- **Reviewer** (see `pkg/belay/quality.go`): Holistic quality assessment against a caller-supplied threshold. One method: Review(ctx, ReviewRequest) → QualityReport. Takes file list and FailOn severity. Implemented by internal/review for SonarQube (server or Docker mode) and AI review.
+- **Reviewer** (see `pkg/belay/quality.go`): Holistic quality assessment against a caller-supplied threshold. One method: Review(ctx, ReviewRequest) → QualityReport. Takes file list and FailOn severity. Implemented by internal/sonar/scanner, the SonarQube scanner run in Docker or as an installed binary, and by internal/nodes/aireview, which asks SonarQube through its MCP server (internal/sonar/mcp) and which `belay run` does not wire in yet.
 
 - **Isolator** (see `pkg/belay/isolate.go`): Workspace isolation. Two methods: Create(ctx, src, id) → Workspace, Destroy(ctx, ws) → error. Implemented by internal/isolate/worktree, a git worktree per candidate, and internal/isolate/dircopy, a directory copy; the CLI builds one per run, rooted at the run's candidates directory.
 
@@ -214,7 +216,7 @@ Five pluggable interfaces in `pkg/belay` allow third-party implementations:
 
 **Error Categories** (see `pkg/belay/errors.go`):
 
-1. **ToolchainMissing** (ErrToolchainMissing): A required binary is not installed (go, pytest, golangci-lint, sonar-scanner). The remedy is to install software, not to edit code. The graph routes this to a human, not to the fix loop.
+1. **ToolchainMissing** (ErrToolchainMissing): A required binary is not installed (go, pytest, golangci-lint, sonar-scanner). The remedy is to install software, not to edit code, so the run fails with the error rather than going to the fix loop. `--dry-run` does not check for it.
 
 2. **BudgetExceeded** (ErrBudgetExceeded): Run cost crossed its configured ceiling. Retrying it unchanged only meets the ceiling again; the run is paused, and raising `budget.max_usd` or `budget.max_tokens` and resuming continues it.
 
@@ -229,12 +231,15 @@ Five pluggable interfaces in `pkg/belay` allow third-party implementations:
 2. On restart, `journal.Open` discards the incomplete record and rewrites the file atomically without it
 3. `journal.ResolveStart` names where to resume: the `next` of the last `node_finished` record, or, when the last node started and never finished (or its attempt was closed as interrupted), that node again at the next attempt
 4. Node patches are absolute sets, not deltas, so re-running a node whose patch landed before the crash but whose completion was never journaled is safe
+5. The processes the interrupted step started — the agent, the tests, a linter — may still be running. `internal/procgroup` recorded each before it started, under `$XDG_STATE_HOME/belay` (or `~/.local/state/belay`) rather than in the run directory, and heal kills each group still recorded once it has checked the process's start time, that it leads its own group and that it runs the recorded program
+6. The step that was cut short is charged the costliest step recorded before it, marked as an estimate, unless it reported its own spend; `join`, `promote` and `fanout` are charged nothing, since their spend is not their own
 
 **User Recovery**: Users can:
 - `belay resume <run-id>`: continue a paused or crashed run (refusing runs already in terminal states)
 - `belay plan [run-id]`: read the plan a run stopped at, or ask for a different one with `--regenerate`
 - `belay timeline <run-id>`: inspect the journal and manifest to diagnose failures
-- `belay run` again once an external cause is fixed (e.g., a network outage): a run that failed cannot be continued, so the retry is a new run, and it starts from the working directory as the failed run left it
+- `belay run` again once an external cause is fixed (e.g., a network outage): a run that failed cannot be continued, so the retry is a new run. In place, it starts from the working directory as the failed run left it; on a branch, it starts from the commit your checkout is on, and the failed run's work stays in its own worktree, `.belay/runs/<run-id>/worktree`
+- `belay fork <run-id> <node>` to re-run one step of a run, failed or not, from the state it was in before that step, without paying for the steps before it
 
 ## Performance & Concurrency
 

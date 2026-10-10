@@ -25,8 +25,6 @@ brew install belay
 belay version
 ```
 
-Requires the tap to be published; until then use one of the options below.
-
 ### Go 1.26+
 
 ```bash
@@ -133,7 +131,8 @@ with `belay timeline`.
 
 belay uses whatever Claude Code login you already have, and the same model
 selection: `agent.model` in `belay.yaml` is passed straight through as
-`--model`.
+`--model`, and `agent.models` can give the plan, code and fix steps a model
+each.
 
 ## Five-Minute Quickstart
 
@@ -145,12 +144,15 @@ belay works on any Go, Node, or Python project with tests. It will auto-detect y
 cd /path/to/your/project
 ```
 
-In a git repository, belay works on its own branch — `belay/<run-id>`, in its
-own worktree — and commits once after the quality gate passes. Your checkout
-is never edited, so uncommitted work in it is safe; it is also not part of the
-run, which starts from the commit you are on. Outside a git repository belay
-edits the workspace directly. It says which it is doing before it spends
-anything, and `belay --dry-run run` says it without creating anything.
+In a git repository that has at least one commit, belay works on its own
+branch — `belay/<run-id>`, in its own worktree — and commits once after the
+quality gate passes. Your checkout is never edited, so uncommitted work in it
+is safe; it is also not part of the run, which starts from the commit you are
+on. A branch also needs git 2.38 or newer and a repository without
+submodules. Otherwise — outside a git repository, before its first commit,
+with submodules or an older git — belay edits the workspace directly. It says
+which it is doing, and why, before it spends anything, and
+`belay --dry-run run` says it without creating anything.
 
 ### 2. Create a belay.yaml
 
@@ -163,14 +165,14 @@ agent:
   model: "sonnet"
 graph:
   approval: true          # Pause after planning so you can review
-  give_up: 3              # Retry failing tests up to 3 times
-  max_steps: 50           # Stop after 50 total node executions
+  give_up: 3              # Repair failing tests or a failing gate up to 3 times
+  max_steps: 50           # Pause after 50 steps in all
 review:
   mode: "lint"            # Use local linters (golangci-lint, eslint, ruff)
   fail_on: "major"        # Fail if linter finds major issues or worse
 budget:
-  max_usd: 5.0            # Spend at most $5, then stop
-  on_exceed: "abort"      # Abort if budget is hit
+  max_usd: 5.0            # Once $5 is spent, pause before the next step
+  on_exceed: "abort"      # Stop at the ceiling rather than warn and carry on
 ```
 
 ### 3. Set a credential
@@ -197,13 +199,18 @@ belay run --dry-run "add a --json flag to the CLI output"
 ```
 
 This shows:
-- The goal you entered
+- The goal you entered, and the kind of project belay found
+- Where the result would go: a branch, or your workspace edited in place
 - The most it could spend, and what reaching that ceiling does
-- The configuration files it read, the agent it will call, and the tests and linter it found
+- The model each step would use, at its list rate
+- The configuration files it read, the agent it will call, and the test runner and quality gate it picked for that project
 - Which credentials are set, without their values
 - The route through the graph, and when belay gives up
-- Where it would record the run
+- Where it would record the run, and where the plan would go
 - **But does not create anything or spend money.**
+
+It does not check that `claude`, your test toolchain or the linter is
+installed: a missing one fails the run at the step that needs it.
 
 Example output:
 
@@ -257,17 +264,25 @@ Nothing was created and nothing was spent. Run the same command without --dry-ru
 belay run "add a --json flag to the CLI output"
 ```
 
-belay writes a plan to `.belay/runs/<run-id>/artifacts/plan.md`, prints where it is, and stops, waiting for your approval. Read it.
+belay writes a plan to `.belay/runs/<run-id>/artifacts/plan.md` and stops,
+waiting for your approval. At a terminal it opens the plan in a full-screen
+viewer: scroll it, edit, add, delete and reorder its steps, undo, save, press
+`c` to approve it and carry on, `r` to ask the agent for a different plan, `?`
+for every key, or `q` to leave with the run still waiting. Anywhere else —
+input or output that is not a terminal, `CI` set (to anything but `0` or
+`false`), `TERM` unset or `dumb`, or `--no-input` given — belay prints where
+the plan is and exits, and the run waits for `belay resume`.
 
 ```bash
-# Look at the plan:
+# Look at the plan (at a terminal this opens the viewer; --no-input prints it):
 belay plan
 
 # If you like it, continue:
 belay resume
 ```
 
-If something goes wrong, you can edit the plan before resuming, and belay will use your edited version.
+If something goes wrong, you can edit the plan file before resuming, and belay
+will use your edited version.
 
 If it is not what you wanted at all, have the agent write another one instead
 of editing this one yourself:
@@ -281,15 +296,28 @@ your words in the prompt, and stops at the plan again so you can read it. That
 is a step of the run like any other: it is journaled, it counts against the
 budget, and `belay resume` picks it up if it is interrupted.
 
+belay colours its output only when it writes to a terminal. `--no-color`, or a
+non-empty `NO_COLOR` in the environment, turns colour off there too.
+
+Add `--pr` to `belay run` and, when a run on a branch finishes, belay pushes
+the branch and opens a draft pull request through `gh`, GitHub's own command
+line. It checks before the run starts that it could: a run that edits in
+place, a missing `gh` or a repository with no remote is refused up front. A
+pull request that cannot be opened at the end never fails the run; belay
+prints the two commands that finish the job by hand.
+
 ### 6. Watch the run unfold
 
 ```bash
-# List all runs:
+# List the workspace's runs, newest first (the latest 20; --limit 0 lists them all):
 belay runs
 
 # See how one unfolded, step by step:
 belay timeline <run-id>
 ```
+
+`belay runs --json`, `belay timeline --json` and `belay queue list --json`
+print the same as JSON, for scripts.
 
 Example timeline output:
 
@@ -298,35 +326,39 @@ run     20260905T142530Z-1f2e3d4c5b6a
 goal    add a --json flag to the CLI output
 status  finished
 
-   #  node       outcome   duration    cost
-   1  plan       finished     12.3s  $0.040  █████
+   #  node        outcome   duration    cost
+   1  plan        finished     12.3s  $0.040  █████
       plan archived to artifacts/plan.md (1843 bytes); next approve
-   2  approve    paused        0.0s  $0.000  █
+   2  approve     paused        0.0s  $0.000  █
       Plan is waiting for your approval. Review or edit /home/you/app/.belay/runs/20260905T142530Z-1f2e3d4c5b6a/artifacts/plan.md, then continue with: belay resume 20260905T142530Z-1f2e3d4c5b6a
       waited 4m 12.0s here, then resumed
-   3  approve    finished      0.0s  $0.000  █
+   3  approve     finished      0.0s  $0.000  █
       Plan approved; proceeding to code.
-   4  code       finished     45.2s  $0.180  ██████████████████
+   4  code        finished     45.2s  $0.180  ██████████████████
       code: claude-code reported changes to 3 file(s) (new session)
-   5  write      finished      0.1s  $0.000  █
+   5  write #1/3  finished      0.1s  $0.000  █
       verified 3 changed file(s): 3 present, 0 deleted; recorded artifacts/diff-0005.patch
-   6  test #1/3  finished      3.5s  $0.000  █
+   6  test #1/3   finished      3.5s  $0.000  █
       go-test: 12 tests, 1 failed
-   7  fix #1/2   finished     28.4s  $0.120  ███████████
+   7  fix #1/2    finished     28.4s  $0.120  ███████████
       fix attempt 1 of 3: 1 of 12 tests failing
-   8  test #2/3  finished      2.1s  $0.000  █
+   8  write #2/3  finished      0.1s  $0.000  █
+      verified 3 changed file(s): 3 present, 0 deleted; recorded artifacts/diff-0008.patch
+   9  test #2/3   finished      2.1s  $0.000  █
       go-test: 12 tests, 1 failed
-   9  fix #2/2   finished     31.2s  $0.150  ████████████
+  10  fix #2/2    finished     31.2s  $0.150  ████████████
       fix attempt 2 of 3: 1 of 12 tests failing
-  10  test #3/3  finished      2.9s  $0.000  █
+  11  write #3/3  finished      0.1s  $0.000  █
+      verified 3 changed file(s): 3 present, 0 deleted; recorded artifacts/diff-0011.patch
+  12  test #3/3   finished      2.9s  $0.000  █
       go-test: 12 tests, 0 failed
-  11  review     finished      6.4s  $0.000  ███
-      gate pass: no issues at or above fail_on=major (source=golangci-lint, report=artifacts/review-11.json)
+  13  review      finished      6.4s  $0.000  ███
+      gate pass: no issues at or above fail_on=major (source=golangci-lint, report=artifacts/review-13.json)
 
-  loops       test ran 3 times, fix ran 2 times
-  loop cost   steps 6-10 cost $0.270 and 1m 08.1s — 55% of the run's spend
-  agent time  2m 12.1s across 11 nodes
-  wall clock  6m 37.1s   2026-09-05 14:25:31Z → 14:32:08Z
+  loops       write ran 3 times, test ran 3 times, fix ran 2 times
+  loop cost   steps 5-12 cost $0.270 and 1m 08.4s — 55% of the run's spend
+  agent time  2m 12.3s across 13 nodes
+  wall clock  6m 39.3s   2026-09-05 14:25:31Z → 14:32:10Z
   spend       $0.490 of the $5.00 ceiling
 
 Files changed:
@@ -354,10 +386,10 @@ Everything belay records about a run lives in `.belay/runs/<run-id>`:
 - `state.json` — what the steps have produced so far, which every step reads: the plan, the files changed, the latest test and review results, how many repairs were made
 - `journal.ndjson` — an append-only record of every step's start and finish, from which `belay resume` works out where to pick up
 - `snapshots/` — a copy of what each step was given, taken before it ran, so a step run again after a crash or a Ctrl-C starts from the same place
-- `artifacts/` — the plan the agent generated (`artifacts/plan.md`), the agent's summary of the code it wrote, the diff each write step recorded, and the test and quality-gate reports
+- `artifacts/` — the plan the agent generated (`artifacts/plan.md`), the agent's summary of the code it wrote, the diff each write step recorded, and the test, quality-gate and, in a run with a policy, policy-gate reports
 - `nodes/` — for each step that called the agent, the prompt it sent and the reply it got
 
-If you stopped the run with Ctrl-C, or it crashed mid-execution, your work is safe on disk. `belay resume` picks it up where it left off: the step that was interrupted runs again, and the steps that finished do not. A run that belay stopped on its own, at the budget ceiling, `graph.max_steps` or `graph.node_timeout`, is waiting too: raise that setting in belay.yaml and `belay resume` carries on with what the run has already spent still counted, rather than spending it again from the beginning.
+If you stopped the run with Ctrl-C, or it crashed mid-execution, your work is safe on disk. `belay resume` picks it up where it left off: the step that was interrupted runs again, and the steps that finished do not. A belay that was killed may leave the agent or your tests running; belay records every process it starts for a step under `$XDG_STATE_HOME/belay` (or `~/.local/state/belay`), outside the run directory, and `belay resume` stops what is still running from the interrupted step. belay needs `HOME` or `XDG_STATE_HOME` set to keep those records, and starts no process without them. A run that belay stopped on its own, at the budget ceiling, `graph.max_steps` or `graph.node_timeout`, is waiting too: raise that setting in belay.yaml and `belay resume` carries on with what the run has already spent still counted, rather than spending it again from the beginning.
 
 When a run finishes, its plan moves out of that directory and into your
 repository, as `docs/plans/<run-id>-<slug>.md`: it is the record of why the
@@ -368,8 +400,13 @@ as a new file for you to commit or delete. `belay plan <run-id>` shows it
 wherever it is, and `plan.archive` in belay.yaml turns it off.
 
 Nothing else in `.belay` is meant to be committed, and belay says so to git:
-the first run in a repository writes `.belay/.gitignore`. If you want to
-delete a run, `rm -rf .belay/runs/<run-id>` is safe.
+the first run in a repository writes `.belay/.gitignore`. To delete a run that
+edited your workspace in place, `rm -rf .belay/runs/<run-id>`. A run on a
+branch that paused or failed also has a git worktree in that directory:
+remove it first with `git worktree remove .belay/runs/<run-id>/worktree` (add
+`--force` to throw away what is uncommitted in it), or git keeps a stale entry
+for it. A completed branch run's worktree is already gone. Either way the
+branch `belay/<run-id>` stays until you delete it with `git branch -D`.
 
 ### 8. Try one step again, without paying for the rest
 
@@ -386,11 +423,20 @@ belay fork <run-id> test --visit 2
 ```
 
 belay makes a new run in a copy of your repository, under
-`.belay/forks/<fork-id>`, runs the one step and pauses; the run you forked is
-only ever read. If your files have changed since that step ran, belay stops
-and says so, and `--current-files` re-runs it on them as they are now. When
-it pauses it tells you how to see what the step did and how to carry the
-fork on, which is an ordinary resume pointed at the copy:
+`.belay/forks/<fork-id>`, runs the one step and pauses before the next one
+(or finishes, when that step was the last); the run you forked is only ever
+read. If your files have changed since that step ran, belay stops and says
+so, and `--current-files` re-runs it on them as they are now. Forking a fix
+step that gave up gives it one more round: as it stood, it had used every
+round `graph.give_up` allows and would give up again without calling the
+agent, so the fork runs with one more, and says so with the other
+differences before it spends anything.
+
+The copy is made like a queued goal's: it leaves out `.git`, `node_modules`,
+`vendor`, `.venv`, `__pycache__`, `dist`, `build`, `target` and `.belay`, so a
+test that needs one of those fails in the fork until the test command makes
+it. When the fork pauses, belay tells you how to see what the step did and
+how to carry the fork on, which is an ordinary resume pointed at the copy:
 
 ```bash
 belay --workspace .belay/forks/<fork-id> resume <fork-id>
@@ -412,13 +458,14 @@ belay queue          # what happened, what it cost, and what to do next
 Each goal gets a run of its own, in a copy of your workspace made when belay
 reaches the goal, under `.belay/queue/work/`. Your checkout is never edited:
 a finished goal's change is in its copy, and you take what you want from it by
-hand.
+hand. `belay queue list` lists the goals, and with `--json` prints each one's
+state, run, copy and spend for a script.
 
-A goal's plan still stops for you to read it, as every run's does. The queue
-parks that goal and moves on to the next, and `belay queue approve <goal>`
-releases it for the next `belay queue start`. Only a goal you add with
-`--no-approval` goes from its plan to its code without you; belay never makes
-that choice for you.
+A goal's plan stops for you to read it. The queue parks that goal and moves
+on to the next, and `belay queue approve <goal>` releases it for the next
+`belay queue start`. Only a goal you add with `--no-approval` goes from its
+plan to its code without you; the queue does not read `graph.approval`, so
+turning the gate off in a `belay.yaml` never takes a queued goal past it.
 
 Every goal is held to `budget.max_usd` on its own, and `belay queue start`
 says how many goals it will run and the most they can spend together before it
@@ -430,32 +477,23 @@ the same run, and then the rest.
 ## How It Works (in One Picture)
 
 ```
-┌──────────────────────────────────────────────────────┐
-│ belay run "your goal"                                │
-│  ↓                                                   │
-│ ┌────────────────────────────────────────────────┐  │
-│ │ plan (Agent)      → Generate a plan            │  │
-│ │  ↓                                              │  │
-│ │ approve (Human)   → Read plan, edit if needed  │  │
-│ │  ↓                                              │  │
-│ │ code (Agent)      → Generate code              │  │
-│ │  ↓                                              │  │
-│ │ write (belay)     → Record the changed files   │  │
-│ │  ↓                                              │  │
-│ │ test (Runner)     → Run test suite             │  │
-│ │  ├─ pass? → review (next)                      │  │
-│ │  └─ fail? → fix (loop)                         │  │
-│ │      ↓                                          │  │
-│ │ fix (Agent) × up to N retries                  │  │
-│ │      ↓                                          │  │
-│ │ review (Linter)   → Check quality gate         │  │
-│ │  ├─ pass? → DONE                               │  │
-│ │  └─ fail? → fix (loop again)                   │  │
-│ └────────────────────────────────────────────────┘  │
-│  Each step's result is journaled to disk              │
-│  If belay crashes, the next invocation resumes here   │
-└──────────────────────────────────────────────────────┘
+belay run "your goal"
+
+ plan ──► approve ──► code ──► write ──► test ──► review ──► promote ──► done
+ agent    you         agent    belay     runner   linter     git
+                                 ▲        │ fail    │ fail
+                                 │        ▼         ▼
+                                 └──────[ fix (agent) ]
 ```
+
+A repair goes back through `write`, which checks and records the whole change
+again before the tests run, and a repair loop ends when the tests and the gate
+pass or after `graph.give_up` repairs. `approve` is there while
+`graph.approval` is on, a run with a `policy` in `belay.yaml` judges the
+change in a `policy` step between `write` and `test`, and only a run on a
+branch has `promote`, which commits; a run that edits in place is done when
+the gate passes. Each step's result is journaled to disk, and if belay
+crashes, `belay resume` picks up at the step that was cut off.
 
 For every step:
 1. **The limits are checked** — the budget ceiling and `graph.max_steps` — before anything is spent
@@ -473,25 +511,28 @@ If a crash occurs mid-execution, the journal file may have a half-written last l
 Every step's result is saved, and its finish journaled, *before* the next step starts. If a run crashes, the next `belay resume` reads the journal and picks up after the last completed step, not from the beginning. Tokens spent on completed work are not wasted.
 
 ### 2. Approval Gates
-The `approve` step pauses the run after the agent writes a plan. You can read it, edit it, and decide whether to proceed. This stops a runaway agent before it writes code. It is the only step that pauses a run for you. A failing quality gate does not pause: it sends the change to `fix`, like a failing test, and a run that `graph.give_up` repairs have not brought to passing tests and a passing gate ends as failed.
+The `approve` step pauses the run after the agent writes a plan. You can read it, edit it, and decide whether to proceed. This stops a runaway agent before it writes code. It is the one gate that always waits for you, but not the only pause: a run also pauses when you press Ctrl-C, when it reaches the budget ceiling, `graph.max_steps` or `graph.node_timeout`, when a fanout has candidates a resume could still finish, and when `promote` needs you — a merge that conflicts, or a change in the worktree no step recorded or judged. Each says what to do, and `belay resume` carries on. A failing quality gate does not pause: it sends the change to `fix`, like a failing test, and a run that `graph.give_up` repairs have not brought to passing tests and a passing gate ends as failed.
 
 ### 3. Best-of-N Candidates (Fanout)
-Give one goal N independent candidates and keep the best, so that the variance between agent runs works for you. With `fanout.enabled: true` a run goes plan → approve → fanout → join: once you approve the plan, each candidate codes, tests, repairs and is reviewed in a workspace of its own — a git worktree on its own branch, or a directory copy — `fanout.concurrency` at a time, and `join` keeps the one `fanout.select` prefers among those whose tests passed. A branch run then merges the winner onto its branch; an in-place run leaves it in its workspace for you to copy back.
+Give one goal N independent candidates and keep the best, so that the variance between agent runs works for you. With `fanout.enabled: true` a run goes plan → approve → fanout → join: once you approve the plan, each candidate codes, tests, repairs and is reviewed in a workspace of its own — a git worktree on its own branch, or a directory copy — `fanout.concurrency` at a time, and `join` keeps the one `fanout.select` prefers among those whose tests passed, whose run completed and that broke no `policy` rule. A branch run then merges the winner onto its branch; an in-place run leaves it in its workspace for you to copy back.
 
 Each candidate is a run of its own, with its own journal, so a crash or a Ctrl-C mid-fanout resumes like any run: finished candidates are kept, and only the interrupted ones run again. The budget is divided between the candidates before any of them starts, and `--dry-run` shows each one's share. See ADR-0019, and *Maturity & Limitations* below for what fanout costs.
 
-### 4. CLI-Agnostic Orchestration
-The graph definition and all orchestration logic are independent of which agent backend you use. The `belay.AgentBackend` interface is public: you can implement Claude, Codex, Gemini, or your own LLM. The same belay workflow runs against any backend without code changes.
+### 4. The Agent Behind One Interface
+The graph and the orchestration logic reach the coding agent only through the public `belay.AgentBackend` interface, so another agent CLI could be plugged in without changing the graph. That is a design promise proven by one implementation: Claude Code is the only backend belay ships, and no second one has been built to test the seam (ADR-0005).
 
 ## Configuration
 
 Every belay run reads `belay.yaml` from your project root. Your user config is read before it and a file you pass with `--config <path>` after it, merged setting by setting, so a setting in a later file wins. The file controls:
-- **agent**: which backend and model, and the mode: `live`, `record` or `replay`
+- **agent**: which backend and model, a model per step (`agent.models`), and the mode: `live`, `record` or `replay`
 - **graph**: the approval gate, how many repairs before giving up, the step cap, and the timeout per step
 - **test**: auto-detect or custom test command
 - **review**: the quality gate: local linters (`lint`), SonarQube (`sonar`), or the AI reviewer (`ai`), which `belay run` does not use yet
-- **budget**: spend ceiling in USD and tokens
-- **fanout**: best-of-N candidates: whether a run fans out, how many candidates, how many run at a time, and how the winner is chosen
+- **budget**: spend ceiling in USD and tokens, and whether reaching it stops the run or only warns
+- **fanout**: best-of-N candidates: whether a run fans out, how many candidates, how many run at a time, how each one's workspace is made, and how the winner is chosen
+- **output**: whether a run works on its own branch or edits the workspace in place
+- **plan**: whether a finished run's plan moves into the repository, and where
+- **policy**: rules a run's change must obey whatever its tests say — paths it may not touch, size ceilings, new dependencies, required tests, forbidden content
 
 See `docs/config.md` for the complete reference, including examples.
 
@@ -499,13 +540,13 @@ See `docs/config.md` for the complete reference, including examples.
 
 belay is built on a few core ideas:
 
-1. **State machine, not a list of tasks**: Each step (plan, approve, code, write, test, fix, review) is a node in a directed graph. Nodes can loop (test → fix → test) and branch (test success → review, test failure → fix). This makes the logic clear and testable.
+1. **State machine, not a list of tasks**: Each step (plan, approve, code, write, test, fix, review, and policy, promote, fanout and join in the runs that have them) is a node in a directed graph. Nodes can loop (test → fix → write → test) and branch (test success → review, test failure → fix). This makes the logic clear and testable.
 
 2. **Dispatcher owns durability**: A single `Dispatcher` orchestrates the graph and writes the run's state as it goes: `state.json`, `manifest.json` and the journal. No node writes any of them: a node takes a context and returns a result, which the dispatcher saves. Nodes do touch the filesystem — they write files of their own under the run directory (the plan, diffs, reports, and each agent step's prompt and reply), the agent a node calls edits your working tree, and the test and review steps run tools in it — but none of that decides where a resumed run picks up. This separation makes nodes testable in isolation and makes the durability logic auditable.
 
 3. **Append-only journal**: All state transitions are written to an NDJSON journal file with `O_APPEND` and explicit fsync. This means a crash mid-write corrupts only the current record, not past ones. Resume logic detects and heals torn tails.
 
-4. **Pluggable adapters**: The graph talks to the outside world (agent backend, test runner, linter, etc.) only through interfaces. Each is implemented once (Claude Code for agents, golangci-lint for linters) and plugged in at runtime. This makes it easy to add new backends or swap them out.
+4. **Pluggable adapters**: The graph talks to the outside world only through the interfaces in `pkg/belay`, and the CLI picks the implementations when a run starts: Claude Code for the agent, a Go, Node or Python test runner (or your own command), golangci-lint, ESLint or Ruff for the lint gate, and the SonarQube scanner for `review.mode: sonar`. The agent backend has the one implementation, so swapping it for another is the untested half of the design (ADR-0005).
 
 For the full design, see `docs/architecture.md`.
 
@@ -518,21 +559,19 @@ belay is **early but real**. Use it for:
 
 ### Known Limitations
 
-1. **Only Claude Code is shipped**: v0.1 includes the Claude Code agent backend. The `AgentBackend` interface is exported so Codex and Gemini can be added, but only Claude Code is tested and supported. See ADR-0005.
+1. **Only Claude Code is shipped**: belay drives Claude Code and no other agent. The `AgentBackend` interface is exported so that another agent CLI could be added, but none has been, so "any agent" is a design promise proven by one implementation. See ADR-0005.
 
-2. **Module path is a placeholder**: `github.com/dhaam-ai/belay` will change when the real repo is public. Use `go get github.com/dhaam-ai/belay@latest` or clone from the URL when it exists.
+2. **Unix only**: belay's process runner, linter launcher, and workspace isolation use unix-specific system calls, so Windows is not supported (use WSL2, above). Nor is macOS 11 (Big Sur) or earlier: belay is built with Go 1.26, whose binaries need macOS 12 (Monterey) or later. (Contributions welcome.)
 
-3. **Unix only**: belay's process runner, linter launcher, and workspace isolation use unix-specific system calls. Windows and macOS 11 (Monterey) are not supported. (Contributions welcome.)
+3. **Fanout multiplies cost, disk and contention**: A fanout of N pays for N attempts at your goal inside one `budget.max_usd`, which is divided between them, so each gets a fraction of what a single run would. It can end a little over that ceiling: each candidate is checked before a step, not during one, so the overrun is bounded by one step per candidate. A step cut short by Ctrl-C, a timeout or a crash reports nothing of what it spent, so it is charged the costliest step recorded before it, marked as an estimate: a step that keeps being cut short is still stopped by the ceiling, though later than its real cost would stop it when it costs more than any step before it (ADR-0007). It leaves N candidate-run directories behind, and an in-place run leaves its N workspaces as well; a branch run's `promote` removes the candidates' worktrees, and their branches unless one holds commits nothing else does. belay has no `belay cleanup` command yet to remove the rest (ADR-0004's follow-up, still owed). An in-place run does not merge its winner: the change stays in the winner's workspace, which the run names, for you to copy back; only a branch run merges it (ADR-0012). `review.mode: sonar` and `ai` are refused with fanout, because their SonarQube project keys are not yet separate per candidate. Candidates running at once compete for CPU and for your agent's rate limit; lower `fanout.concurrency` and resume to back off. See ADR-0019.
 
-4. **Fanout multiplies cost, disk and contention**: A fanout of N pays for N attempts at your goal inside one `budget.max_usd`, which is divided between them, so each gets a fraction of what a single run would. It can end a little over that ceiling: each candidate is checked before a step, not during one, so the overrun is bounded by one step per candidate. A step cut short by Ctrl-C, a timeout or a crash reports nothing of what it spent, so it is charged the costliest step recorded before it, marked as an estimate: a step that keeps being cut short is still stopped by the ceiling, though later than its real cost would stop it when it costs more than any step before it (ADR-0007). It leaves N workspaces and N candidate-run directories behind, and belay has no `belay cleanup` command yet to remove them (ADR-0004's follow-up, still owed). An in-place run does not merge its winner: the change stays in the winner's workspace, which the run names, for you to copy back; only a branch run merges it (ADR-0012). `review.mode: sonar` and `ai` are refused with fanout, because their SonarQube project keys are not yet separate per candidate. Candidates running at once compete for CPU and for your agent's rate limit; lower `fanout.concurrency` and resume to back off. See ADR-0019.
+4. **No published fix rate**: belay has a test harness (`test/fixrate`) that measures "what percentage of runs result in code that passes tests and linting?" but no published number yet. We are working on benchmarks. Do not rely on any claimed success rate.
 
-5. **No published fix rate**: belay has a test harness (`test/fixrate`) that measures "what percentage of runs result in code that passes tests and linting?" but no published number yet. We are working on benchmarks. Do not rely on any claimed success rate.
+5. **SonarQube integration is optional**: The challenge names SonarQube as a quality gate. belay ships with local linters (golangci-lint, eslint, ruff) as the default. SonarQube is available via `review.mode: sonar` if you have Docker or a server. See ADR-0008.
 
-6. **SonarQube integration is optional**: The challenge names SonarQube as a quality gate. belay ships with local linters (golangci-lint, eslint, ruff) as the default. SonarQube is available via `review.mode: sonar` if you have Docker or a server. See ADR-0008.
+6. **No credentials management**: belay reads ANTHROPIC_API_KEY or CLAUDE_CODE_OAUTH_TOKEN from your shell, or relies on Claude Code's own login. It does not manage secrets, store tokens, or integrate with secret vaults.
 
-7. **No credentials management**: belay reads ANTHROPIC_API_KEY or CLAUDE_CODE_OAUTH_TOKEN from your shell, or relies on Claude Code's own login. It does not manage secrets, store tokens, or integrate with secret vaults.
-
-8. **belay does not sandbox the agent**: Claude Code runs as you, with your file permissions, and so does your test command, which runs the code the agent just wrote. belay narrows what the agent is offered — the plan step gets read-only tools, and the code and fix steps get Read, Grep, Glob, Edit and Write but no shell — and it keeps its own file access inside the workspace, but nothing in belay stops the agent, or a test it wrote, from writing a file outside the workspace: an agent that wrote `../outside-marker.txt` left it there, and the run finished normally. belay's checks, the policy gate included, judge what changed inside the workspace and cannot see anything written elsewhere, including into belay's own `.belay` directory. If you need the agent confined, run belay inside a container or a VM that holds only the repository; belay does not provide one.
+7. **belay does not sandbox the agent**: Claude Code runs as you, with your file permissions, and so does your test command, which runs the code the agent just wrote. belay narrows what the agent is offered — the plan step gets read-only tools, and the code and fix steps get Read, Grep, Glob, Edit and Write but no shell — and it keeps its own file access inside the workspace, but nothing in belay stops the agent, or a test it wrote, from writing a file outside the workspace: an agent that wrote `../outside-marker.txt` left it there, and the run finished normally. belay's checks, the policy gate included, judge what changed inside the workspace and cannot see anything written elsewhere, including into belay's own `.belay` directory. If you need the agent confined, run belay inside a container or a VM that holds only the repository; belay does not provide one.
 
 ## Contributing
 
@@ -548,24 +587,19 @@ make build
 make test
 ```
 
-**Tests use recorded cassettes**: External interactions (HTTP calls, agent responses, tool output) are recorded in `testdata/` and replayed in CI. To add a new test:
-1. Write a test that calls belay's code
-2. Run `make test-record` locally to capture real interactions
-3. Commit the cassette
-4. CI replays the cassette, so no API credentials are needed in GitHub Actions
-
-See `docs/adr/0009-record-replay-cassettes.md` for the cassette format.
+**The tests need no credentials and call no agent.** Nodes are tested against the fakes in `pkg/belay/belaytest`, and the adapters against tool output hand-written into each package's `testdata/`. The tests in `test/lintgate` run the real golangci-lint and git, and skip, saying what to install, when either is missing; `CONTRIBUTING.md` describes them. A run's conversation with the agent can be recorded with `agent.mode: record` and played back with `agent.mode: replay`, which starts no agent and spends nothing; see `docs/adr/0009-record-replay-cassettes.md` for the cassette format.
 
 ### Roadmap
 
 - [x] Run fanout candidates, as candidate runs of their own (ADR-0019)
+- [x] Open a draft pull request for a run on a branch (`belay run --pr`, through `gh`)
 - [ ] `belay cleanup`, to remove the workspaces and candidate runs a finished run leaves behind
-- [ ] Windows and macOS 11 support (process isolation)
-- [ ] Codex and Gemini backends (implement `AgentBackend` for each)
+- [ ] Windows support (process isolation)
+- [ ] A second agent backend, such as Codex or Gemini, to prove the `AgentBackend` seam
 - [ ] Published fix-rate benchmarks
 - [ ] Stronger cost estimation (today we use fallback tables when APIs don't report costs)
 - [ ] Multi-repository runs (one belay invocation orchestrates changes across repos)
-- [ ] Integration with GitHub / GitLab (open PRs, request reviews, merge on approval)
+- [ ] GitLab, review requests, and merging on approval
 
 ## License
 

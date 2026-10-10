@@ -4,14 +4,15 @@ Belay is built around pluggable adapters that interact with external services. T
 
 ## Overview
 
-Adapters are injected into the dispatcher at runtime. They abstract away differences between services (Claude, Codex, linters, etc.), allowing the graph to remain backend-agnostic.
+Adapters are injected into the dispatcher at runtime, so no node names the concrete agent, test runner or linter it calls. Every adapter but the agent has more than one implementation. The agent has one, Claude Code, so a graph that runs unchanged against another agent is a design promise that one implementation has not yet tested (ADR-0005).
 
-The main adapter interfaces are:
+The adapter interfaces, all in `pkg/belay`, are:
 
-1. **AgentBackend**: LLM-based code generation (Claude Code, Codex, Gemini)
-2. **Reviewer**: Code quality assessment (linters, SonarQube, AI)
-3. **TestRunner**: Test execution and reporting
-4. **CodeFormatter**: Code formatting and cleanup
+1. **AgentBackend**: LLM-based code generation (Claude Code, the only backend)
+2. **Linter**: The lint gate (golangci-lint, ESLint, Ruff)
+3. **Reviewer**: Holistic quality assessment against a threshold (the SonarQube scanner; an AI reviewer that `belay run` does not wire in yet)
+4. **TestRunner**: Test execution and reporting (Go, Node, Python, or a custom command)
+5. **Isolator**: A fanout candidate's workspace (a git worktree, or a directory copy)
 
 ## AgentBackend Interface
 
@@ -98,12 +99,13 @@ type Reviewer interface {
 - If the review runs but the verdict is unknown (tool timed out mid-analysis), return GateError and nil error
 - Like Linter, **all QualityReport fields are always present** on every path, including errors (Issues is never nil)
 
-**SonarQube Implementation** (see `internal/review/sonar.go`):
-- **Server mode**: Connect to an existing SonarQube server (requires SONAR_TOKEN environment variable for authentication)
-- **Docker mode**: Spawn SonarQube in Docker (requires docker binary; slower, heavier setup)
-- Fetch project quality gate status and issue list
-- Map SonarQube severity (blocker, critical, major, minor, info) to belay.Severity
+**SonarQube Implementation** (see `internal/sonar/scanner`):
+- Runs the SonarQube scanner over the workspace, either in a container from `review.sonar.image` (`review.sonar.runner: docker`, which needs `docker`) or as a `sonar-scanner` installed on `PATH` (`binary`). Either way the scan is uploaded to the server `SONAR_HOST_URL` names, authenticated with `SONAR_TOKEN`; belay runs no SonarQube server itself
+- Waits for the server's quality gate (`sonar.qualitygate.wait`) and reports that verdict. The scanner reports the server's verdict, not the issues behind it, so under `review.mode: sonar` the server's gate decides rather than `review.fail_on`
+- A gate the server has not computed in time is reported as undecided, a verdict the review node treats as no verdict at all, not as a failure
 - **Trap**: SonarQube's own quality-gate status field uses the string "ERROR" to mean "gate failed" (belay.GateFail); it is not belay.GateError (which means "verdict unknown")
+
+The AI reviewer (`internal/nodes/aireview`) asks SonarQube for its verdict and the issues behind it through the Sonar MCP server (`internal/sonar/mcp`). It implements Reviewer too, but `belay run` refuses `review.mode: ai` until it is wired in.
 
 ## TestRunner Interface
 
@@ -143,7 +145,7 @@ type TestRunner interface {
 
 ## Isolator Interface
 
-**Purpose**: Workspace isolation for crash-resume and fanout. Two methods (see `pkg/belay/isolate.go`):
+**Purpose**: Workspace isolation for fanout candidates. Two methods (see `pkg/belay/isolate.go`):
 
 ```go
 type Isolator interface {
@@ -166,7 +168,7 @@ type Isolator interface {
 
 ### Example: Implementing an AgentBackend
 
-Here is a complete skeleton for a Gemini backend (see `internal/agent/claude/` for the real Claude Code implementation):
+belay ships no backend but Claude Code. This skeleton shows the shape a second one would take, using Gemini as the example; nothing like it exists in the repository (see `internal/agent/claude/` for the real Claude Code implementation):
 
 ```go
 package gemini
@@ -366,7 +368,7 @@ outcome, err := d.Run(ctx)
 
 Each node receives the RunContext with all the adapters and calls only the ones it needs; the dispatcher never calls an adapter itself. Choosing the adapters is the CLI's job, before the run starts: `pickLinter` in `internal/cli/wire.go` picks golangci-lint, eslint or ruff by the project it finds, and the review node uses whichever Linter or Reviewer it is given, without detecting anything itself.
 
-**Error Translation at the Seam**: Adapters must translate errors that originate outside belay into belay sentinels. Most critical: `internal/exec.ErrToolchainMissing` (from process execution) must be wrapped or translated to `belay.ErrToolchainMissing` before returning from the adapter. Failing to do so makes `errors.Is(err, belay.ErrToolchainMissing)` false at the graph, silently defeating the "install software vs. edit code" distinction (see `internal/linter/linter.go` line 263 for the canonical translation pattern).
+**Error Translation at the Seam**: Adapters must translate errors that originate outside belay into belay sentinels. Most critical: `internal/exec.ErrToolchainMissing` (from process execution) must be wrapped or translated to `belay.ErrToolchainMissing` before returning from the adapter. Failing to do so makes `errors.Is(err, belay.ErrToolchainMissing)` false at the graph, silently defeating the "install software vs. edit code" distinction (see the `exec.ErrToolchainMissing` check in `internal/linter/linter.go` for the canonical translation pattern).
 
 ## Testing Adapters
 
@@ -400,15 +402,11 @@ func TestMyNode(t *testing.T) {
 
 Fakes record every call, allow scripting responses and errors, and provide access to what was called (CallCount, LastCall, Calls[]). See `pkg/belay/belaytest/doc.go` for complete documentation.
 
-### Cassette Recording
+### Tool Output and Cassettes
 
-Adapter tests that need real tool output use cassettes (recorded stdout/stderr): YAML files saved in `testdata/cassettes/` (see `docs/adr/0009-record-replay-cassettes.md`). A cassette holds the tool's output and belay's parsing result side-by-side, allowing tests to exercise the parser without invoking the tool.
+Adapter tests feed the parser a tool's output from fixtures in the package's own `testdata/` (`internal/linter/testdata`, `internal/runner/testdata`, `internal/agent/claude/testdata` and so on), through an injectable subprocess seam, so no test there runs the real tool. The fixtures are hand-written against each tool's documented output schema, and the `README.md` beside them names the source; there is no recording mode. The tests in `test/lintgate` do run the real golangci-lint and git, and skip, saying what to install, when either is missing.
 
-To record cassettes:
-1. Write a test that calls the adapter (see `internal/linter/golangci_test.go` for examples)
-2. Run `go test --tags=cassette_record ./...` to capture live tool output
-3. Cassettes are saved to `testdata/cassettes/`
-4. CI replays cassettes without making live calls
+A cassette (ADR-0009) is something else: the recording of a run's conversation with its agent, made with `agent.mode: record` and played back with `agent.mode: replay` by `internal/agent/replay`, which decorates the AgentBackend. It records agent calls only, not test or linter runs, and is JSON (`internal/agent/replay/testdata/sample.cassette.json` is a hand-written example).
 
 ### Conformance Suite
 
