@@ -587,7 +587,7 @@ make build
 make test
 ```
 
-**The tests need no credentials and call no agent.** Nodes are tested against the fakes in `pkg/belay/belaytest`, and the adapters against tool output kept in each package's `testdata/`. The tests in `test/lintgate` run the real golangci-lint and git, and skip, saying what to install, when either is missing; `CONTRIBUTING.md` describes them. A run's conversation with the agent can be recorded with `agent.mode: record` and played back with `agent.mode: replay`, which starts no agent and spends nothing; see `docs/adr/0009-record-replay-cassettes.md` for the cassette format.
+**The tests need no credentials and call no agent.** Nodes are tested against the fakes in `pkg/belay/belaytest`, and the adapters against tool output hand-written into each package's `testdata/`. The tests in `test/lintgate` run the real golangci-lint and git, and skip, saying what to install, when either is missing; `CONTRIBUTING.md` describes them. A run's conversation with the agent can be recorded with `agent.mode: record` and played back with `agent.mode: replay`, which starts no agent and spends nothing; see `docs/adr/0009-record-replay-cassettes.md` for the cassette format.
 
 ### Roadmap
 
