@@ -31,7 +31,9 @@ import (
 // fields every run's is. A belay that predates forks would drop it, losing the
 // record of where the run came from and changing nothing about what the run
 // does, which is the test a capability has to pass. So a fork stays
-// resumable by any belay that reads schema version 2.
+// resumable by any belay that reads schema version 2 -- unless it was given a
+// round of its fix loop, which is a pin and not a record, and declares
+// CapabilityForkGiveUp.
 type Origin struct {
 	// RunID is the run this one was forked from: its source.
 	RunID string `json:"run_id"`
