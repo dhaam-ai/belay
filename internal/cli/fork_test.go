@@ -454,6 +454,58 @@ func TestForkRunsOneNodeInItsCopy(t *testing.T) {
 	}
 }
 
+// TestForkNeverOpensItsSourceJournal: belay fork reads its source run and
+// never writes to it, and the journal is where that is easiest to break
+// without noticing. journal.Open heals a torn final line by rewriting the
+// file, so opening the source's journal to read it is a write -- and on a
+// source with a clean journal, which is every other fork test's, the heal
+// changes nothing and the write cannot be seen. This source's journal ends in
+// a record cut off as it was written, which is a run that may still have
+// been running: the fork is refused for it, and the journal, like the rest
+// of the source, is byte for byte what it was.
+func TestForkNeverOpensItsSourceJournal(t *testing.T) {
+	ws, id := forkSource(t)
+	source, err := state.NewLayout(ws, id)
+	if err != nil {
+		t.Fatalf("NewLayout: %v", err)
+	}
+	runDir := source.RunDir()
+	f, err := os.OpenFile(source.JournalPath(), os.O_APPEND|os.O_WRONLY, 0o600) //nolint:gosec // G304: the test's own run
+	if err != nil {
+		t.Fatalf("open the source journal: %v", err)
+	}
+	if _, err := f.WriteString(`{"seq":99,"event":"node_st`); err != nil {
+		t.Fatalf("tear the source journal: %v", err)
+	}
+	if err := f.Close(); err != nil {
+		t.Fatalf("close the source journal: %v", err)
+	}
+	before := treeSums(t, runDir)
+
+	var out bytes.Buffer
+	u := &ui{out: &out, err: &out}
+	req := forkRequest{runID: id, node: graph.NodeTest}
+	plan, err := resolve(resolveRequest{workspace: ws, logger: newLogger(u), override: req.configure})
+	if err != nil {
+		t.Fatalf("resolve: %v", err)
+	}
+	plan.registry, _ = forkScript()
+	err = makeFork(cmdWithContext(), u, plan, req)
+	said := out.String()
+	if err == nil {
+		t.Errorf("belay fork forked a run whose journal ends in a record cut off as it was written:\n%s", said)
+	}
+	if !strings.Contains(said, "cut off") {
+		t.Errorf("the refusal does not say the journal was cut off:\n%s", said)
+	}
+	if got := forksIn(t, ws); len(got) != 0 {
+		t.Errorf("a refused fork made forks %v", got)
+	}
+	if diff := cmp.Diff(before, treeSums(t, runDir)); diff != "" {
+		t.Errorf("the source run changed (-before +after):\n%s", diff)
+	}
+}
+
 // evalPath resolves path's symbolic links, which on macOS turn /var into
 // /private/var: dircopy names its copies by their resolved path.
 func evalPath(t *testing.T, path string) string {
@@ -621,14 +673,24 @@ func TestAForkResumesFromItsCopyWhateverOutputModeSays(t *testing.T) {
 	}
 }
 
-// TestForkingAFixLoopThatGaveUpCallsTheStrongerModel is the README's own fork
-// example, end to end over belay's real graph: a run's fix loop gives up, and
-// the person types `belay fork <run-id> fix --model opus`. That forks the
-// last fix visit -- the one that gave up -- whose blackboard has every round
-// used, so the fix node gave up again without calling anything and --model
-// changed nothing. The fork gets one more round instead, says so before it
-// spends anything, and calls the agent exactly once, with opus.
-func TestForkingAFixLoopThatGaveUpCallsTheStrongerModel(t *testing.T) {
+// gaveUpFixture is a run whose fix loop gave up, and the test doubles that
+// stand in for its tests (failing, always) and its quality gate (passing).
+type gaveUpFixture struct {
+	ws, runID string
+	failing   *belaytest.FakeRunner
+	gate      *belaytest.FakeLinter
+}
+
+// repair is the agent's answer to fix attempt n.
+func repair(n int) belay.AgentResponse {
+	return belay.AgentResponse{Text: fmt.Sprintf("Fix attempt %d.", n), SessionID: "sess-1", Usage: belay.Usage{USD: 0.03}}
+}
+
+// fixLoopThatGaveUp records, over belay's real graph, a run whose fix loop
+// used both of graph.give_up's rounds and gave up: plan, code, two repairs,
+// and then fix gives up without calling the agent.
+func fixLoopThatGaveUp(t *testing.T) gaveUpFixture {
+	t.Helper()
 	ws := goWorkspace(t)
 	writeConfig(t, ws, "version: 1\noutput:\n  mode: in_place\ngraph:\n  approval: false\n  give_up: 2\n")
 	if err := os.WriteFile(filepath.Join(ws, "main.go"), []byte("package main\n"), 0o600); err != nil {
@@ -637,15 +699,14 @@ func TestForkingAFixLoopThatGaveUpCallsTheStrongerModel(t *testing.T) {
 	const planText = "## Summary\nAdd an Add helper to main.go.\n\n## Context\nmain.go is the only file.\n\n" +
 		"## Steps\n1. Add `Add(a, b int) int` to main.go.\n\n## Tests\nCover it in main_test.go.\n\n" +
 		"## Risks\nNone.\n\n## Out of scope\nEverything else.\n"
-	failing := &belaytest.FakeRunner{Responses: []belay.TestReport{{Total: 1, Failed: 1,
-		Failures: []belay.TestFailure{{Name: "TestAdd", File: "main_test.go", Line: 3, Message: "Add(2, 2) = 3, want 4"}}}}}
-	passingGate := &belaytest.FakeLinter{Responses: []belay.QualityReport{{Source: "fake", Gate: belay.GatePass,
-		Issues: []belay.Issue{}, Summary: "no issues"}}}
-	repair := func(n int) belay.AgentResponse {
-		return belay.AgentResponse{Text: fmt.Sprintf("Fix attempt %d.", n), SessionID: "sess-1", Usage: belay.Usage{USD: 0.03}}
+	f := gaveUpFixture{
+		ws: ws, runID: "20260101T000000Z-6a7e0b000000",
+		failing: &belaytest.FakeRunner{Responses: []belay.TestReport{{Total: 1, Failed: 1,
+			Failures: []belay.TestFailure{{Name: "TestAdd", File: "main_test.go", Line: 3, Message: "Add(2, 2) = 3, want 4"}}}}},
+		gate: &belaytest.FakeLinter{Responses: []belay.QualityReport{{Source: "fake", Gate: belay.GatePass,
+			Issues: []belay.Issue{}, Summary: "no issues"}}},
 	}
 
-	// The source: plan, code, two repairs, and then fix gives up.
 	source, err := resolve(resolveRequest{workspace: ws, logger: quietLogger()})
 	if err != nil {
 		t.Fatalf("resolve: %v", err)
@@ -655,8 +716,8 @@ func TestForkingAFixLoopThatGaveUpCallsTheStrongerModel(t *testing.T) {
 		{Text: "Added it.\n\n```changed-files\nmain.go\n```\n", SessionID: "sess-1", Usage: belay.Usage{USD: 0.05}},
 		repair(1), repair(2),
 	}}
-	source.runner, source.linter = failing, passingGate
-	store, err := createRun(t.Context(), source, runSpec{Workspace: ws, RunID: "20260101T000000Z-6a7e0b000000", Goal: "add Add"})
+	source.runner, source.linter = f.failing, f.gate
+	store, err := createRun(t.Context(), source, runSpec{Workspace: ws, RunID: f.runID, Goal: "add Add"})
 	if err != nil {
 		t.Fatalf("createRun: %v", err)
 	}
@@ -665,17 +726,29 @@ func TestForkingAFixLoopThatGaveUpCallsTheStrongerModel(t *testing.T) {
 		t.Fatalf("the source = %v at %q, %v (%q); want this test's premise, a run whose fix loop gave up",
 			gaveUp.outcome.Status, gaveUp.outcome.Node, err, gaveUp.outcome.Note)
 	}
+	return f
+}
+
+// TestForkingAFixLoopThatGaveUpCallsTheStrongerModel is the README's own fork
+// example, end to end over belay's real graph: a run's fix loop gives up, and
+// the person types `belay fork <run-id> fix --model opus`. That forks the
+// last fix visit -- the one that gave up -- whose blackboard has every round
+// used, so the fix node gave up again without calling anything and --model
+// changed nothing. The fork gets one more round instead, says so before it
+// spends anything, and calls the agent exactly once, with opus.
+func TestForkingAFixLoopThatGaveUpCallsTheStrongerModel(t *testing.T) {
+	f := fixLoopThatGaveUp(t)
 
 	// The fork, as the README types it.
 	var out bytes.Buffer
 	u := &ui{out: &out, err: &out}
-	req := forkRequest{runID: store.Layout().RunID(), node: graph.NodeFix, model: "opus"}
-	plan, err := resolve(resolveRequest{workspace: ws, logger: newLogger(u), override: req.configure})
+	req := forkRequest{runID: f.runID, node: graph.NodeFix, model: "opus"}
+	plan, err := resolve(resolveRequest{workspace: f.ws, logger: newLogger(u), override: req.configure})
 	if err != nil {
 		t.Fatalf("resolve: %v", err)
 	}
 	stronger := &belaytest.FakeAgent{Responses: []belay.AgentResponse{repair(3)}}
-	plan.agent, plan.runner, plan.linter = stronger, failing, passingGate
+	plan.agent, plan.runner, plan.linter = stronger, f.failing, f.gate
 	err = makeFork(cmdWithContext(), u, plan, req)
 	t.Logf("verbatim output:\n%s", out.String())
 	if err != nil {
@@ -690,6 +763,84 @@ func TestForkingAFixLoopThatGaveUpCallsTheStrongerModel(t *testing.T) {
 	}
 	if !strings.Contains(out.String(), "graph.give_up") {
 		t.Errorf("the fork never says it gave the fix loop another round")
+	}
+}
+
+// cancelsItsOwnCall is an agent whose call is cut short by a Ctrl-C: it
+// cancels the context it was given, as stopOnSignal does on SIGINT, and
+// reports what a killed agent CLI reports, nothing.
+type cancelsItsOwnCall struct{ cancel context.CancelFunc }
+
+func (cancelsItsOwnCall) Name() string { return "fake-agent" }
+
+func (a cancelsItsOwnCall) Invoke(ctx context.Context, _ belay.AgentRequest) (belay.AgentResponse, error) {
+	a.cancel()
+	<-ctx.Done()
+	return belay.AgentResponse{}, ctx.Err()
+}
+
+// TestAResumedForkKeepsTheRoundItWasGiven: a fork of a fix loop that gave up
+// is given one more round, graph.give_up one above the rounds used. That is
+// a decision the fork made, not something its belay.yaml says: the copy's
+// belay.yaml is the source's, with graph.give_up as the source had it. So a
+// fork stopped part-way through that round -- a Ctrl-C, a crash -- and
+// resumed from its copy must still have it. Read from belay.yaml again, the
+// round was lost: the re-run fix found every round used and gave up without
+// calling the agent, which is exactly what the fork was made to get past.
+func TestAResumedForkKeepsTheRoundItWasGiven(t *testing.T) {
+	f := fixLoopThatGaveUp(t)
+
+	// The fork, stopped by a Ctrl-C during its one fix call.
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	cmd := cmdWithContext()
+	cmd.SetContext(ctx)
+	var out bytes.Buffer
+	u := &ui{out: &out, err: &out}
+	req := forkRequest{runID: f.runID, node: graph.NodeFix}
+	plan, err := resolve(resolveRequest{workspace: f.ws, logger: newLogger(u), override: req.configure})
+	if err != nil {
+		t.Fatalf("resolve: %v", err)
+	}
+	plan.agent, plan.runner, plan.linter = cancelsItsOwnCall{cancel: cancel}, f.failing, f.gate
+	err = makeFork(cmd, u, plan, req)
+	t.Logf("the fork, interrupted: error %v\n%s", err, out.String())
+	forks := forksIn(t, f.ws)
+	if len(forks) != 1 {
+		t.Fatalf("forks = %v, want one", forks)
+	}
+	copyDir := filepath.Join(f.ws, ".belay", "forks", forks[0])
+	layout, err := state.NewLayout(copyDir, forks[0])
+	if err != nil {
+		t.Fatalf("NewLayout: %v", err)
+	}
+	if man, err := state.LoadManifest(layout.ManifestPath()); err != nil || man.Status != state.RunStatusPaused {
+		t.Fatalf("the interrupted fork is %v (%v), want it paused, so a resume can carry it on", man.Status, err)
+	}
+
+	// The resume, as `belay --workspace <copy> resume <fork-id>` does it:
+	// resolved from the copy's belay.yaml, which still says give_up: 2.
+	resumed, err := resolve(resolveRequest{workspace: copyDir, logger: quietLogger()})
+	if err != nil {
+		t.Fatalf("resolve the copy: %v", err)
+	}
+	store, err := resumed.openRun(t.Context(), layout)
+	if err != nil {
+		t.Fatalf("openRun: %v", err)
+	}
+	if len(resumed.blockers) > 0 {
+		t.Fatalf("the fork's resume was refused: %+v", resumed.blockers)
+	}
+	if got := resumed.config.Graph.GiveUp; got != 3 {
+		t.Errorf("the resumed fork is described with graph.give_up %d, want the 3 it was given", got)
+	}
+	agent := &belaytest.FakeAgent{Responses: []belay.AgentResponse{repair(3), repair(4)}}
+	resumed.agent, resumed.runner, resumed.linter = agent, f.failing, f.gate
+	if _, err := dispatchOnce(t.Context(), resumed, store, true, pauseOnCancel); err != nil {
+		t.Fatalf("dispatchOnce: %v", err)
+	}
+	if len(agent.Calls()) == 0 {
+		t.Error("the resumed fork's fix gave up without calling the agent: the round the fork was given was lost")
 	}
 }
 

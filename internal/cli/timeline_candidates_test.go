@@ -897,6 +897,40 @@ func TestTimelineCommandCandidateFlagOnARunWithoutFanout(t *testing.T) {
 	}
 }
 
+// TestTimelineCommandCandidateFlagOnAFanoutWithNoCandidatesYet: a run that
+// fans out has no candidate runs until its fanout claims them, which is after
+// its plan is approved. Asked for a candidate before then, belay said "only
+// a run that fans out has candidates" -- of a run that does fan out -- which
+// sends a reader looking for a fanout setting that is already on. It says
+// the run fans out and has not claimed its candidates yet.
+func TestTimelineCommandCandidateFlagOnAFanoutWithNoCandidatesYet(t *testing.T) {
+	t.Parallel()
+
+	ws := t.TempDir()
+	const runID = "20260905T142530Z-dddddddddddd"
+	timelineWriteParentRun(t, ws, runID, state.FanoutPin{Candidates: 3, Select: "fewest_issues"},
+		state.NewState("make the thing fast"), []journal.Record{
+			{Event: journal.EventRunStarted, Time: timelineBase},
+			{Event: journal.EventNodeStarted, Node: "plan", Attempt: 1, Time: timelineBase},
+		})
+
+	_, err := timelineRunCmd(t, runID, "--workspace", ws, "--candidate", "cand-01")
+	if err == nil {
+		t.Fatal("expected an error for a run that has no candidate runs yet")
+	}
+	if !errors.Is(err, ErrTimelineCandidateNotFound) {
+		t.Errorf("error does not match ErrTimelineCandidateNotFound: %v", err)
+	}
+	if strings.Contains(err.Error(), "only a run that fans out") {
+		t.Errorf("error %q says the run does not fan out, and it does", err)
+	}
+	for _, want := range []string{runID, "fans out", "not claimed", "3 candidates"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("error %q does not say %q", err, want)
+		}
+	}
+}
+
 // TestLoadCandidateTimelineRefusesAnEscapingID keeps --candidate from
 // resolving anywhere but under the parent's candidate-runs directory.
 func TestLoadCandidateTimelineRefusesAnEscapingID(t *testing.T) {

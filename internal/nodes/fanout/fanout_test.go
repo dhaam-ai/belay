@@ -456,6 +456,62 @@ func TestRunBudgetPreCheckRefusesBeforeAnyCandidateRuns(t *testing.T) {
 	}
 }
 
+// The pre-check and the split refuse different fanouts. The pre-check
+// projects what N candidates will cost from what the run has spent, so with
+// nothing spent it projects nothing and passes; the split divides what is
+// left of the ceiling, and refuses when a share would be nothing, because a
+// zero ceiling reads as no ceiling at all. Every row here passes the
+// pre-check, so the split's own refusal is the only thing between it and N
+// candidate runs. (A fanout that has already claimed its candidates skips
+// the pre-check altogether; TestFanoutWithNoCeilingSaysWhatToSet is that
+// case.)
+func TestFanoutRefusesASplitItsPreCheckPassed(t *testing.T) {
+	tests := []struct {
+		name  string
+		cfg   func() config.Config
+		spent state.Budget
+		want  error
+	}{
+		{
+			name: "nothing spent, and budget.max_tokens smaller than the candidate count",
+			cfg: func() config.Config {
+				cfg := enabledConfig(3)
+				cfg.Budget.MaxTokens = 2
+				return cfg
+			},
+			spent: state.Budget{LimitUSD: 10},
+			want:  belay.ErrBudgetExceeded,
+		},
+		{
+			name: "a fanout resumed with budget.max_usd 0 before it claimed anything",
+			cfg: func() config.Config {
+				cfg := enabledConfig(3)
+				cfg.Budget.MaxUSD = 0
+				return cfg
+			},
+			want: budget.ErrNoCeiling,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			layout, _ := newLayout(t)
+			runs := &recordingRunner{}
+			rc := newRunContext(tt.cfg(), layout, runs, tt.spent)
+
+			res, err := fanout.New().Run(context.Background(), rc)
+			if !errors.Is(err, tt.want) {
+				t.Fatalf("Run() error = %v, want one wrapping %v", err, tt.want)
+			}
+			if got := runs.callCount(); got != 0 {
+				t.Errorf("the candidate runner was called %d time(s) for a split that has no share to hand out", got)
+			}
+			if res.Patch.Candidates != nil {
+				t.Errorf("Run() returned a candidate patch on a refused split: %v", *res.Patch.Candidates)
+			}
+		})
+	}
+}
+
 // The launch projection decides whether to start N candidates. Once a
 // previous attempt has claimed them, their envelopes are reserved and
 // persisted, and nothing about the projection can take back money a

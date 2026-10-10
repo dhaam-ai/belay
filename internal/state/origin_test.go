@@ -80,3 +80,92 @@ func TestForksDir(t *testing.T) {
 		t.Errorf("ForksDir(relative) error = %v, want ErrInvalidPathSegment", err)
 	}
 }
+
+// TestManifest_SetGiveUpFloorRecordsTheCapabilityAForkNeeds: a fork of a fix loop
+// that gave up runs with graph.give_up one above the rounds used, and the
+// round is the fork's own decision, not anything its belay.yaml says. So it
+// is pinned, and it is a control field: a belay that dropped it would resume
+// the fork under belay.yaml's graph.give_up, and the fix node would give up
+// again without calling the agent -- the very thing the fork was made to get
+// past. Naming the capability turns that into a refusal that says to upgrade.
+func TestManifest_SetGiveUpFloorRecordsTheCapabilityAForkNeeds(t *testing.T) {
+	m := NewManifest(time.Now(), "fork-1", "/work", "goal", config.Default())
+
+	m.SetGiveUpFloor(4)
+
+	if m.GiveUpFloor != 4 {
+		t.Errorf("GiveUpFloor = %d, want 4", m.GiveUpFloor)
+	}
+	if diff := cmp.Diff([]string{CapabilityForkGiveUp}, m.Requires); diff != "" {
+		t.Errorf("Requires (-want +got):\n%s", diff)
+	}
+	m.SetGiveUpFloor(4)
+	if diff := cmp.Diff([]string{CapabilityForkGiveUp}, m.Requires); diff != "" {
+		t.Errorf("Requires after a second SetGiveUpFloor (-want +got):\n%s", diff)
+	}
+
+	// And a manifest that requires it loads: this belay knows the name.
+	path := filepath.Join(t.TempDir(), "manifest.json")
+	if err := SaveManifest(path, m); err != nil {
+		t.Fatalf("SaveManifest: %v", err)
+	}
+	loaded, err := LoadManifest(path)
+	if err != nil {
+		t.Fatalf("LoadManifest refused a manifest requiring %q: %v", CapabilityForkGiveUp, err)
+	}
+	if loaded.GiveUpFloor != 4 {
+		t.Errorf("GiveUpFloor after a round trip = %d, want 4", loaded.GiveUpFloor)
+	}
+}
+
+// TestManifestWithoutAGiveUpPinCarriesNone: every run that is not such a
+// fork writes the manifest it wrote before the field existed.
+func TestManifestWithoutAGiveUpPinCarriesNone(t *testing.T) {
+	m := NewManifest(time.Now(), "run-1", "/work", "goal", config.Default())
+	raw, err := json.Marshal(m)
+	if err != nil {
+		t.Fatalf("Marshal: %v", err)
+	}
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &fields); err != nil {
+		t.Fatalf("Unmarshal: %v", err)
+	}
+	if _, ok := fields["give_up_floor"]; ok {
+		t.Errorf("a run with no give_up pin writes one: %s", raw)
+	}
+	if len(m.Requires) != 0 {
+		t.Errorf("Requires = %v, want none", m.Requires)
+	}
+}
+
+// TestPinnedConfigGivesAForkAtLeastItsRound: the pin is a floor, not an
+// override. A resumed fork never has fewer rounds than it was given, but
+// graph.give_up is a limit like the others, and raising it in belay.yaml and
+// resuming still raises it.
+func TestPinnedConfigGivesAForkAtLeastItsRound(t *testing.T) {
+	tests := []struct {
+		name       string
+		pin, live  int
+		wantGiveUp int
+	}{
+		{name: "no pin leaves graph.give_up live", pin: 0, live: 2, wantGiveUp: 2},
+		{name: "the pin holds against the file", pin: 3, live: 2, wantGiveUp: 3},
+		{name: "a raised graph.give_up still raises it", pin: 3, live: 5, wantGiveUp: 5},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			m := NewManifest(time.Now(), "fork-1", "/work", "goal", config.Default())
+			if tt.pin > 0 {
+				m.SetGiveUpFloor(tt.pin)
+			}
+			live := config.Default()
+			live.Graph.GiveUp = tt.live
+			if got := m.PinnedConfig(live).Graph.GiveUp; got != tt.wantGiveUp {
+				t.Errorf("graph.give_up = %d, want %d", got, tt.wantGiveUp)
+			}
+			if got := m.GiveUpFor(tt.live); got != tt.wantGiveUp {
+				t.Errorf("GiveUpFor(%d) = %d, want %d", tt.live, got, tt.wantGiveUp)
+			}
+		})
+	}
+}

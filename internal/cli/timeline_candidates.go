@@ -450,12 +450,25 @@ type TimelineCandidateNotFoundError struct {
 	CandidateID string
 	// Available is every candidate the run does have, in index order.
 	Available []string
+	// Pinned is how many candidates the run's fanout is pinned to, and zero
+	// for a run that does not fan out.
+	Pinned int
 }
 
 // Error returns the full sentence. It lists the ids that do exist, because a
 // candidate id is short, guessable and usually mistyped, and seeing the real
 // ones is the fix.
+//
+// A run with none says which of two reasons it is, because they send the
+// reader to different places: a run that does not fan out never will, and a
+// run that does has not reached its fanout yet. Its candidates are claimed
+// there, after its plan is approved, so asking for one before then is asking
+// too early, not asking the wrong run.
 func (e *TimelineCandidateNotFoundError) Error() string {
+	if len(e.Available) == 0 && e.Pinned > 0 {
+		return fmt.Sprintf("run %s fans out to %d candidates, but has not claimed them yet — they are claimed "+
+			"when the run reaches its fanout step, after its plan is approved", e.RunID, e.Pinned)
+	}
 	if len(e.Available) == 0 {
 		return fmt.Sprintf("run %s has no candidate runs — only a run that fans out has candidates", e.RunID)
 	}
@@ -499,10 +512,14 @@ func LoadCandidateTimeline(workspace, runID, candidateID string) (Timeline, erro
 		if err != nil && !errors.Is(err, fs.ErrNotExist) {
 			return Timeline{}, fmt.Errorf("cli: read candidate run %s: %w", layout.RunDir(), err)
 		}
-		return Timeline{}, &TimelineCandidateNotFoundError{
+		missing := &TimelineCandidateNotFoundError{
 			RunID: sel.RunID, CandidateID: candidateID,
 			Available: timelineCandidateIDs(parent),
 		}
+		if m, ok := timelineManifestAt(parent); ok && m.Fanout != nil {
+			missing.Pinned = m.Fanout.Candidates
+		}
+		return Timeline{}, missing
 	}
 
 	candSel := TimelineSelection{

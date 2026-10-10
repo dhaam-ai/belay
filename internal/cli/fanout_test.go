@@ -3,6 +3,8 @@ package cli
 import (
 	"bytes"
 	"context"
+	"errors"
+	"fmt"
 	"log/slog"
 	"os"
 	"path/filepath"
@@ -202,6 +204,58 @@ fanout:
 			}
 			if warned := fanoutDriftWarned(resumed.warnings); warned != tc.wantWarned {
 				t.Errorf("warned about fanout drift = %v, want %v; warnings: %v", warned, tc.wantWarned, resumed.warnings)
+			}
+		})
+	}
+}
+
+// TestResumingAFanoutWithNoCeilingIsRefusedBeforeItStarts: a run's fanout
+// is pinned, but budget.max_usd is read live, so belay.yaml can drop the
+// ceiling a fanout divides between its candidates after the run began. The
+// fanout node pauses such a run (budget.ErrNoCeiling, exit 3), which is safe,
+// but only once belay has resumed it and walked back to that node. The
+// refusal belongs before the resume, beside every other reason a run cannot
+// be continued, naming the setting -- in the dry run as in a real resume. A
+// run that does not fan out divides nothing, and is not refused.
+func TestResumingAFanoutWithNoCeilingIsRefusedBeforeItStarts(t *testing.T) {
+	const noCeiling = "version: 1\noutput:\n  mode: in_place\nbudget:\n  max_usd: 0\n  on_exceed: warn\n"
+	for _, tc := range []struct {
+		name        string
+		created     string
+		wantRefused bool
+	}{
+		{name: "a run that fans out", created: fanoutConfig, wantRefused: true},
+		{name: "a run that does not", created: singleConfig, wantRefused: false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ws := goWorkspace(t)
+			writeConfig(t, ws, tc.created)
+			plan, err := resolve(resolveRequest{workspace: ws, logger: quietLogger()})
+			if err != nil {
+				t.Fatalf("resolve: %v", err)
+			}
+			const runID = "20260101T000000Z-abcdef123456"
+			if _, err := createRun(context.Background(), plan, runSpec{Workspace: ws, RunID: runID, Goal: "add tests"}); err != nil {
+				t.Fatalf("createRun: %v", err)
+			}
+			writeConfig(t, ws, noCeiling)
+
+			out, _, err := runCLI(t, "--dry-run", "resume", runID, "--workspace", ws)
+			refused := strings.Contains(out, "belay would refuse to start this run")
+			if refused != tc.wantRefused {
+				t.Fatalf("refused = %v, want %v (error %v):\n%s", refused, tc.wantRefused, err, out)
+			}
+			if !tc.wantRefused {
+				return
+			}
+			for _, want := range []string{"budget.max_usd", "3 candidates", "set budget.max_usd above zero"} {
+				if !strings.Contains(out, want) {
+					t.Errorf("the refusal does not say %q:\n%s", want, out)
+				}
+			}
+			var exit *ExitError
+			if !errors.As(err, &exit) || exit.Code != graph.ExitFailed {
+				t.Errorf("error = %#v, want an ExitError with code %d", err, graph.ExitFailed)
 			}
 		})
 	}
@@ -485,9 +539,15 @@ func TestDryRunShowsEachCandidatesEnvelope(t *testing.T) {
 				"3 candidates, 3 at a time, up to $1.00 and 666,666 tokens each",
 				"each walks code → write → test → fix → review → done, in a workspace of its own",
 				"the winner is the candidate with the fewest review issues",
-				"up to one step per candidate over budget.max_usd",
+				"so the run can end up to one step per candidate over budget.max_usd; a step cut short by " +
+					"Ctrl-C, a timeout or a crash is charged the costliest step before it, so it adds to that only " +
+					"when it cost more than any step before it",
 				"each candidate gives up after 3 rounds of its test-and-fix loop, or 60 steps of its own",
 			},
+			// An interruption does not double the bound: a step cut short is
+			// charged the costliest step before it (ADR-0007's 2026-10-09
+			// amendment), and the dry run once said otherwise.
+			absent: []string{"two, if every candidate"},
 		},
 		{
 			name:   "one at a time, and never more at a time than there are candidates",
@@ -604,6 +664,40 @@ func TestNextStepsAfterAFanout(t *testing.T) {
 			absent: []string{"read the plan"},
 		},
 		{
+			// graph.max_steps and graph.node_timeout are applied to each
+			// candidate's own run, not to the run as a whole, and a person
+			// told only "the graph kept going round" raises the setting
+			// thinking of the run's steps together.
+			name: "candidates stopped at graph.max_steps",
+			view: outcomeView{layout: layout, fanout: true,
+				runErr: fmt.Errorf("fanout: 1 of 3 candidates stopped at a limit: %w", graph.ErrMaxSteps),
+				outcome: graph.Outcome{
+					Status: state.RunStatusPaused, Node: graph.NodeFanout, ExitCode: graph.ExitAborted,
+				}},
+			want: []string{
+				"graph.max_steps applies to each candidate's run on its own",
+				"raise graph.max_steps in belay.yaml",
+				"the candidates that finished are kept",
+				"belay resume " + runID,
+			},
+			absent: []string{"the graph kept going round"},
+		},
+		{
+			name: "candidates stopped at graph.node_timeout",
+			view: outcomeView{layout: layout, fanout: true,
+				runErr: fmt.Errorf("fanout: 1 of 3 candidates stopped at a limit: %w", graph.ErrNodeTimeout),
+				outcome: graph.Outcome{
+					Status: state.RunStatusPaused, Node: graph.NodeFanout, ExitCode: graph.ExitAborted,
+				}},
+			want: []string{
+				"graph.node_timeout applies to each step of each candidate's run",
+				"raise graph.node_timeout in belay.yaml",
+				"the candidates that finished are kept",
+				"belay resume " + runID,
+			},
+			absent: []string{"one step ran longer than"},
+		},
+		{
 			name: "completed in place with a winner",
 			view: outcomeView{
 				layout: layout, fanout: true,
@@ -659,6 +753,78 @@ func TestNextStepsAfterAFanout(t *testing.T) {
 				if strings.Contains(lines, absent) {
 					t.Errorf("next steps say %q, and should not:\n%s", absent, lines)
 				}
+			}
+		})
+	}
+}
+
+// TestAFanoutStopShowsItsNoteWithoutVerbose: a run stopped at its fanout
+// says which candidates could not be finished, and why, only in the fanout's
+// note -- and the next steps send the person to it ("the note above says
+// which"). The note printed only with --verbose, and after the next steps,
+// so the person was sent to a line that was not there. It is printed for a
+// fanout stop whether or not belay is verbose, above the next steps; any
+// other run's note is still printed only with --verbose, after them.
+func TestAFanoutStopShowsItsNoteWithoutVerbose(t *testing.T) {
+	const runID = "20260101T000000Z-c0ffee000000"
+	layout, err := state.NewLayout("/repos/app", runID)
+	if err != nil {
+		t.Fatalf("NewLayout: %v", err)
+	}
+	const (
+		fault = "fanout: 1 of 3 candidates could not be finished: cand-02: no space left on device"
+		limit = "fanout: 1 of 3 candidates stopped at a limit belay applies to each candidate run: cand-01 " +
+			"stopped at graph.max_steps, which counts each candidate's steps, so raise graph.max_steps"
+	)
+	for _, tc := range []struct {
+		name     string
+		view     outcomeView
+		wantNote bool
+	}{
+		{
+			name: "paused at the fanout by a fault",
+			view: outcomeView{layout: layout, fanout: true, outcome: graph.Outcome{
+				Status: state.RunStatusPaused, Node: graph.NodeFanout, Note: fault,
+			}},
+			wantNote: true,
+		},
+		{
+			name: "stopped at the fanout by a limit its candidates met",
+			view: outcomeView{layout: layout, fanout: true,
+				runErr: fmt.Errorf("fanout: %w", graph.ErrMaxSteps),
+				outcome: graph.Outcome{
+					Status: state.RunStatusPaused, Node: graph.NodeFanout, Note: limit, ExitCode: graph.ExitAborted,
+				}},
+			wantNote: true,
+		},
+		{
+			name: "paused at the approve gate, not verbose",
+			view: outcomeView{layout: layout, outcome: graph.Outcome{
+				Status: state.RunStatusPaused, Node: graph.NodeApprove, Note: "waiting for approval",
+			}},
+			wantNote: false,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var out bytes.Buffer
+			u := &ui{out: &out, err: &out}
+			_ = reportOutcome(u, tc.view) //nolint:errcheck // the exit code is not what this test is about
+			got := out.String()
+			note := strings.Index(got, "  note:   ")
+			if !tc.wantNote {
+				if note >= 0 {
+					t.Errorf("the note is printed without --verbose for a run that did not stop at its fanout:\n%s", got)
+				}
+				return
+			}
+			if note < 0 || !strings.Contains(got, tc.view.outcome.Note) {
+				t.Fatalf("the fanout's note is not printed without --verbose:\n%s", got)
+			}
+			if next := strings.Index(got, "  next:   "); next < note {
+				t.Errorf("the note is printed after the next steps, which send the person to it as above them:\n%s", got)
+			}
+			if n := strings.Count(got, "  note:   "); n != 1 {
+				t.Errorf("the note is printed %d times, want once:\n%s", n, got)
 			}
 		})
 	}

@@ -131,6 +131,11 @@ func (s *Spec) manifest(now time.Time, runID, workspace string) state.Manifest {
 	}
 	// For the same reason, no ground truth for what changed: see Unrecorded.
 	m.SetChanges(state.Changes{From: state.ChangesReported, Why: Unrecorded})
+	// The round of the fix loop Prepare gave the fork, if it gave one: the
+	// fork's own decision, which its copy's belay.yaml knows nothing of.
+	if s.GiveUp > 0 {
+		m.SetGiveUpFloor(s.GiveUp)
+	}
 	m.Origin = &state.Origin{
 		RunID: s.Source.RunID, Workspace: s.request.Source.WorkspaceDir(), Tree: s.Tree,
 		Node: s.Visit.Node, Visit: s.Visit.Ordinal, StartSeq: s.Visit.StartSeq,

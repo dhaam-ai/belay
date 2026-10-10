@@ -760,6 +760,16 @@ func reportOutcome(u *ui, view outcomeView) error {
 	u.say("%s", outcomeHeadline(outcome, runErr))
 	u.say("  where:  %s", whereText(outcome.Node))
 	u.say("  cost:   %s", u.emph(spendText(outcome)))
+	// A run stopped at its fanout says which candidates could not be
+	// finished, and why, only in the fanout's note, and the next steps send
+	// the person to it. So that note is printed whether or not belay is
+	// verbose, and above the next steps that point at it. Every other note
+	// is belay talking to its operator and stays behind --verbose.
+	note := strings.TrimSpace(outcome.Note)
+	upfront := note != "" && stoppedAtFanout(view)
+	if upfront {
+		u.say("  note:   %s", note)
+	}
 	// The label sits on the first line only: repeating "next:" down a
 	// paragraph turns one instruction into four, which is exactly the
 	// reading a person then has to undo.
@@ -773,7 +783,7 @@ func reportOutcome(u *ui, view outcomeView) error {
 			u.say("          %s", line)
 		}
 	}
-	if note := strings.TrimSpace(outcome.Note); note != "" && u.verbose {
+	if note != "" && u.verbose && !upfront {
 		u.say("  note:   %s", note)
 	}
 
@@ -781,6 +791,16 @@ func reportOutcome(u *ui, view outcomeView) error {
 		return nil
 	}
 	return &ExitError{Code: outcome.ExitCode, Err: runErr}
+}
+
+// stoppedAtFanout reports whether a run is paused at its fanout for a reason
+// the fanout's note explains: candidates that could not be finished, or that
+// met a limit belay applies to each of them. A Ctrl-C there is not one; its
+// note says only that the step was interrupted, and the next steps say what
+// to do.
+func stoppedAtFanout(view outcomeView) bool {
+	return view.outcome.Node == graph.NodeFanout && view.outcome.Status == state.RunStatusPaused &&
+		!errors.Is(view.runErr, graph.ErrInterrupted)
 }
 
 // outcomeHeadline states, in one sentence, how this invocation ended.
@@ -880,6 +900,17 @@ func nextSteps(view outcomeView) []string {
 	// change, and the run is paused, not ended: raising the limit and
 	// resuming continues this run, keeping everything it has already spent.
 	// Limits are re-read on the resume, which is why that works.
+	//
+	// A fanout's candidates meet the two graph limits inside their own runs,
+	// where each limit is applied to each candidate on its own (fanoutLimitSteps).
+	case errors.Is(runErr, graph.ErrMaxSteps) && outcome.Node == graph.NodeFanout:
+		return fanoutLimitSteps("a candidate kept going round without finishing, so belay stopped it.",
+			"graph.max_steps applies to each candidate's run on its own, not to the run as a whole.",
+			"graph.max_steps", resume)
+	case errors.Is(runErr, graph.ErrNodeTimeout) && outcome.Node == graph.NodeFanout:
+		return fanoutLimitSteps("one step of a candidate's run ran longer than graph.node_timeout allows.",
+			"graph.node_timeout applies to each step of each candidate's run, one at a time.",
+			"graph.node_timeout", resume)
 	case errors.Is(runErr, graph.ErrMaxSteps):
 		return []string{
 			"the graph kept going round without finishing, so belay stopped it.",
@@ -1004,6 +1035,25 @@ func fanoutPausedSteps(view outcomeView, resume string) []string {
 		"see every candidate so far with:",
 		"",
 		"    belay timeline " + view.layout.RunID(),
+	}
+}
+
+// fanoutLimitSteps is what to do about a fanout whose candidates stopped at
+// graph.max_steps or graph.node_timeout.
+//
+// The setting is named as it is for any run, but the sentence says it is
+// applied per candidate, because that changes what a person raises it to. A
+// fanout of three whose candidates each walk thirty steps has walked ninety;
+// somebody told only that "the graph kept going round" reads graph.max_steps
+// as a cap on the run's steps together and can raise it for the wrong total.
+// The candidates that finished are kept, as for any fanout pause
+// (fanoutPausedSteps), so raising the limit does not cost them again.
+func fanoutLimitSteps(what, applies, setting, resume string) []string {
+	return []string{
+		what,
+		applies,
+		"raise " + setting + " in belay.yaml, then pick this run up again; the candidates that finished are kept:",
+		"", "    " + resume,
 	}
 }
 
@@ -1247,7 +1297,9 @@ func dryRunSpend(u *ui, plan *runPlan) dryRunSection {
 // a person reading budget.max_usd as a hard cap would get wrong -- that a
 // candidate is checked before a step and not during one -- so the run's
 // final bill can pass the ceiling by a bounded amount, and the bound is
-// named.
+// named. An interruption does not double it, as this once said: a step cut
+// short is charged the costliest step recorded before it (ADR-0007's
+// 2026-10-09 amendment), so it adds to the bound only when it cost more.
 func dryRunFanout(plan *runPlan, resuming bool) dryRunSection {
 	if plan.fanout == nil {
 		return dryRunSection{}
@@ -1264,8 +1316,8 @@ func dryRunFanout(plan *runPlan, resuming bool) dryRunSection {
 		"each walks " + routeLine(plan.candidateRoute) + ", in a workspace of its own",
 		winnerLine(plan.fanout.Select),
 		"a candidate is checked before each step and not during one, so the run can end up to one step " +
-			"per candidate over budget.max_usd (two, if every candidate is stopped part-way through a step " +
-			"and resumed)",
+			"per candidate over budget.max_usd; a step cut short by Ctrl-C, a timeout or a crash is charged " +
+			"the costliest step before it, so it adds to that only when it cost more than any step before it",
 	}}
 }
 
@@ -1352,6 +1404,11 @@ func dryRunModels(plan *runPlan) dryRunSection {
 		case m.priced:
 			priced = true
 			row += fmt.Sprintf(" %s in / %s out per million tokens", dollars(m.rate.Input), dollars(m.rate.Output))
+			// A stand-in for a price the backend does not have, which
+			// warnAssumedRate explains once, below.
+			if m.rate.Assumed {
+				row += " (assumed)"
+			}
 		case m.note != "":
 			row += " " + m.note
 		}

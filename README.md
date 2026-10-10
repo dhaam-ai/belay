@@ -430,7 +430,8 @@ so, and `--current-files` re-runs it on them as they are now. Forking a fix
 step that gave up gives it one more round: as it stood, it had used every
 round `graph.give_up` allows and would give up again without calling the
 agent, so the fork runs with one more, and says so with the other
-differences before it spends anything.
+differences before it spends anything. The round is recorded with the fork,
+so resuming a fork stopped part-way through still has it.
 
 The copy is made like a queued goal's: it leaves out `.git`, `node_modules`,
 `vendor`, `.venv`, `__pycache__`, `dist`, `build`, `target` and `.belay`, so a

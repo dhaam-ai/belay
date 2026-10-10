@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"io"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -169,6 +170,99 @@ func TestUTF8Locale(t *testing.T) {
 			}
 			if !tt.want && setting != tt.setting {
 				t.Errorf("setting = %q, want %q", setting, tt.setting)
+			}
+		})
+	}
+}
+
+// runCLIOnFiles is runCLI with the command's three streams on files rather
+// than buffers, and returns everything it wrote. The viewer only ever opens
+// on an *os.File, so a buffer would refuse it whatever newUI decided, and a
+// test of that decision has to give it files to decide about.
+func runCLIOnFiles(t *testing.T, args ...string) (said string, err error) {
+	t.Helper()
+	resetFlags(t, rootCmd)
+	dir := t.TempDir()
+	in, err := os.Create(filepath.Join(dir, "stdin")) //nolint:gosec // G304: a path under t.TempDir()
+	if err != nil {
+		t.Fatalf("create stdin: %v", err)
+	}
+	outPath := filepath.Join(dir, "stdout")
+	out, err := os.Create(outPath) //nolint:gosec // G304: a path under t.TempDir()
+	if err != nil {
+		t.Fatalf("create stdout: %v", err)
+	}
+	t.Cleanup(func() {
+		_ = in.Close()
+		_ = out.Close()
+	})
+	rootCmd.SetIn(in)
+	rootCmd.SetOut(out)
+	rootCmd.SetErr(out)
+	rootCmd.SetArgs(args)
+	t.Cleanup(func() {
+		rootCmd.SetIn(nil)
+		rootCmd.SetOut(nil)
+		rootCmd.SetErr(nil)
+		rootCmd.SetArgs(nil)
+	})
+
+	err = rootCmd.Execute()
+	written, readErr := os.ReadFile(outPath) //nolint:gosec // G304: a path under t.TempDir()
+	if readErr != nil {
+		t.Fatalf("read what the command wrote: %v", readErr)
+	}
+	return string(written), err
+}
+
+// TestTheRootCommandOpensNoViewerWhereNobodyCanAnswerIt is the headless
+// promise through the command a person types, rather than through
+// detectViewerTerminal alone: newUI is where the root's --no-input and the
+// terminal driver's answer are handed to that decision, and handing it the
+// wrong one opens a viewer where nobody is watching. Each row gives `belay
+// plan` a run waiting at its plan and every other reason to open the viewer
+// -- files to open it on, TERM set, CI unset -- except one.
+//
+// A viewer that opened on these files would refuse them itself, being no
+// terminal, and belay would say "the plan viewer stopped" and not print the
+// plan. So the plan printed in full, and nothing said about a viewer, is
+// what proves it was never opened.
+func TestTheRootCommandOpensNoViewerWhereNobodyCanAnswerIt(t *testing.T) {
+	tests := []struct {
+		name     string
+		noInput  bool
+		terminal func(*os.File) bool
+	}{
+		{name: "--no-input on a terminal", noInput: true, terminal: alwaysTerminal},
+		{name: "no --no-input, and no terminal", noInput: false, terminal: nil},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Setenv("TERM", "xterm-256color")
+			t.Setenv("CI", "")
+			if tt.terminal != nil {
+				was := realTerminal
+				realTerminal = tt.terminal
+				t.Cleanup(func() { realTerminal = was })
+			}
+			_, store := pausedAtTheGateForReal(t, firstPlan)
+			args := []string{"plan", store.Layout().RunID(), "--workspace", store.Layout().WorkspaceDir()}
+			if tt.noInput {
+				args = append(args, "--no-input")
+			}
+
+			said, err := runCLIOnFiles(t, args...)
+			if err != nil {
+				t.Fatalf("belay plan: %v\n%s", err, said)
+			}
+			if strings.Contains(said, "viewer") {
+				t.Errorf("belay plan opened the plan viewer:\n%s", said)
+			}
+			for _, want := range []string{"1. Rewrite the parser.", "Edit that file if you want to"} {
+				if !strings.Contains(said, want) {
+					t.Errorf("belay plan did not print the plan as it does with nobody to review it; %q is missing:\n%s",
+						want, said)
+				}
 			}
 		})
 	}

@@ -31,7 +31,9 @@ import (
 // fields every run's is. A belay that predates forks would drop it, losing the
 // record of where the run came from and changing nothing about what the run
 // does, which is the test a capability has to pass. So a fork stays
-// resumable by any belay that reads schema version 2.
+// resumable by any belay that reads schema version 2 -- unless it was given a
+// round of its fix loop, which is a pin and not a record, and declares
+// CapabilityForkGiveUp.
 type Origin struct {
 	// RunID is the run this one was forked from: its source.
 	RunID string `json:"run_id"`
@@ -78,4 +80,44 @@ func ForksDir(workspaceDir string) (string, error) {
 		return "", fmt.Errorf("%w: workspace %q is not an absolute path", ErrInvalidPathSegment, workspaceDir)
 	}
 	return filepath.Join(workspaceDir, ".belay", "forks"), nil
+}
+
+// CapabilityForkGiveUp is the capability a fork declares when it pins the
+// round of the fix loop it was given (Manifest.GiveUpFloor, ADR-0011).
+//
+// A fork of a fix visit that used every round of its loop runs under
+// graph.give_up one above the rounds used (internal/fork's noteGiveUp), and
+// that round is the fork's own decision: the belay.yaml in its copy is the
+// source's, with graph.give_up as the source had it. Read from the file
+// again on a resume, the round is lost, and the fix node gives up without
+// calling the agent -- the one thing the fork was made to get past. So the
+// round is pinned, and dropping the pin changes what the run does, which is
+// ADR-0011's test for a control field.
+//
+// Every belay that has shipped refuses manifest schema version 2 outright,
+// and every build that can make a fork at all will ship knowing this field,
+// so today the capability guards against no binary anybody has. It is
+// declared anyway, for the reason every other capability in the same
+// unreleased line was: the rule has no exception to remember, a name costs
+// nothing, and only the forks that pin a round declare it, so no other run
+// is refused anything.
+const CapabilityForkGiveUp = "fork.give-up"
+
+// SetGiveUpFloor pins n as the fewest rounds of the fix loop this run has, and
+// records the capability a run that depends on it needs. Only a fork that
+// was given a round sets it.
+func (m *Manifest) SetGiveUpFloor(n int) {
+	m.GiveUpFloor = n
+	m.Requires = addCapability(m.Requires, CapabilityForkGiveUp)
+}
+
+// GiveUpFor is the graph.give_up this run is held to, given what belay.yaml
+// says now: the larger of the two.
+//
+// The pin is a floor rather than an override. A resumed fork never has
+// fewer rounds than it was given, but graph.give_up is a limit a person may
+// raise, and raising it and resuming still raises it, as it does for any
+// run.
+func (m Manifest) GiveUpFor(live int) int {
+	return max(live, m.GiveUpFloor)
 }

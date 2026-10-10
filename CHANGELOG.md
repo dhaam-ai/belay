@@ -43,7 +43,9 @@ that only `pkg/belay` carries a compatibility promise. Everything under
   divide; it is refused with `review.mode: sonar` or `ai`, whose SonarQube
   projects would be shared by every run's candidates, and refused before
   anything is spent when `fanout.isolator` cannot serve the run's output
-  (`dircopy` on a branch, `worktree` in place). Every fanout leaves its N
+  (`dircopy` on a branch, `worktree` in place). `belay resume` refuses a run
+  that fans out once `budget.max_usd` is no longer above zero, before it
+  starts, and says what to set. Every fanout leaves its N
   candidate-run directories behind, and one that edits in place its N
   workspaces too (a branch run's promote removes its candidates' worktrees);
   belay has no command to remove them yet. ADR-0019 records the decision.
@@ -56,7 +58,9 @@ that only `pkg/belay` carries a compatibility promise. Everything under
   (`--model opus`, for plan, code and fix), or re-run a review after changing
   a setting, and pay for that step alone. A fork of a fix that had used every
   round of `graph.give_up` gets one more, since as it stood it would give up
-  again without calling the model. `--visit 2` picks the second time the step
+  again without calling the model; the round is recorded in the fork's
+  manifest, so a fork stopped part-way through it and resumed still has it.
+  `--visit 2` picks the second time the step
   ran, numbered the way `belay timeline` numbers them; without it belay takes
   the last. The original run is only ever read — not a byte of its journal,
   state or files changes — so both outcomes are there to compare. Carry the
@@ -192,8 +196,9 @@ that only `pkg/belay` carries a compatibility promise. Everything under
   such as `claude-sonnet-4-5` or one released after this belay, is priced at
   the most expensive rate it knows, marked as an estimate, with a warning
   naming it, so the budget ceiling still holds and errs towards stopping
-  early. The table is only used when the CLI does not report a call's cost
-  itself. Spend is recorded against the model that actually ran each step, so
+  early; `--dry-run` marks such a rate "(assumed)", and the warning is shown
+  without `--verbose`. The table is only used when the CLI does not report a
+  call's cost itself. Spend is recorded against the model that actually ran each step, so
   `belay timeline` shows the cheap step cheap.
 - **A run works on its own branch and never edits your checkout.** In a git
   repository, `belay run` now creates `belay/<run-id>` at the commit you are
@@ -628,6 +633,16 @@ that only `pkg/belay` carries a compatibility promise. Everything under
   `invalid-syntax`, which belay's severity table did not know, so it took the
   default, minor, and passed the gate at `review.fail_on: major`. It is a
   blocker now, as `E999` always was.
+- **belay says why the lint gate has nothing to run, instead of claiming it
+  found no project.** With `review.mode: lint` in a Python project that
+  never configured ruff, belay refused to start because it "recognises no
+  Go, Node or Python project" there, although it had recognised the project
+  and would have run its tests. It now says it found a Python project with
+  no ruff configuration, and that an empty `[tool.ruff]` table in
+  `pyproject.toml`, or a `ruff.toml`, gives the gate ruff's default rules
+  (judged only on the lines a run changes); or to set `review.mode` to
+  `sonar`. A Node project without ESLint gets the same, and a directory with
+  no project at all keeps the message it had.
 
 ### Security
 

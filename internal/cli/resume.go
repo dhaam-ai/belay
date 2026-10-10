@@ -168,6 +168,11 @@ func (p *runPlan) resumePreflight(ctx context.Context, store *state.Store) error
 	p.bindOutput(ctx, manifest)
 	p.bindPolicy(manifest)
 	p.bindFanout(manifest)
+	// A fork given one more round of its fix loop keeps it, whatever the
+	// belay.yaml in its copy says (state.Manifest.GiveUpFor). The dispatcher
+	// overlays the same floor on what the fix node reads; this is so that
+	// the plan, and a dry run of the resume, describe the run as it will go.
+	p.config.Graph.GiveUp = manifest.GiveUpFor(p.config.Graph.GiveUp)
 	// What the gate judges is the run's pin too: a dry run of a resume
 	// describes the ground truth the run was created with.
 	p.changes, p.changesRepo = manifest.Changes, nil
@@ -218,6 +223,34 @@ func (p *runPlan) bindFanout(manifest state.Manifest) {
 	// The registry and the route follow the pin, so rebuilding one without
 	// the other shows a person a graph the dispatcher is not walking.
 	p.resolveRegistry()
+	p.refuseAFanoutWithNoCeiling()
+}
+
+// refuseAFanoutWithNoCeiling refuses to continue a run whose pinned fanout
+// has no budget.max_usd to divide between its candidates.
+//
+// The fanout is pinned and the ceiling is not: limits are read live, so that
+// raising one and resuming continues a run that met it. That leaves one way
+// for belay.yaml to make a pinned fanout impossible, by setting
+// budget.max_usd to 0 after the run began (the loader accepts that together
+// with budget.on_exceed: warn, and refuses fanout.enabled with it, but a
+// resume is held to the pin, not to fanout.enabled). The fanout node would
+// pause such a run itself, with budget.ErrNoCeiling and exit 3, which is
+// safe; but only after belay has resumed it and walked back to that node,
+// and a person is owed the reason before belay does anything, beside every
+// other reason a run cannot be continued. A dry run lists it too.
+//
+// It refuses rather than warns because nothing the run could do would help:
+// a resume without a ceiling meets the same pause, having done nothing.
+func (p *runPlan) refuseAFanoutWithNoCeiling() {
+	if p.fanout == nil || p.config.Budget.MaxUSD > 0 {
+		return
+	}
+	p.block(fmt.Sprintf("this run divides budget.max_usd between its %d candidates, and belay.yaml no longer "+
+		"sets one (budget.max_usd is %s), so its fanout has nothing to divide.",
+		p.fanout.Candidates, dollars(p.config.Budget.MaxUSD)),
+		"set budget.max_usd above zero in belay.yaml, then resume; the candidates already claimed keep the share "+
+			"they were given")
 }
 
 // bindPolicy makes this plan hold the resumed run to the guardrails that run

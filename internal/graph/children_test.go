@@ -18,6 +18,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/dhaam-ai/belay/internal/config"
 	"github.com/dhaam-ai/belay/internal/graph"
 	"github.com/dhaam-ai/belay/internal/journal"
 	"github.com/dhaam-ai/belay/internal/procgroup"
@@ -1639,6 +1640,59 @@ func TestOneCancelLeavesEveryCandidateResumable(t *testing.T) {
 	}
 }
 
+// TestACandidatePausesOnCancelWhateverItsParentWasGiven: childOptions turns
+// PauseOnCancel on for every candidate run and does not consult the
+// parent's own setting, because nothing but the parent's fanout ever resumes
+// a candidate, and one ended as aborted could never be continued.
+// TestOneCancelLeavesEveryCandidateResumable drives a parent that pauses on
+// cancel too, so a candidate that inherited its parent's setting passed it;
+// this is the parent that does not.
+func TestACandidatePausesOnCancelWhateverItsParentWasGiven(t *testing.T) {
+	h := newRun(t, budgetCfg(5.00, 0), "one Ctrl-C, a parent that does not pause")
+	iso := reclaimingIsolator{newFakeIsolator(h.layout.CandidatesDir())}
+	specs := poolSpecs(h, 2)
+
+	arrived := make(chan string, len(specs))
+	code := newCandidateNode(graph.NodeCode, func(ctx context.Context, id string, _ *graph.RunContext) (graph.Result, error) {
+		arrived <- id
+		<-ctx.Done()
+		return Result{}, ctx.Err()
+	})
+
+	ctx, cancel := context.WithCancel(context.Background())
+	stopped := make(chan struct{})
+	go func() {
+		defer close(stopped)
+		_, _ = h.poolDispatcher(t, pool{
+			registry: candidateRegistry(t, code), isolator: iso, concurrency: 2, pauseOnCancel: false,
+		}, &runsCandidates{specs: specs}).Run(ctx)
+	}()
+	for range specs {
+		select {
+		case <-arrived:
+		case <-time.After(10 * time.Second):
+			t.Fatal("the candidates never reached their node")
+		}
+	}
+	cancel()
+	select {
+	case <-stopped:
+	case <-time.After(10 * time.Second):
+		t.Fatal("the interrupted run never returned")
+	}
+
+	for _, spec := range specs {
+		recs := candidateRecords(t, h, spec.ID)
+		if len(recs) < 2 {
+			t.Fatalf("%s has %d journal records, want its interrupted attempt and how its run ended", spec.ID, len(recs))
+		}
+		if last := recs[len(recs)-1]; last.Event != journal.EventRunPaused {
+			t.Errorf("%s journal ends with %v, want run_paused: a candidate ended as aborted can never be resumed",
+				spec.ID, last.Event)
+		}
+	}
+}
+
 // TestAnAdoptedEnvelopeIsNeverLoweredAndMayRise: an envelope is a
 // reservation, and part of it may already be spent, so taking it back
 // returns no money. It may rise, because the settled rule for every limit
@@ -2009,6 +2063,36 @@ func TestAResumeKillsACandidatesOrphanedProcessBeforeItsNodeRunsAgain(t *testing
 	}
 }
 
+// lostToss is a context whose cancellation the pool's feeder never sees.
+//
+// The pool's feeder stops on ctx.Done() and a worker checks ctx.Err() before
+// it admits the candidate it was handed, because the two are ready at the
+// same moment when a worker is between candidates and the runtime picks one
+// at random. A real context cannot make that pick come out the same way
+// every time, so this one models the case the worker's check exists for: the
+// feeder losing the toss. Its Done never fires, so the feeder always hands
+// the next candidate over; its Err reports the cancellation once cancel has
+// been called, as the worker sees it. That breaks the context contract on
+// purpose and only here, where the guard is the thing under test: nothing
+// derived from it would ever be cancelled.
+type lostToss struct {
+	context.Context
+	cancelled atomic.Bool
+}
+
+func newLostToss() *lostToss { return &lostToss{Context: context.Background()} }
+
+func (c *lostToss) cancel() { c.cancelled.Store(true) }
+
+func (*lostToss) Done() <-chan struct{} { return nil }
+
+func (c *lostToss) Err() error {
+	if c.cancelled.Load() {
+		return context.Canceled
+	}
+	return nil
+}
+
 // TestACancelledPoolAdmitsNoFurtherCandidate: a candidate that has not been
 // admitted must stay claimed and untouched, because that is exactly what a
 // resume adopts. Admitting one after the cancellation would copy a whole
@@ -2017,20 +2101,22 @@ func TestAResumeKillsACandidatesOrphanedProcessBeforeItsNodeRunsAgain(t *testing
 //
 // The window is the moment a worker is between candidates: the goroutine
 // feeding the pool and the cancellation are both ready, and which one the
-// runtime picks is a coin toss. So the cancellation is thrown from inside
-// the first candidate, when a worker is about to come back for the next one,
-// and there are enough candidates behind it that the toss cannot come up
-// heads every time.
+// runtime picks is a coin toss. With a real context this test could not
+// fail: the cancellation lands inside cand-01, long before its worker comes
+// back, so the feeder has always seen it and stopped (removing the worker's
+// check passed it 30 times in 30, as the mutation review found). lostToss
+// makes the toss come up the other way every time, so every candidate after
+// cand-01 is handed to a worker after the cancellation, and only the
+// worker's own check keeps it out.
 func TestACancelledPoolAdmitsNoFurtherCandidate(t *testing.T) {
 	h := newRun(t, budgetCfg(9.00, 0), "admit nothing more once it is stopping")
 	iso := newFakeIsolator(h.layout.CandidatesDir())
 	specs := poolSpecs(h, 9)
 
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	ctx := newLostToss()
 	code := newCandidateNode(graph.NodeCode, func(_ context.Context, id string, _ *graph.RunContext) (graph.Result, error) {
 		if id == "cand-01" {
-			cancel()
+			ctx.cancel()
 		}
 		return Result{Next: graph.End, Status: journal.StatusOK, Note: id}, nil
 	})
@@ -2203,34 +2289,45 @@ func (p *probingFanout) Run(ctx context.Context, rc *graph.RunContext) (graph.Re
 // tell from a candidate waiting on a fault, so it said "its run is paused, not
 // ended" and exited 0. The outcome now carries the limit the candidate's own
 // dispatcher stopped it at, and the reason its journal gives.
+//
+// The envelope holds whatever budget.on_exceed the parent run was given. A
+// parent at warn spends past its own ceiling by choice, but a candidate
+// honouring that would be N runs with no ceiling at all, so the candidate's
+// envelope is enforced as abort either way (candidateConfig).
 func TestACandidateStoppedAtALimitSaysWhich(t *testing.T) {
-	h := newRun(t, budgetCfg(5.00, 0), "stop at the envelope")
-	iso := newFakeIsolator(h.layout.CandidatesDir())
-	code := newCandidateNode(graph.NodeCode, func(context.Context, string, *graph.RunContext) (graph.Result, error) {
-		return Result{Next: graph.NodeTest, Status: journal.StatusOK, Usage: belay.Usage{USD: 1.20}}, nil
-	})
-	testNode := newCandidateNode(graph.NodeTest, finishes(0.10))
-	specs := poolSpecs(h, 1)
-	specs[0].Envelope = state.Envelope{LimitUSD: 1.00}
+	for _, onExceed := range []config.OnExceed{config.OnExceedAbort, config.OnExceedWarn} {
+		t.Run("the parent at on_exceed "+string(onExceed), func(t *testing.T) {
+			cfg := budgetCfg(5.00, 0)
+			cfg.Budget.OnExceed = onExceed
+			h := newRun(t, cfg, "stop at the envelope")
+			iso := newFakeIsolator(h.layout.CandidatesDir())
+			code := newCandidateNode(graph.NodeCode, func(context.Context, string, *graph.RunContext) (graph.Result, error) {
+				return Result{Next: graph.NodeTest, Status: journal.StatusOK, Usage: belay.Usage{USD: 1.20}}, nil
+			})
+			testNode := newCandidateNode(graph.NodeTest, finishes(0.10))
+			specs := poolSpecs(h, 1)
+			specs[0].Envelope = state.Envelope{LimitUSD: 1.00}
 
-	node := &runsCandidates{specs: specs}
-	if _, err := h.poolDispatcher(t, pool{registry: candidateRegistry(t, code, testNode), isolator: iso}, node).
-		Run(context.Background()); err != nil {
-		t.Fatalf("Run() error = %v", err)
-	}
-	o := node.outcomes[0]
-	if o.Status != state.RunStatusPaused || o.Err != nil {
-		t.Fatalf("outcome = {%v, err %v}, want a candidate paused with no fault", o.Status, o.Err)
-	}
-	var budgetErr *belay.BudgetError
-	if !errors.As(o.Stopped, &budgetErr) || !closeTo(budgetErr.LimitUSD, 1.00) {
-		t.Errorf("Stopped = %v, want the *belay.BudgetError of its $1.00 envelope", o.Stopped)
-	}
-	if !strings.Contains(o.Note, "budget ceiling reached before \"test\"") {
-		t.Errorf("Note = %q, want the reason the candidate's own journal gives", o.Note)
-	}
-	if testNode.ran("cand-01") != 0 {
-		t.Errorf("test ran %d times past the envelope", testNode.ran("cand-01"))
+			node := &runsCandidates{specs: specs}
+			if _, err := h.poolDispatcher(t, pool{registry: candidateRegistry(t, code, testNode), isolator: iso}, node).
+				Run(context.Background()); err != nil {
+				t.Fatalf("Run() error = %v", err)
+			}
+			o := node.outcomes[0]
+			if o.Status != state.RunStatusPaused || o.Err != nil {
+				t.Fatalf("outcome = {%v, err %v}, want a candidate paused with no fault", o.Status, o.Err)
+			}
+			var budgetErr *belay.BudgetError
+			if !errors.As(o.Stopped, &budgetErr) || !closeTo(budgetErr.LimitUSD, 1.00) {
+				t.Errorf("Stopped = %v, want the *belay.BudgetError of its $1.00 envelope", o.Stopped)
+			}
+			if !strings.Contains(o.Note, "budget ceiling reached before \"test\"") {
+				t.Errorf("Note = %q, want the reason the candidate's own journal gives", o.Note)
+			}
+			if testNode.ran("cand-01") != 0 {
+				t.Errorf("test ran %d times past the envelope", testNode.ran("cand-01"))
+			}
+		})
 	}
 }
 
