@@ -1,7 +1,7 @@
 # ADR-0014: Per-node model routing, and the policy gate
 
 ## Status
-Accepted, amended 2026-10-09 (the gate judges what the workspace says changed, and promote commits exactly that; policy layers combine to the most restrictive rule set)
+Accepted, amended 2026-10-09 (the gate judges what the workspace says changed, and promote commits exactly that; policy layers combine to the most restrictive rule set; the Claude Code backend prices a model it does not list instead of refusing it)
 
 ## Context
 
@@ -127,7 +127,7 @@ Best-of-N must not be the way around a guardrail. Without this, the route past a
 - **A guardrail cannot silently do nothing.** An unusable rule is refused when the configuration loads; a rule belay cannot evaluate at gate time is no verdict rather than a pass; and a gate with no edge into it is impossible, because the node and the edge are one wiring option.
 - **A run is judged against the rules it started with**, so the verdict is reproducible and a resume cannot change it. `belay run --dry-run` prints every rule and says which ones end a run.
 - **The same `budget.max_usd` buys a longer run**, because the expensive model is on the steps that need it.
-- **A wrong model stops a run before it spends**, not in the middle of it, and spend is recorded against the model that actually ran each step.
+- **A wrong model stops a run before it spends**, not in the middle of it, and spend is recorded against the model that actually ran each step. (Amended 2026-10-09: the Claude Code backend no longer refuses a model its price table does not list; it prices it at the highest rate it knows, as the Decision's amendment says, so only a backend that refuses a model stops the run here.)
 - **One quality contract, not two.** Everything downstream of a gate — the blackboard, the repair prompt, the archived report — treats a policy violation and a lint finding the same way.
 - **A repair is verified like any other change**, which closes a hole in `write`'s containment guarantee that had nothing to do with policy.
 

@@ -1,7 +1,7 @@
 # ADR-0007: Budget Ledger and Cost Caps on Day One, Not a "Going Further" Extra
 
 ## Status
-Accepted
+Accepted, amended 2026-09-19 and 2026-10-09 (see the amendments at the end)
 
 ## Context
 Fanout multiplies cost by N candidates. An AI review phase can exceed $10 per run. A user who misconfigures belay or runs it in a tight loop could silently spend hundreds of dollars before noticing.

@@ -1,7 +1,9 @@
 # ADR-0005: Claude Code as the Only Shipped Backend in v0.1, with AgentBackend Exported
 
 ## Status
-Accepted
+Accepted, amended 2026-10-09 (the second backend was dropped)
+
+*Amended 2026-10-09:* the slice that would have added a second backend, Codex, for which ADR-0013 was reserved, was dropped on 2026-09-23. Claude Code remains the only backend, so "CLI-agnostic" is still a design promise proven by one implementation, and the README, docs/architecture.md and docs/adapters.md say so. The interface is in `pkg/belay` (`agent.go`), not `pkg/agent/` as the Decision below says.
 
 ## Context
 Belay targets three agent backends in the product vision: Claude Code (Anthropic), Codex (GitHub), and Gemini (Google). The challenge allows any backend. But v0.1 ships a product, not a research prototype, so a choice had to be made: ship all three, ship one, or ship one with infrastructure for others?

@@ -1,7 +1,7 @@
 # ADR-0019: Fanout candidates execute as concurrent candidate runs, each with its own journal, blackboard and budget envelope
 
 ## Status
-Accepted
+Accepted, amended 2026-10-09 (a fanout whose candidates stop at a limit pauses at exit 3; the parent records its candidates' running total; `fastest` counts only settled attempts)
 
 It corrects, without rewriting them, two earlier descriptions: ADR-0003's picture of one journal holding a record per node result "× fanout width", and the claim in `docs/architecture.md` that each candidate runs "its own subgraph" with "no synchronization until join". It builds on ADR-0002 (the dispatcher owns persistence), ADR-0004 and ADR-0012 (how a candidate's workspace is made), ADR-0007 as amended on 2026-09-19 (every step is charged what it spent; reaching the ceiling pauses), ADR-0011 (a control field names a capability) and ADR-0014 (the policy pin).
 

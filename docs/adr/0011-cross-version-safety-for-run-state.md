@@ -1,7 +1,9 @@
 # ADR-0011: Cross-version safety for run state
 
 ## Status
-Accepted
+Accepted, amended 2026-10-09 (the capabilities that now exist)
+
+*Amended 2026-10-09:* "The set of known capabilities is empty today and nothing sets `requires`" (Decision, below) no longer holds. Four capabilities exist, each set only by the call that records its field: `output.branch` on the manifest of a run whose output is a branch (`Manifest.SetOutput`), `policy.gate` on the manifest of a run with a policy (`Manifest.SetPolicy`, ADR-0014), `fanout.candidate-runs` on the manifest of a run that fans out and of each of its candidate runs (`Manifest.SetFanout`, `Manifest.SetCandidate`, ADR-0019), and `plan.regenerate` on a state.json that carries a request for a new plan not yet served. A run that edits in place with none of these still requires nothing.
 
 ## Context
 A run lives on disk as two JSON documents: manifest.json (identity, lifecycle, budget ledger) and state.json (the blackboard). Both carry a `schema_version`, and every release so far, v0.1.0 to v0.1.4, reads version 1 and refuses any other. Neither is decoded with `DisallowUnknownFields`: a key the binary does not know is dropped without a word.
