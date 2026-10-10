@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"io"
 	"os"
 	"path/filepath"
 	"slices"
@@ -1204,4 +1205,74 @@ func TestTheQueueReportsWhereAGoalsRunIsNow(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestQueueDriverObservesWhetherTheGateAsked: Observe is how a worker reads
+// a goal's run off disk -- after a reboot, or when it comes back to a goal it
+// claimed -- and whether the approve gate asked decides whether the goal is
+// parked for a person or still in hand. A run paused at the gate is not
+// always waiting on one: a Ctrl-C while the gate ran pauses it there too,
+// with nobody shown anything. Every other test reaches the queue's decisions
+// through Drive, which works the answer out for itself, so nothing computed
+// Observe's.
+func TestQueueDriverObservesWhetherTheGateAsked(t *testing.T) {
+	ctrlCAtTheGate := func(t *testing.T) *state.Store {
+		t.Helper()
+		plan, err := resolve(resolveRequest{workspace: goWorkspace(t), logger: quietLogger()})
+		if err != nil {
+			t.Fatalf("resolve: %v", err)
+		}
+		ctx, cancel := context.WithCancel(t.Context())
+		defer cancel()
+		registry := graph.NewRegistry()
+		registry.MustRegister(planWriter{body: "# Plan\n\nwrite a test\n"}, pressesCtrlC{name: graph.NodeApprove, cancel: cancel})
+		plan.registry = registry
+		store := seedRunDir(t, plan, "add tests")
+		if _, err := dispatchOnce(ctx, plan, store, false, pauseOnCancel); err != nil {
+			t.Fatalf("dispatchOnce: %v", err)
+		}
+		return store
+	}
+	askedAtTheGate := func(t *testing.T) *state.Store {
+		t.Helper()
+		_, store := pausedAtTheGateForReal(t, firstPlan)
+		return store
+	}
+
+	for _, tc := range []struct {
+		name string
+		run  func(t *testing.T) *state.Store
+		want queue.RunView
+	}{
+		{name: "paused at the gate, which asked", run: askedAtTheGate,
+			want: queue.RunView{Exists: true, Status: state.RunStatusPaused, GateAsked: true}},
+		{name: "paused at the gate by a Ctrl-C", run: ctrlCAtTheGate,
+			want: queue.RunView{Exists: true, Status: state.RunStatusPaused, GateAsked: false}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			store := tc.run(t)
+			layout := store.Layout()
+			driver := newQueueDriver(&ui{out: io.Discard, err: io.Discard}, layout.WorkspaceDir(), "", "")
+
+			got, err := driver.Observe(queue.Entry{RunID: layout.RunID(), Dir: layout.WorkspaceDir()})
+			if err != nil {
+				t.Fatalf("Observe: %v", err)
+			}
+			if got != tc.want {
+				t.Errorf("Observe = %+v, want %+v", got, tc.want)
+			}
+		})
+	}
+
+	t.Run("a goal with no run yet", func(t *testing.T) {
+		ws := goWorkspace(t)
+		driver := newQueueDriver(&ui{out: io.Discard, err: io.Discard}, ws, "", "")
+		got, err := driver.Observe(queue.Entry{RunID: "20260101T000000Z-000000000000", Dir: ws})
+		if err != nil {
+			t.Fatalf("Observe: %v", err)
+		}
+		if got != (queue.RunView{}) {
+			t.Errorf("Observe = %+v, want the zero view of a run that does not exist", got)
+		}
+	})
 }
