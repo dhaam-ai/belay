@@ -378,9 +378,10 @@ that only `pkg/belay` carries a compatibility promise. Everything under
 - **A paused fanout no longer fails for good on a resume it cannot carry
   out yet.** Resumed after `budget.max_usd` was set to 0, a run that fans out
   ended failed, with every candidate it had paid for out of reach; so did one
-  whose run directory could not be read at that moment. The first now pauses
-  at exit 3 and says to set `budget.max_usd` above zero; the second pauses
-  with the fault in its note, and resuming tries again.
+  whose run directory could not be read at that moment. `belay resume` now
+  refuses the first before it starts, and says to set `budget.max_usd` above
+  zero (the run itself pauses at exit 3 if it gets that far); the second
+  pauses with the fault in its note, and resuming tries again.
 - **A fanout whose candidates stop at a limit says so, and exits 3.** A
   candidate that met its share of `budget.max_usd`, `graph.max_steps` or
   `graph.node_timeout`, each of which applies to every candidate, left the

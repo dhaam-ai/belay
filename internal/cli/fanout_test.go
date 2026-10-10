@@ -3,6 +3,7 @@ package cli
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"os"
@@ -203,6 +204,58 @@ fanout:
 			}
 			if warned := fanoutDriftWarned(resumed.warnings); warned != tc.wantWarned {
 				t.Errorf("warned about fanout drift = %v, want %v; warnings: %v", warned, tc.wantWarned, resumed.warnings)
+			}
+		})
+	}
+}
+
+// TestResumingAFanoutWithNoCeilingIsRefusedBeforeItStarts: a run's fanout
+// is pinned, but budget.max_usd is read live, so belay.yaml can drop the
+// ceiling a fanout divides between its candidates after the run began. The
+// fanout node pauses such a run (budget.ErrNoCeiling, exit 3), which is safe,
+// but only once belay has resumed it and walked back to that node. The
+// refusal belongs before the resume, beside every other reason a run cannot
+// be continued, naming the setting -- in the dry run as in a real resume. A
+// run that does not fan out divides nothing, and is not refused.
+func TestResumingAFanoutWithNoCeilingIsRefusedBeforeItStarts(t *testing.T) {
+	const noCeiling = "version: 1\noutput:\n  mode: in_place\nbudget:\n  max_usd: 0\n  on_exceed: warn\n"
+	for _, tc := range []struct {
+		name        string
+		created     string
+		wantRefused bool
+	}{
+		{name: "a run that fans out", created: fanoutConfig, wantRefused: true},
+		{name: "a run that does not", created: singleConfig, wantRefused: false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ws := goWorkspace(t)
+			writeConfig(t, ws, tc.created)
+			plan, err := resolve(resolveRequest{workspace: ws, logger: quietLogger()})
+			if err != nil {
+				t.Fatalf("resolve: %v", err)
+			}
+			const runID = "20260101T000000Z-abcdef123456"
+			if _, err := createRun(context.Background(), plan, runSpec{Workspace: ws, RunID: runID, Goal: "add tests"}); err != nil {
+				t.Fatalf("createRun: %v", err)
+			}
+			writeConfig(t, ws, noCeiling)
+
+			out, _, err := runCLI(t, "--dry-run", "resume", runID, "--workspace", ws)
+			refused := strings.Contains(out, "belay would refuse to start this run")
+			if refused != tc.wantRefused {
+				t.Fatalf("refused = %v, want %v (error %v):\n%s", refused, tc.wantRefused, err, out)
+			}
+			if !tc.wantRefused {
+				return
+			}
+			for _, want := range []string{"budget.max_usd", "3 candidates", "set budget.max_usd above zero"} {
+				if !strings.Contains(out, want) {
+					t.Errorf("the refusal does not say %q:\n%s", want, out)
+				}
+			}
+			var exit *ExitError
+			if !errors.As(err, &exit) || exit.Code != graph.ExitFailed {
+				t.Errorf("error = %#v, want an ExitError with code %d", err, graph.ExitFailed)
 			}
 		})
 	}
