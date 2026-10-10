@@ -6,7 +6,7 @@ All notable changes to belay are recorded here. The format follows
 that only `pkg/belay` carries a compatibility promise. Everything under
 `internal/` may change in any release.
 
-## Unreleased
+## v0.1.4 — 2026-10-10
 
 ### Added
 
@@ -198,8 +198,8 @@ that only `pkg/belay` carries a compatibility promise. Everything under
   naming it, so the budget ceiling still holds and errs towards stopping
   early; `--dry-run` marks such a rate "(assumed)", and the warning is shown
   without `--verbose`. The table is only used when the CLI does not report a
-  call's cost itself. Spend is recorded against the model that actually ran each step, so
-  `belay timeline` shows the cheap step cheap.
+  call's cost itself. Spend is recorded against the model that actually ran
+  each step, so `belay timeline` shows the cheap step cheap.
 - **A run works on its own branch and never edits your checkout.** In a git
   repository, `belay run` now creates `belay/<run-id>` at the commit you are
   on, checks it out in its own worktree under `.belay/runs/<run-id>/`, and
@@ -317,21 +317,21 @@ that only `pkg/belay` carries a compatibility promise. Everything under
   accepts `auto`, `worktree` or `dircopy` and rejects anything else by name.
   The default changes from `dircopy` to `auto`, which keeps it in step with
   `output.mode`.
-- **belay v0.1.x can no longer resume a run this version has saved.** belay
-  ignores fields it does not know in a run's state.json and manifest.json, and
-  saves the run without them. Once runs carry settings that change what they
-  do, an older belay resuming one would drop those settings without a word.
-  Both files now carry a `requires` list naming what a run depends on, and a
-  belay that lacks something on the list refuses the run by name and says to
-  upgrade. A run on a branch, a run with a policy, a run that fans out (and
-  each of its candidate runs), and a plan waiting to be regenerated each name
-  what they need; a run that edits in place with none of these requires
-  nothing. v0.1.x never reads the list, so both files also move to schema
-  version 2, which v0.1.x refuses: its `belay runs` shows such a run as
-  "unsupported manifest version 2", and its `belay resume` does not offer it.
-  Runs started by v0.1.x still resume, and are saved at version 2 from then
-  on. With two belay installs, resume runs with the newer one. ADR-0011
-  records the decision.
+- **belay v0.1.3 and earlier can no longer resume a run this version has
+  saved.** belay ignores fields it does not know in a run's state.json and
+  manifest.json, and saves the run without them. Once runs carry settings
+  that change what they do, an older belay resuming one would drop those
+  settings without a word. Both files now carry a `requires` list naming what
+  a run depends on, and a belay that lacks something on the list refuses the
+  run by name and says to upgrade. A run on a branch, a run with a policy, a
+  run that fans out (and each of its candidate runs), and a plan waiting to be
+  regenerated each name what they need; a run that edits in place with none
+  of these requires nothing. v0.1.3 and earlier never read the list, so both
+  files also move to schema version 2, which they refuse: their `belay runs`
+  shows such a run as "unsupported manifest version 2", and their
+  `belay resume` does not offer it. Runs started by v0.1.3 or earlier still
+  resume, and are saved at version 2 from then on. With two belay installs,
+  resume runs with the newer one. ADR-0011 records the decision.
 - **A run belay stops at one of its own limits is paused, not ended.**
   Reaching `budget.max_usd` or `budget.max_tokens`, running out of
   `graph.max_steps`, or overrunning `graph.node_timeout` used to end the run
@@ -643,6 +643,16 @@ that only `pkg/belay` carries a compatibility promise. Everything under
   (judged only on the lines a run changes); or to set `review.mode` to
   `sonar`. A Node project without ESLint gets the same, and a directory with
   no project at all keeps the message it had.
+- **The lint gate no longer passes code in a directory whose new files git
+  ignores.** v0.1.3 checked only that HEAD holds something in the workspace.
+  With a rule such as `ws/*` plus `!ws/.gitkeep`, HEAD holds `.gitkeep`, but
+  git ignores every file a run adds there. Their findings were hidden and the
+  gate passed. belay now also asks git whether a new file in the workspace
+  would be ignored, and counts every finding if so.
+- The docs now also list what else scoping by line misses: changes inside a
+  nested repository or submodule, and new files git ignores by name, such as
+  under a `*_gen.go` rule. The troubleshooting steps now show both
+  golangci-lint commands belay can run.
 
 ### Security
 
@@ -662,24 +672,6 @@ that only `pkg/belay` carries a compatibility promise. Everything under
   `--json` output of `timeline`, `runs` and `queue list` keeps every string
   exactly as recorded, and now escapes the DEL and C1 controls that
   encoding/json left raw, so it is safe to print as well.
-
-## v0.1.4 — 2026-09-17
-
-### Fixed
-
-- **The lint gate no longer passes code in a directory whose new files git
-  ignores.** v0.1.3 checked only that HEAD holds something in the workspace.
-  With a rule such as `ws/*` plus `!ws/.gitkeep`, HEAD holds `.gitkeep`, but
-  git ignores every file a run adds there. Their findings were hidden and the
-  gate passed. belay now also asks git whether a new file in the workspace
-  would be ignored, and counts every finding if so.
-- The docs now also list what else scoping by line misses: changes inside a
-  nested repository or submodule, and new files git ignores by name, such as
-  under a `*_gen.go` rule. The troubleshooting steps now show both
-  golangci-lint commands belay can run.
-
-### Security
-
 - **Each step's agent now gets only the tools belay allows it.** belay passed
   a step's tool list to Claude Code as `--allowedTools`, which only
   pre-approves those tools. Every other built-in tool stayed available, and
