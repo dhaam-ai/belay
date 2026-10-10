@@ -168,6 +168,11 @@ func (p *runPlan) resumePreflight(ctx context.Context, store *state.Store) error
 	p.bindOutput(ctx, manifest)
 	p.bindPolicy(manifest)
 	p.bindFanout(manifest)
+	// A fork given one more round of its fix loop keeps it, whatever the
+	// belay.yaml in its copy says (state.Manifest.GiveUpFor). The dispatcher
+	// overlays the same floor on what the fix node reads; this is so that
+	// the plan, and a dry run of the resume, describe the run as it will go.
+	p.config.Graph.GiveUp = manifest.GiveUpFor(p.config.Graph.GiveUp)
 	// What the gate judges is the run's pin too: a dry run of a resume
 	// describes the ground truth the run was created with.
 	p.changes, p.changesRepo = manifest.Changes, nil

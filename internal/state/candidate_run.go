@@ -216,7 +216,8 @@ func NewCandidateRunLayout(parent Layout, id string) (Layout, error) {
 // assembled, means no node has to remember to ask the manifest, and a node
 // that reads the live value by accident cannot be written.
 //
-// It overlays the graph's SHAPE and the run's guardrails, and nothing else.
+// It overlays the graph's SHAPE, the run's guardrails and a fork's pinned
+// round of the fix loop (as a floor under graph.give_up), and nothing else.
 // The dispatcher's limits —
 // budget.max_usd, budget.max_tokens, graph.max_steps and graph.node_timeout
 // — are deliberately read live, so that raising one and resuming continues a
@@ -233,6 +234,9 @@ func (m Manifest) PinnedConfig(cfg config.Config) config.Config {
 	// the change against a belay.yaml somebody may have rewritten since the
 	// run began -- and clearing it here means such a node cannot be written.
 	cfg.Policy = config.Policy{}
+	// A fork's round of the fix loop is a floor under the live
+	// graph.give_up, not a value in place of it (GiveUpFor).
+	cfg.Graph.GiveUp = m.GiveUpFor(cfg.Graph.GiveUp)
 	if m.Fanout != nil {
 		cfg.Fanout.Enabled = true
 		cfg.Fanout.Candidates = m.Fanout.Candidates

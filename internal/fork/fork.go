@@ -254,6 +254,10 @@ type Spec struct {
 	// Deviations. The caller dispatches the fork under it, and Create writes
 	// it into the fork's manifest.
 	Config config.Config
+	// GiveUp is the round of the fix loop Prepare gave the fork (see
+	// noteGiveUp), and zero when it gave none. Create pins it in the fork's
+	// manifest, so a resumed fork keeps it (state.CapabilityForkGiveUp).
+	GiveUp int
 
 	request Request
 	// plan is the plan to give the fork, or nil when the visit had none or it
@@ -348,6 +352,11 @@ func Prepare(ctx context.Context, req Request) (*Spec, error) {
 // allowance again -- and the difference is listed with the others, before
 // anything is spent.
 //
+// The round is pinned in the fork's manifest (Spec.GiveUp). The fork's
+// belay.yaml is the source's, so a fork interrupted during that round and
+// resumed from its copy would otherwise read graph.give_up from the file
+// again, find every round used, and give up without calling the agent.
+//
 // A visit with rounds left is forked under the configuration it was given:
 // it never reaches the cap, and a raised one would be a difference with no
 // reason.
@@ -357,6 +366,7 @@ func (s *Spec) noteGiveUp() {
 		return
 	}
 	s.Config.Graph.GiveUp = used + 1
+	s.GiveUp = s.Config.Graph.GiveUp
 	s.note("%s found every round of the fix loop used (%d), so it gave up without calling the agent; the fork "+
 		"gives it one more: graph.give_up is %d for the fork", s.label(), used, s.Config.Graph.GiveUp)
 }

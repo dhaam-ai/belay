@@ -10,6 +10,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strings"
 	"testing"
@@ -407,5 +408,46 @@ func TestAForkRecordsThatItCanJudgeOnlyTheAgentsReport(t *testing.T) {
 	want := state.Changes{From: state.ChangesReported, Why: fork.Unrecorded}
 	if man.Changes == nil || *man.Changes != want {
 		t.Errorf("fork manifest Changes = %+v, want %+v", man.Changes, want)
+	}
+}
+
+// TestAForkPinsTheRoundItWasGiven: a fork of a fix visit that used every
+// round of its loop runs under graph.give_up one above the rounds used
+// (TestPrepareGivesAFixThatGaveUpOneMoreRound). The round is the fork's own
+// decision, not anything its copy's belay.yaml says, so it is pinned in the
+// fork's manifest with the capability a run depending on it needs: resumed
+// after a Ctrl-C or a crash, the fork keeps it. A fork of a visit with
+// rounds left was given nothing, and pins nothing.
+func TestAForkPinsTheRoundItWasGiven(t *testing.T) {
+	tests := []struct {
+		name      string
+		attempts  int
+		wantFloor int
+	}{
+		{name: "every round used", attempts: 3, wantFloor: 4},
+		{name: "rounds left", attempts: 1, wantFloor: 0},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			src := newSource(t)
+			src.rewriteSnapshot(t, graph.NodeFix, 2, func(s *state.Snapshot) { s.State.Fix.Attempts = tt.attempts })
+			spec := prepare(t, src, graph.NodeFix, 2)
+
+			f, err := spec.Create(context.Background(), forkID, copies(t, src), forkedAt)
+			if err != nil {
+				t.Fatalf("Create() error = %v", err)
+			}
+			man, err := state.LoadManifest(f.Layout.ManifestPath())
+			if err != nil {
+				t.Fatalf("LoadManifest: %v", err)
+			}
+			if man.GiveUpFloor != tt.wantFloor {
+				t.Errorf("the fork pins graph.give_up %d, want %d", man.GiveUpFloor, tt.wantFloor)
+			}
+			if required := slices.Contains(man.Requires, state.CapabilityForkGiveUp); required != (tt.wantFloor > 0) {
+				t.Errorf("the fork requires %q = %v, want %v; requires %v",
+					state.CapabilityForkGiveUp, required, tt.wantFloor > 0, man.Requires)
+			}
+		})
 	}
 }

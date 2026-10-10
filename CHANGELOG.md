@@ -499,7 +499,8 @@ that only `pkg/belay` carries a compatibility promise. Everything under
   fix step gave up again without calling anything, and `--model` changed
   nothing. A fork of such a fix now gets one more round, and says so with the
   other differences before it spends anything; nothing in `belay.yaml` needs
-  to change.
+  to change. The round is recorded in the fork's manifest, so a fork stopped
+  part-way through it and resumed still has it.
 - **belay says what it warns about on real runs, not only under `--dry-run`.**
   Uncommitted work a branch run leaves out, a resumed run's settings
   disagreeing with `belay.yaml`, a credential belay cannot see: each was

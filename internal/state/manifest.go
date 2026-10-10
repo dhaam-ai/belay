@@ -263,6 +263,11 @@ type Manifest struct {
 	// before belay recorded it, which is read as the agent's report. Set it
 	// with SetChanges.
 	Changes *Changes `json:"changes,omitempty"`
+	// GiveUpFloor is the fewest rounds of the fix loop this run has, pinned by a
+	// fork that was given one more round than the visit it re-runs had used,
+	// and zero for every other run. Set it with SetGiveUpFloor; see
+	// CapabilityForkGiveUp and GiveUpFor.
+	GiveUpFloor int `json:"give_up_floor,omitempty"`
 }
 
 // ArchivedPlan is where a run files its approved plan once it completes
